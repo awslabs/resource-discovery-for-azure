@@ -163,7 +163,7 @@ if ($Samples.Count -gt 0)
 # resource ids through different dictionaries, so a per-VM join is impossible in
 # an obfuscated report. Counts of distinct tokens are preserved either way.
 $VmBilling = $null
-if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $ConsumptionFile -PathType Leaf))
+if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -LiteralPath $ConsumptionFile -PathType Leaf))
 {
     $RunningVmCount = 0
     $VmRecords = $Inventory.VirtualMachines
@@ -182,7 +182,7 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $C
     $HasConsumptionData = $false
     try
     {
-        $Consumption = @(Import-Csv -Path $ConsumptionFile -ErrorAction Stop)
+        $Consumption = @(Import-Csv -LiteralPath $ConsumptionFile -ErrorAction Stop)
         $HasConsumptionData = ($Consumption.Count -gt 0)
         $BilledVmCount = (@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
     }

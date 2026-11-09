@@ -178,9 +178,9 @@ function New-BarChart
 # where case is ignored the flipped name finds the same item, which the
 # folder lists once; where it is kept, it finds nothing, or a second item that
 # the listing shows. In a folder with no name to probe it creates one empty
-# probe file and removes it again (it is called on folders this module writes
-# to: -OutputDirectory and the report folders a rebuild wrote; those hold
-# files, so no probe file is made there). When nothing can be probed, or
+# probe file and removes it again. It is called on folders this module writes
+# to: -OutputDirectory (a new one is empty, so it gets the probe file) and the
+# report folders a rebuild wrote (they hold files). When nothing can be probed, or
 # the listing cannot be read, the system's default: exact on Linux, case aside on Windows and macOS.
 function Get-RdaPathComparer
 {
@@ -271,7 +271,9 @@ function Get-RdaPhysicalPath
         $Current = [System.IO.Path]::Combine($Current, $Part)
         if (-not $script:RdaCanResolveLinks)
         {
-            if ((Get-Item -LiteralPath $Current -Force -ErrorAction SilentlyContinue).LinkType -in 'SymbolicLink', 'Junction')
+            # A part that does not exist yet is no link (read safely under strict mode).
+            $Item = Get-Item -LiteralPath $Current -Force -ErrorAction SilentlyContinue
+            if ($null -ne $Item -and $Item.LinkType -in 'SymbolicLink', 'Junction')
             {
                 throw ('{0} is a link, which this PowerShell cannot follow (7.2 or later can). Use PowerShell 7.2 or later, or give a path without links.' -f $Current)
             }
@@ -497,7 +499,7 @@ function New-RdaAllSubHtmlSummary
     $ObfuscationStatus = 'identifiable'
     if ($Samples.Count -gt 0)
     {
-        $ObfHits = ($Samples | Where-Object { $_ -match $ObfPattern }).Count
+        $ObfHits = @($Samples | Where-Object { $_ -match $ObfPattern }).Count
         if ($ObfHits -gt ($Samples.Count * 0.7)) { $ObfuscationStatus = 'obfuscated' }
     }
 
@@ -911,7 +913,7 @@ function New-RdaAllSubHtmlSummaryFromZip
             # A report folder already there that is a link or junction would take
             # the writes outside -OutputDirectory: stop before anything is written.
             # (Only a real link: a OneDrive or dedup folder is a reparse point too.)
-            if ((Get-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue).LinkType -in 'SymbolicLink', 'Junction')
+            if (@(Get-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue | Where-Object { $_.LinkType -in 'SymbolicLink', 'Junction' }).Count -gt 0)
             {
                 throw ('New-RdaAllSubHtmlSummaryFromZip: {0} is a link or junction; a report folder must be a real folder in -OutputDirectory.' -f $Dest)
             }
@@ -976,7 +978,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 # A report folder already there that is a link or junction would take
                 # the writes outside -OutputDirectory: stop before anything is written.
                 # (Only a real link: a OneDrive or dedup folder is a reparse point too.)
-                if ((Get-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue).LinkType -in 'SymbolicLink', 'Junction')
+                if (@(Get-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue | Where-Object { $_.LinkType -in 'SymbolicLink', 'Junction' }).Count -gt 0)
                 {
                     throw ('New-RdaAllSubHtmlSummaryFromZip: {0} is a link or junction; a report folder must be a real folder in -OutputDirectory.' -f $Dest)
                 }

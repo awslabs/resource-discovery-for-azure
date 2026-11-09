@@ -1393,3 +1393,35 @@ Describe 'New-RdaAllSubHtmlSummary -ReportFiles by folder and file name, and the
         $Said | Should -BeLike ('*File size: {0:N0} bytes*' -f $Size)
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip under strict mode, and the real scripts from a repo folder with brackets' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'rebuilds into a new folder under Set-StrictMode -Version Latest (<Case>)' -ForEach @(@{ Case = 'links followed' }, @{ Case = 'links not followable' }) {
+        $Out = Join-Path $script:TmpRoot ('strict-' + ($Case -replace ' ', '-'))
+        $Saved = $script:RdaCanResolveLinks
+        if ($Case -eq 'links not followable') { $script:RdaCanResolveLinks = $false }
+        try
+        {
+            Set-StrictMode -Version Latest
+            { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -PackageZip 6>$null } | Should -Not -Throw
+        }
+        finally { Set-StrictMode -Off; $script:RdaCanResolveLinks = $Saved }
+        Test-Path -LiteralPath ($Out + '.zip') -PathType Leaf | Should -BeTrue
+    }
+
+    It 'runs Build-MainSummaryFromZip.ps1 and the real renderer from a repo folder with brackets' {
+        $Tree = Join-Path $script:TmpRoot 'repo[3]'
+        [void][System.IO.Directory]::CreateDirectory($Tree)
+        foreach ($Part in 'Build-MainSummaryFromZip.ps1', 'Extension', 'Functions', 'Version.json')
+        {
+            $From = Join-Path $script:RepoRoot $Part
+            if (Test-Path -LiteralPath $From) { Copy-Item -LiteralPath $From -Destination (Join-Path $Tree $Part) -Recurse -Force }
+        }
+        $Out = Join-Path $script:TmpRoot 'repo-bracket-out'
+        $Said = & (Join-Path $Tree 'Build-MainSummaryFromZip.ps1') -InputZip $script:InputZip -OutputDirectory $Out 6>&1 2>&1 | Out-String
+        Test-Path -LiteralPath (Join-Path $Out 'MainSummary.html') -PathType Leaf | Should -BeTrue
+        $Said | Should -Not -BeLike '*Re-render skipped*'
+        $Said | Should -Not -BeLike '*not found*'
+    }
+}

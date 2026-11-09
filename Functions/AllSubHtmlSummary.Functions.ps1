@@ -289,7 +289,7 @@ function New-RdaAllSubHtmlSummary
     $ObfuscationStatus = 'identifiable'
     if ($Samples.Count -gt 0)
     {
-        $ObfHits = ($Samples | Where-Object { $_ -match $ObfPattern }).Count
+        $ObfHits = @($Samples | Where-Object { $_ -match $ObfPattern }).Count
         if ($ObfHits -gt ($Samples.Count * 0.7)) { $ObfuscationStatus = 'obfuscated' }
     }
 
@@ -299,7 +299,8 @@ function New-RdaAllSubHtmlSummary
     $IsObfuscated = $Obfuscated.IsPresent -or ($ObfuscationStatus -eq 'obfuscated')
 
     $SubReports = @($SubReports | Sort-Object -Property Total -Descending)
-    $RunTotalResources = [int](($SubReports | Measure-Object -Property Total -Sum).Sum)
+    # A plain sum: 0 with no reports, also under strict mode.
+    $RunTotalResources = 0; foreach ($SubRow in $SubReports) { $RunTotalResources += [int]$SubRow.Total }
     $SubCount = $SubReports.Count
     $EmptyCount = @($SubReports | Where-Object { $_.Total -eq 0 }).Count
 
@@ -392,9 +393,11 @@ function New-RdaAllSubHtmlSummary
     # skipped for sign-in. The banner does not count a sign-in skip ('(auth)'
     # entry), but its row is marked too. The folder ties an entry to its row:
     # under -Obfuscate the row's name is a token, so a name cannot.
-    $ConsumpFolders = @(@($ConsumptionFailedSubs) | Where-Object { $_ } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $ConsumpFolders = @(@($ConsumptionFailedSubs) | Where-Object { $_ -and $_.PSObject.Properties['ReportFolder'] } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    # An entry without a ReportFolder (an older caller) ties to no row, also
+    # under strict mode.
     # The same for metrics skipped because the sign-in could not be refreshed.
-    $MetricsFolders = @(@($MetricsFailedSubs) | Where-Object { $_ } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $MetricsFolders = @(@($MetricsFailedSubs) | Where-Object { $_ -and $_.PSObject.Properties['ReportFolder'] } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
     # Per-subscription table.
     $Rows = New-Object System.Text.StringBuilder

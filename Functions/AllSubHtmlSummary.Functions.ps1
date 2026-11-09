@@ -178,9 +178,10 @@ function New-BarChart
 # where case is ignored the flipped name finds the same item, which the
 # folder lists once; where it is kept, it finds nothing, or a second item that
 # the listing shows. In a folder with no name to probe it creates one empty
-# probe file and removes it again (the folders it is called on are the ones
-# it writes to). When nothing can be probed, or the listing cannot be read,
-# the system's default: exact on Linux, case aside on Windows and macOS.
+# probe file and removes it again (it is called on folders this module writes
+# to: -OutputDirectory and the report folders a rebuild wrote; those hold
+# files, so no probe file is made there). When nothing can be probed, or
+# the listing cannot be read, the system's default: exact on Linux, case aside on Windows and macOS.
 function Get-RdaPathComparer
 {
     param([string]$Path)
@@ -422,7 +423,7 @@ function New-RdaAllSubHtmlSummary
         {
             $Parent = [System.IO.Path]::GetDirectoryName($F)
             if (-not $AllowedFiles.ContainsKey($Parent)) { $AllowedFiles[$Parent] = New-Object System.Collections.Generic.List[string] }
-            $AllowedFiles[$Parent].Add($F)
+            $AllowedFiles[$Parent].Add([System.IO.Path]::GetFileName($F))
         }
     }
     # Only the folders -ReportFolders names, when given.
@@ -436,13 +437,19 @@ function New-RdaAllSubHtmlSummary
 
     foreach ($Folder in $Folders)
     {
+        # The folder found as the run folder compares names; its file names
+        # as the folder compares them (asked only of a folder with files).
         $FolderAllowed = $null
         if ($null -ne $AllowedFiles)
         {
-            $FolderAllowed = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $Folder.FullName))
-            if ($AllowedFiles.ContainsKey($Folder.FullName)) { foreach ($F in $AllowedFiles[$Folder.FullName]) { [void]$FolderAllowed.Add($F) } }
+            if ($AllowedFiles.ContainsKey($Folder.FullName))
+            {
+                $FolderAllowed = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $Folder.FullName))
+                foreach ($F in $AllowedFiles[$Folder.FullName]) { [void]$FolderAllowed.Add($F) }
+            }
+            else { $FolderAllowed = [System.Collections.Generic.HashSet[string]]::new() }
         }
-        $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $null -eq $FolderAllowed -or $FolderAllowed.Contains($_.FullName) } | Select-Object -First 1
+        $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $null -eq $FolderAllowed -or $FolderAllowed.Contains($_.Name) } | Select-Object -First 1
         if ($null -eq $InvFile) { continue }
         try
         {
@@ -479,7 +486,7 @@ function New-RdaAllSubHtmlSummary
         if (-not $SubName) { $SubName = '(name unavailable - 0 resources)' }
 
         $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike '*_revealed*' -and ($null -eq $FolderAllowed -or $FolderAllowed.Contains($_.FullName)) } | Select-Object -First 1
+            Where-Object { $_.Name -notlike '*_revealed*' -and ($null -eq $FolderAllowed -or $FolderAllowed.Contains($_.Name)) } | Select-Object -First 1
         # Relative link so the summary travels with the report folder.
         $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
 

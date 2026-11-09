@@ -1364,3 +1364,32 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with a report folder that compares cas
         $Said | Should -Not -BeLike '*Re-render skipped*'
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummary -ReportFiles by folder and file name, and the renderer''s file size under brackets' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'keeps a report whose folder is named in another letter case where the run folder ignores case and the report folder keeps it' {
+        $Run = Join-Path $script:TmpRoot 'allowed-leaf'
+        $Dir = Join-Path $Run 'ResourcesReport_20260102030405181'
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        $Inv = Join-Path $Dir 'Inventory_ResourcesReport_20260102030405181.json'
+        '{"Version":"3.2.3","PublicIP":[{"Name":"pip","Subscription":"Sub"}]}' | Set-Content -LiteralPath $Inv
+        Mock Get-RdaPathComparer { [System.StringComparer]::Ordinal }
+        Mock Get-RdaPathComparer { [System.StringComparer]::OrdinalIgnoreCase } -ParameterFilter { $Path.TrimEnd('/', '\') -eq $Run }
+        # The folder part of the listed path in another case.
+        $Listed = Join-Path (Join-Path $Run 'resourcesreport_20260102030405181') 'Inventory_ResourcesReport_20260102030405181.json'
+        $Said = New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile (Join-Path $Run 'MainSummary.html') -ReportFiles @($Listed) 6>&1 | Out-String
+        $Said | Should -BeLike '*1 subscription(s)*'
+    }
+
+    It 'reports the html file size when -HtmlFile sits in a folder with brackets' {
+        $Dir = Join-Path $script:TmpRoot 'size[1]'
+        [void][System.IO.Directory]::CreateDirectory($Dir)
+        $Json = Join-Path $Dir 'Inventory_x.json'
+        [System.IO.File]::WriteAllText($Json, '{"Version":"3.2.3","PublicIP":[{"Name":"pip","Subscription":"Sub"}]}')
+        $Said = & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile (Join-Path $Dir 'r.html') -Title 'T' 6>&1 2>&1 | Out-String
+        $Size = [System.IO.FileInfo]::new((Join-Path $Dir 'r.html')).Length
+        $Size | Should -BeGreaterThan 0
+        $Said | Should -BeLike ('*File size: {0:N0} bytes*' -f $Size)
+    }
+}

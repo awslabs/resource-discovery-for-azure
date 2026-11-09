@@ -871,7 +871,7 @@ $Js
 Set-Content -LiteralPath $HtmlFile -Value $Html -Encoding utf8
 Write-Host ("HTML report written: {0}" -f $HtmlFile) -ForegroundColor Green
 Write-Host ("  Total resources: {0:N0} across {1} service type(s)" -f $TotalResources, $ServiceSummary.Count) -ForegroundColor Green
-$FileSize = (Get-Item $HtmlFile).Length
+$FileSize = (Get-Item -LiteralPath $HtmlFile).Length
 Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $FileSize, ($FileSize / 1KB)) -ForegroundColor Green
 if ($ObfuscationStatus -eq 'obfuscated')
 {

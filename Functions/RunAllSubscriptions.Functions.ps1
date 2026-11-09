@@ -829,10 +829,13 @@ function Write-StreamState
             StreamId       = $StreamId
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
-        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8 -ErrorAction Stop
     }
     catch
     {
+        # A failed write (the folder is gone) must stop here, or it is a silent
+        # non-terminating error and this warning never runs. The next -Resume
+        # then runs the subscription again, as its id is not on file.
         # Its own guard, as in Save-CompletedSubscriptionIds.
         $StateError = $_.Exception.Message
         try { Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $StateError) 'Yellow' }

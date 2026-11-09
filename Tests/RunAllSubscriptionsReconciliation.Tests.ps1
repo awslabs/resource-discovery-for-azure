@@ -381,6 +381,18 @@ Describe 'A resume state warning that cannot be written' {
         { Write-StreamState -Path $Path -Completed @('a') -FailedAttempts @() } | Should -Not -Throw
         Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: failed to persist stream state to *' }
     }
+
+    It 'Write-StreamState warns and does not fail when its folder is gone' {
+        # No Set-Content mock: the real write into a missing folder must
+        # reach the catch, so the warning is printed and no error leaks out.
+        Set-Variable -Name Tag -Value '[stream-0]'
+        Mock Write-Host -MockWith { }
+        $Path = Join-Path $script:TestRoot 'gone-stream-real/state.json'
+        { $script:StreamWriteOut = @(Write-StreamState -Path $Path -Completed @('a') -FailedAttempts @() 2>&1) } | Should -Not -Throw
+        @($script:StreamWriteOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count | Should -Be 0
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: failed to persist stream state to *' }
+        Test-Path -LiteralPath $Path | Should -BeFalse
+    }
 }
 
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {

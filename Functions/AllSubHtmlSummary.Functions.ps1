@@ -309,9 +309,18 @@ function New-RdaAllSubHtmlSummary
     $VersionSafe = if ([string]::IsNullOrWhiteSpace([string]$Version)) { '' } else { ConvertTo-HtmlSafe ([string]$Version) }
     $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { ConvertTo-HtmlSafe ([string]$PlatOS) }
 
-    $PrivacyBanner = if ($ObfuscationStatus -eq 'obfuscated')
+    # Follows the redaction gate, so an obfuscated run whose reports hold no
+    # records to sample still says it is obfuscated.
+    # "Safe to share" only when the caller says the run masked its output
+    # (-Obfuscated, which the wrapper passes for -Obfuscate). Names that only
+    # look masked in a sample of records prove nothing about the rest.
+    $PrivacyBanner = if ($Obfuscated.IsPresent)
     {
         '<div class="privacy-banner obfuscated"><span>&#128274;</span><div><b>Obfuscated.</b> Names shown are deterministic pseudonyms (prod_/nonprod_ prefixes); no real identifiers are present. Safe to share.</div></div>'
+    }
+    elseif ($IsObfuscated)
+    {
+        '<div class="privacy-banner obfuscated"><span>&#128274;</span><div><b>Obfuscated.</b> The names in a sample of the reports are deterministic pseudonyms (prod_/nonprod_ prefixes). Only a sample was checked: review the reports before sharing them.</div></div>'
     }
     else
     {

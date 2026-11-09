@@ -631,6 +631,10 @@ $FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
 # end-of-run merge still owns per-stream cleanup. Safe on non-interrupted runs: a
 # cleanly-finished parallel run deletes its per-stream files, so this finds none.
 # Runs at startup before any stream is launched, so it cannot race live streams.
+# The stream resume state files this run read in (here or in the parallel
+# merge). A clean run removes only these: a file it never read may hold a
+# failure this run knows nothing of.
+$ReadStreamStateFiles = @()
 if ($Resume -or $ResumeFailedOnly)
 {
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -645,6 +649,7 @@ if ($Resume -or $ResumeFailedOnly)
                 $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
                 if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+                $ReadStreamStateFiles += $StreamFile.FullName
             }
             catch
             {
@@ -1570,6 +1575,7 @@ else
                     {
                         $AllFailedFromStreams += @($Obj.FailedAttempts)
                     }
+                    $ReadStreamStateFiles += $PerStreamFile
                 }
                 catch
                 {
@@ -1896,11 +1902,14 @@ if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0
             Write-Host ('WARNING: Could not remove resume state file {0}: {1}' -f $ResumeStateFile, $_) -ForegroundColor Yellow
         }
     }
-    # Stream resume state files still here (kept when the resume state could
-    # not be written, or left by a stopped run and read at this run's start)
-    # are cleared too: the next run's start would read their old failures
-    # back, and -ResumeFailedOnly would retry them for ever.
-    foreach ($StreamFile in @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID))
+    # Stream resume state files this run read in (kept when the resume state
+    # could not be written, or left by a stopped run and read at this run's
+    # start) are cleared too: the next run's start would read their old
+    # failures back, and -ResumeFailedOnly would retry them for ever. A file
+    # this run did not read (a plain sequential run reads none) is left: its
+    # failures are not in this run's clean check, and the next -Resume or
+    # -ResumeFailedOnly run reads them.
+    foreach ($StreamFile in @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID | Where-Object { $ReadStreamStateFiles -contains $_.FullName }))
     {
         try { Remove-Item -LiteralPath $StreamFile.FullName -Force -ErrorAction Stop }
         catch { Write-Host ('WARNING: Could not remove stream resume state file {0}: {1}' -f $StreamFile.FullName, $_) -ForegroundColor Yellow }

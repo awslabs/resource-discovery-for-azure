@@ -327,7 +327,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @())
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -403,6 +403,14 @@ function Get-UsageAggregates
                 # before its end: under -Resume it skips these subscriptions.
                 $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
                 [pscustomobject]@{ Tenant = $script:Tenant; StreamId = '0'; Completed = @($Stream0Completed); FailedAttempts = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Reports.FullName ('.resume-state-{0}-stream-0.json' -f $script:Tenant)) -Encoding utf8
+            }
+            if ($Stream1Failed.Count -gt 0)
+            {
+                # Stream 1's resume file from an earlier parallel run whose
+                # resume state could not be written: these subscriptions
+                # failed there and are held only in this file.
+                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
+                [pscustomobject]@{ Tenant = $script:Tenant; StreamId = '1'; Completed = @(); FailedAttempts = @($Stream1Failed | ForEach-Object { [pscustomobject]@{ Id = $_; Name = 'earlier'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier failure'; Attempts = 1 } }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Reports.FullName ('.resume-state-{0}-stream-1.json' -f $script:Tenant)) -Encoding utf8
             }
             if ($Stream1SummaryJson)
             {
@@ -1167,6 +1175,27 @@ function Get-UsageAggregates
         $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
 
         $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home -UnifiedStateBlocked
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
+    It 'sequential: a clean run leaves a stream state file it did not read, so the next -ResumeFailedOnly retries the failure that file holds, and the run after has nothing to retry' {
+        # An earlier parallel run's failure of Sub A is held only in a kept
+        # stream state file. This plain run sees only Sub B, which works.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB) -Stream1Failed $script:SubA.Id
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        Test-Path -LiteralPath (Join-Path $Run.Root ('.resume-state-{0}-stream-1.json' -f $script:Tenant)) -PathType Leaf | Should -BeTrue -Because 'a run that did not read the stream state file leaves it'
+
+        # The next run retries Sub A, which works.
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -ResumeFailedOnly -ReuseHome $Run.Home
+        $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
+        $Retry.Console | Should -Match 'Processing subscription: Sub A' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match 'Processing subscription: Sub B' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'a clean run clears the stream state file it read'
+
+        # The run after that has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -ResumeFailedOnly -ReuseHome $Run.Home
         $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
         $After.ExitCode | Should -Be 0
     }

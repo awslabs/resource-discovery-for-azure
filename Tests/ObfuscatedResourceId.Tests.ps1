@@ -69,6 +69,7 @@ Describe 'Get-ObfuscatedResourceId' {
         @{ Label = 'automation runbook'; Id = '/microsoft.automation/automationaccounts/aa-a/runbooks/rb-a'; Names = @('aa-a', 'rb-a') }
         @{ Label = 'NetApp volume'; Id = '/microsoft.netapp/netappaccounts/na-a/capacitypools/cp-a/volumes/vol-a'; Names = @('na-a', 'cp-a', 'vol-a') }
         @{ Label = 'extension resource'; Id = '/microsoft.compute/virtualmachines/vm-a/providers/microsoft.insights/diagnosticsettings/ds-a'; Names = @('vm-a', 'ds-a') }
+        @{ Label = 'resource whose real name looks like a token'; Id = '/microsoft.compute/virtualmachines/prod_11111111-2222-4333-8444-555555555555'; Names = @('prod_11111111-2222-4333-8444-555555555555') }
     ) {
         $Real = $script:Base + $Id
         $Masked = Get-ObfuscatedResourceId -ResourceId $Real
@@ -78,7 +79,11 @@ Describe 'Get-ObfuscatedResourceId' {
         $MaskedParts.Count | Should -Be $RealParts.Count
         for ($i = 0; $i -lt $RealParts.Count; $i++)
         {
-            if ($RealParts[$i] -in @($Names + @('rg-demo', $script:Sub))) { $MaskedParts[$i] | Should -Match ('^' + $script:Token + '$') }
+            if ($RealParts[$i] -in @($Names + @('rg-demo', $script:Sub)))
+            {
+                $MaskedParts[$i] | Should -Match ('^' + $script:Token + '$')
+                $MaskedParts[$i] | Should -Not -BeExactly $RealParts[$i] -Because 'a real part is never kept, even one shaped like a token'
+            }
             else { $MaskedParts[$i] | Should -BeExactly $RealParts[$i] }
         }
     }

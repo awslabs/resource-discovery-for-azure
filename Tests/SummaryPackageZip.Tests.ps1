@@ -828,7 +828,15 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip swaps the rebuilt files in as a set, a
         $Root = [System.IO.Path]::GetPathRoot($script:TmpRoot)
         $Alias = Join-Path $script:TmpRoot ('root-alias-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) -Path $Alias -Target $Root | Out-Null
-        try { { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Alias 6>$null } | Should -Throw '*cannot be the root*' }
+        try
+        {
+            { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Alias 6>$null } | Should -Throw '*cannot be the root*'
+            # Where links cannot be followed (PowerShell 7.0/7.1), the link stops it too.
+            $Saved = $script:RdaCanResolveLinks
+            $script:RdaCanResolveLinks = $false
+            try { { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Alias 6>$null } | Should -Throw '*cannot follow*' }
+            finally { $script:RdaCanResolveLinks = $Saved }
+        }
         finally { [System.IO.Directory]::Delete($Alias) }
         Test-Path -LiteralPath (Join-Path $Root 'MainSummary.html') | Should -BeFalse
     }

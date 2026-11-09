@@ -199,9 +199,14 @@ function Get-RdaModuleCopyToLoad
     if ($Loaded.Count -gt 0) { return $Loaded }
     $Copies = @(Get-Module -Name $Name -ListAvailable -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version -and $_.ModuleBase })
     if ($Copies.Count -eq 0) { return @() }
+    # PowerShell finds a relative folder (or one with '..') from the current
+    # location, and ModuleBase is the full path, so match on the full path.
+    $Base = (Get-Location -PSProvider FileSystem).ProviderPath
     foreach ($Folder in @($env:PSModulePath -split [System.IO.Path]::PathSeparator | Where-Object { $_ }))
     {
-        $Prefix = $Folder.TrimEnd('/', '\') + [System.IO.Path]::DirectorySeparatorChar
+        try { $Full = [System.IO.Path]::GetFullPath($Folder, $Base) }
+        catch { continue }
+        $Prefix = $Full.TrimEnd('/', '\') + [System.IO.Path]::DirectorySeparatorChar
         $Here = @($Copies | Where-Object { ([string]$_.ModuleBase).StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) })
         if ($Here.Count -gt 0) { return @($Here | Sort-Object -Property { [version]$_.Version } -Descending | Select-Object -First 1) }
     }

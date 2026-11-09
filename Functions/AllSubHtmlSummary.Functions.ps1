@@ -177,9 +177,10 @@ function New-BarChart
 # exactly. Found by looking for one name there with its letter case flipped:
 # where case is ignored the flipped name finds the same item, which the
 # folder lists once; where it is kept, it finds nothing, or a second item that
-# the listing shows. Reads names only and writes nothing. When nothing there
-# can be probed, or the listing cannot be read, the system's default: exact on
-# Linux, case aside on Windows and macOS.
+# the listing shows. In a folder with no name to probe it creates one empty
+# probe file and removes it again (the folders it is called on are the ones
+# it writes to). When nothing can be probed, or the listing cannot be read,
+# the system's default: exact on Linux, case aside on Windows and macOS.
 function Get-RdaPathComparer
 {
     param([string]$Path)
@@ -189,10 +190,23 @@ function Get-RdaPathComparer
         if ([string]::IsNullOrWhiteSpace($Path)) { return $Default }
         $Probe = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
         # The names compared are those inside a folder, so probe an item in it.
+        $ProbeFile = $null
         if (Test-Path -LiteralPath $Probe -PathType Container)
         {
             $Inside = @([System.IO.Directory]::GetFileSystemEntries($Probe) | Where-Object { [System.IO.Path]::GetFileName($_) -cne ([System.IO.Path]::GetFileName($_)).ToUpperInvariant() -or [System.IO.Path]::GetFileName($_) -cne ([System.IO.Path]::GetFileName($_)).ToLowerInvariant() } | Select-Object -First 1)
             if ($Inside.Count -gt 0) { $Probe = $Inside[0] }
+            else
+            {
+                # Nothing inside to probe (a new folder, or a mount of its own):
+                # a probe file inside it, so its own file system answers.
+                try
+                {
+                    $ProbeFile = Join-Path $Probe ('rda-case-{0}-Probe.tmp' -f [guid]::NewGuid().ToString('N'))
+                    [System.IO.File]::Open($ProbeFile, [System.IO.FileMode]::CreateNew).Dispose()
+                    $Probe = $ProbeFile
+                }
+                catch { $ProbeFile = $null }
+            }
         }
         while (-not [string]::IsNullOrEmpty($Probe))
         {
@@ -204,9 +218,9 @@ function Get-RdaPathComparer
             {
                 # Two entries whose names differ only in case are two items.
                 $Alike = @([System.IO.Directory]::GetFileSystemEntries($Parent) | Where-Object { [System.IO.Path]::GetFileName($_) -ieq $Leaf }).Count
-                if ($Alike -ge 2) { return [System.StringComparer]::Ordinal }
-                if (Test-Path -LiteralPath (Join-Path $Parent $Flipped)) { return [System.StringComparer]::OrdinalIgnoreCase }
-                return [System.StringComparer]::Ordinal
+                $Result = if ($Alike -ge 2) { [System.StringComparer]::Ordinal } elseif (Test-Path -LiteralPath (Join-Path $Parent $Flipped)) { [System.StringComparer]::OrdinalIgnoreCase } else { [System.StringComparer]::Ordinal }
+                if ($null -ne $ProbeFile) { Remove-Item -LiteralPath $ProbeFile -Force -ErrorAction SilentlyContinue }
+                return $Result
             }
             $Probe = $Parent
         }
@@ -215,7 +229,54 @@ function Get-RdaPathComparer
     {
         Write-Verbose ("Get-RdaPathComparer: could not probe {0}: {1}" -f $Path, $_.Exception.Message)
     }
+    if ($null -ne $ProbeFile) { Remove-Item -LiteralPath $ProbeFile -Force -ErrorAction SilentlyContinue }
     return $Default
+}
+
+# The name of $Path as its folder lists it (with the letter case on disk,
+# which can differ from the path given where the file system ignores case).
+function Get-RdaOnDiskName
+{
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $Leaf = [System.IO.Path]::GetFileName($Path.TrimEnd([IO.Path]::DirectorySeparatorChar, '/'))
+    $Listed = @([System.IO.Directory]::GetFileSystemEntries([System.IO.Path]::GetDirectoryName($Path.TrimEnd([IO.Path]::DirectorySeparatorChar, '/'))) | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+    $Exact = @($Listed | Where-Object { $_ -ceq $Leaf })
+    if ($Exact.Count -gt 0) { return $Exact[0] }
+    $Alike = @($Listed | Where-Object { $_ -ieq $Leaf })
+    if ($Alike.Count -eq 1) { return $Alike[0] }
+    return $Leaf
+}
+
+# Stops (throws) before anything is extracted from the zip $Path when it is
+# outside the limits downstream accepts a report zip within: more than 2000
+# entries, an entry over 16 GB, over 32 GB in all, an entry or the whole
+# packed more than 100 to 1, or an entry path that is rooted or holds '..'.
+# Reads only the zip's directory.
+function Assert-RdaZipWithinLimits
+{
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $Archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try
+    {
+        $Entries = @($Archive.Entries)
+        $Name = Split-Path -Path $Path -Leaf
+        if ($Entries.Count -gt 2000) { throw ('{0} holds {1} entries, more than 2000.' -f $Name, $Entries.Count) }
+        [long]$Total = 0
+        [long]$Packed = 0
+        foreach ($E in $Entries)
+        {
+            $Parts = @($E.FullName -split '[\\/]')
+            if ([System.IO.Path]::IsPathRooted($E.FullName) -or $E.FullName -match '^[A-Za-z]:' -or $Parts -contains '..') { throw ('{0} holds an entry with a rooted or .. path: {1}' -f $Name, $E.FullName) }
+            if ($E.Length -gt 16GB) { throw ('{0} holds an entry over 16 GB: {1}' -f $Name, $E.FullName) }
+            if ($E.CompressedLength -gt 0 -and ($E.Length / $E.CompressedLength) -gt 100) { throw ('{0} holds an entry packed more than 100 to 1: {1}' -f $Name, $E.FullName) }
+            $Total += $E.Length
+            $Packed += $E.CompressedLength
+        }
+        if ($Total -gt 32GB) { throw ('{0} holds more than 32 GB in all.' -f $Name) }
+        if ($Packed -gt 0 -and ($Total / $Packed) -gt 100) { throw ('{0} is packed more than 100 to 1 in all.' -f $Name) }
+    }
+    finally { $Archive.Dispose() }
 }
 
 function New-RdaAllSubHtmlSummary
@@ -619,8 +680,13 @@ function New-RdaAllSubHtmlSummaryFromZip
 
     # Extract the outer zip to a temp staging dir; we only pull the inner per-sub
     # zips out of it, then reconstruct one folder per sub under $OutputDirectory.
-    $Staging = Join-Path ([System.IO.Path]::GetTempPath()) ('RdaFromZip_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-    New-Item -ItemType Directory -Path $Staging -Force | Out-Null
+    # Checked before anything is extracted, as downstream checks a report zip.
+    Assert-RdaZipWithinLimits -Path $ZipItem.FullName
+    # A new folder of its own (an existing one is an error, never reused),
+    # readable by this user only on Linux and macOS: it holds customer reports.
+    $Staging = Join-Path ([System.IO.Path]::GetTempPath()) ('RdaFromZip_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $Staging -ErrorAction Stop | Out-Null
+    if (-not $IsWindows) { [System.IO.File]::SetUnixFileMode($Staging, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute') }
     try
     {
         Expand-Archive -LiteralPath $InputZip -DestinationPath $Staging -Force
@@ -655,7 +721,10 @@ function New-RdaAllSubHtmlSummaryFromZip
                 Write-Host ("  Skipped a second report zip named {0} in the input zip; the first one is used." -f $InnerZip.Name) -ForegroundColor Yellow
                 continue
             }
+            Assert-RdaZipWithinLimits -Path $InnerZip.FullName
+            $DestNew = -not (Test-Path -LiteralPath $Dest)
             New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+            $HasInventory = $false
             $Archive = [System.IO.Compression.ZipFile]::OpenRead($InnerZip.FullName)
             try
             {
@@ -671,10 +740,21 @@ function New-RdaAllSubHtmlSummaryFromZip
                         [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
                         if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
                         if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
+                        if ($Entry.Name -like 'Inventory_*.json') { $HasInventory = $true }
                     }
                 }
             }
             finally { $Archive.Dispose() }
+            # A report needs its inventory; a zip without one is not a report
+            # and is not counted (its html, if any, is left out too).
+            if (-not $HasInventory)
+            {
+                Write-Host ("  Skipped {0}: it holds no Inventory_*.json." -f $InnerZip.Name) -ForegroundColor Yellow
+                foreach ($Written in @($WrittenFiles[$Dest] | Where-Object { $_ })) { Remove-Item -LiteralPath $Written -Force -ErrorAction SilentlyContinue }
+                [void]$WrittenFiles.Remove($Dest)
+                if ($DestNew) { Remove-Item -LiteralPath $Dest -Force -Recurse -ErrorAction SilentlyContinue }
+                continue
+            }
             if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) }
             $Reconstructed++
         }
@@ -688,7 +768,8 @@ function New-RdaAllSubHtmlSummaryFromZip
             foreach ($Ef in $ExtractedFolders)
             {
                 $Files = @(Get-ChildItem -LiteralPath $Ef.FullName -File -ErrorAction SilentlyContinue | Where-Object { ($_.Name -like 'Inventory_*.json') -or (($_.Name -like '*.html') -and ($_.Name -notlike '*_revealed*')) })
-                if ($Files.Count -eq 0) { continue }
+                # A report needs its inventory.
+                if (@($Files | Where-Object { $_.Name -like 'Inventory_*.json' }).Count -eq 0) { continue }
                 $Dest = Join-Path $OutputDirectory $Ef.Name
                 # A second folder of the same name: the first one is kept, as for report zips.
                 if ($DestSeen.Contains($Dest))
@@ -798,10 +879,12 @@ function New-RdaAllSubHtmlSummaryFromZip
         }
         foreach ($Dir in $ReconstructedDirs)
         {
-            $FolderName = Split-Path -Path $Dir -Leaf
+            # The names as they are on disk, which the summary's links use (a
+            # folder or file that was there keeps its own letter case).
+            $FolderName = Get-RdaOnDiskName -Path $Dir
             foreach ($File in @($WrittenFiles[$Dir] | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
             {
-                $Entries.Add([pscustomobject]@{ Path = $File; Name = ('{0}/{1}' -f $FolderName, (Split-Path -Path $File -Leaf)) })
+                $Entries.Add([pscustomobject]@{ Path = $File; Name = ('{0}/{1}' -f $FolderName, (Get-RdaOnDiskName -Path $File)) })
             }
         }
         # Built under a name of its own beside it, then moved over the old

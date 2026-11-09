@@ -473,3 +473,63 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with -HtmlFile outside -OutputDirector
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -HtmlFile (Join-Path $script:TmpRoot 'elsewhere.html') -PackageZip 6>$null } | Should -Throw '*-HtmlFile must be in -OutputDirectory*'
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip checks a zip before it extracts it' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        function script:New-RawZip
+        {
+            param([string]$Path, [scriptblock]$Fill)
+            $Zip = [System.IO.Compression.ZipFile]::Open($Path, 'Create')
+            try { & $Fill $Zip } finally { $Zip.Dispose() }
+            $Path
+        }
+    }
+
+    It 'refuses a zip with more than 2000 entries, an entry path with .., or one packed more than 100 to 1 (<Case>)' -ForEach @(
+        @{ Case = 'entries'; Like = '*more than 2000*'; Fill = { param($Z) foreach ($N in 1..2001) { $null = $Z.CreateEntry("e$N.txt") } } }
+        @{ Case = 'dotdot'; Like = '*rooted or .. path*'; Fill = { param($Z) $null = $Z.CreateEntry('../escape.txt') } }
+        @{ Case = 'ratio'; Like = '*more than 100 to 1*'; Fill = { param($Z) $E = $Z.CreateEntry('zeros.bin', 'Optimal'); $W = $E.Open(); try { $B = [byte[]]::new(1MB); foreach ($N in 1..8) { $W.Write($B, 0, $B.Length) } } finally { $W.Dispose() } } }
+    ) {
+        $Path = New-RawZip -Path (Join-Path $script:TmpRoot ('limits-' + $Case + '.zip')) -Fill $Fill
+        $Out = Join-Path $script:TmpRoot ('limits-out-' + $Case)
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Path -OutputDirectory $Out 6>$null } | Should -Throw $Like
+        @(Get-ChildItem -LiteralPath $Out -Recurse -File -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
+    }
+
+    It 'extracts into a new staging folder of its own, readable by this user only on Linux and macOS' -Skip:($IsWindows) {
+        Mock Expand-Archive { $script:StagingMode = [System.IO.File]::GetUnixFileMode($DestinationPath); throw 'stop here' }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory (Join-Path $script:TmpRoot 'staging-mode') 6>$null } | Should -Throw '*stop here*'
+        $script:StagingMode | Should -Be ([System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+    }
+
+    It 'does not count a report zip that holds no inventory, and says no report was found when that is all there is' {
+        $Root = Join-Path $script:TmpRoot 'no-inventory'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        $Inner = New-RawZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405051.zip') -Fill { param($Z) $E = $Z.CreateEntry('ResourcesReport_20260102030405051.html'); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('<html></html>') } finally { $W.Dispose() } }
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-09.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>$null } | Should -Throw '*no per-subscription reports found*'
+    }
+}
+
+Describe 'Get-RdaPathComparer and Get-RdaOnDiskName in an empty or reused folder' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'probes inside an empty folder with a probe file it removes again' {
+        $Dir = Join-Path $TestDrive 'empty-probe'
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Mock Test-Path { $LiteralPath -like '*rda-case-*-Probe.tmp' -or (-not $PathType) -or $PathType -eq 'Container' } -ParameterFilter { $LiteralPath -like '*rda-case-*' }
+        $null = Get-RdaPathComparer -Path $Dir
+        Should -Invoke Test-Path -ParameterFilter { $LiteralPath -like '*rda-case-*' }
+        @(Get-ChildItem -LiteralPath $Dir -Force) | Should -BeNullOrEmpty
+    }
+
+    It 'gives a name with the letter case it has on disk' {
+        $Dir = Join-Path $TestDrive 'ondisk'
+        New-Item -ItemType Directory -Path (Join-Path $Dir 'ResourcesReport_X') -Force | Out-Null
+        Get-RdaOnDiskName -Path (Join-Path $Dir 'resourcesreport_x') | Should -BeExactly 'ResourcesReport_X'
+        Get-RdaOnDiskName -Path (Join-Path $Dir 'ResourcesReport_X') | Should -BeExactly 'ResourcesReport_X'
+    }
+}

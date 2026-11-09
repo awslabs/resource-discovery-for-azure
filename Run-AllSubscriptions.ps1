@@ -1584,8 +1584,9 @@ else
                     else
                     {
                         # Not collected this run either: each goes on the retry
-                        # list as a failed run (below), so -ResumeFailedOnly
-                        # retries it and its count of failed runs goes up.
+                        # list (below), so -ResumeFailedOnly retries it. The cause
+                        # is the stream's, not the subscription's, so its count
+                        # of failed runs stays as it was.
                         $StreamNotStarted += @($StreamSummary.Failed | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) -and [string]$_.Id -ne '<unknown>' })
                     }
                 }
@@ -1733,7 +1734,7 @@ else
             # completed sub): a later -Resume collects it instead of carrying an
             # old report.
             $NotStartedIds = @($StreamNotStarted | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
-            $NotCompletedThisRun = @(@($FailedThisRun) + @($StreamNoReportIds | Where-Object { $_ }) + @($StreamIncompleteIds | Where-Object { $_ }) + @($NotStartedIds | Where-Object { $_ }))
+            $NotCompletedThisRun = @(@($FailedThisRun) + @($StreamNoReportIds | Where-Object { $_ }) + @($StreamIncompleteIds | Where-Object { $_ }) + @($NotStartedIds))
             if ($NotCompletedThisRun.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds | Where-Object { $NotCompletedThisRun -notcontains $_ })
@@ -1743,11 +1744,23 @@ else
             # See Merge-FailedAttempts for the recency/completion rules.
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             # A stream that did not start wrote no state, so its subs are added
-            # here, one more failed run each (Add-FailedAttempt counts on), after
-            # the merge, which drops entries of completed subs.
+            # here, after the merge, which drops entries of completed subs. The
+            # stream's cause (its sign-in did not load) is not the subscription's,
+            # so an entry already there keeps its count of failed runs, and a new
+            # one starts at 1. A name the stream did not have is taken from the
+            # run's list.
             foreach ($NotStarted in @($StreamNotStarted | Where-Object { $null -ne $_ }))
             {
-                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$NotStarted.Id) -Name ([string]$NotStarted.Name) -Reason ([string]$NotStarted.Reason)
+                $NotStartedId = [string]$NotStarted.Id
+                $NotStartedName = [string]$NotStarted.Name
+                if ($NotStartedName -eq '<unknown>') { $NotStartedName = [string](@($Subscriptions | Where-Object { [string]$_.Id -eq $NotStartedId }) | Select-Object -First 1).Name }
+                $Before = @($FailedAttempts | Where-Object { $null -ne $_ -and [string]$_.Id -eq $NotStartedId }) | Select-Object -First 1
+                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $NotStartedId -Name $NotStartedName -Reason ([string]$NotStarted.Reason)
+                if ($null -ne $Before)
+                {
+                    $Kept = if ($Before.PSObject.Properties['Attempts'] -and $Before.Attempts) { [int]$Before.Attempts } else { 1 }
+                    foreach ($Entry in @($FailedAttempts | Where-Object { $null -ne $_ -and [string]$_.Id -eq $NotStartedId })) { $Entry.Attempts = $Kept }
+                }
             }
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $NotCompletedThisRun.Count -gt 0)
             {

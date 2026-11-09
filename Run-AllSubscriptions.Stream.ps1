@@ -85,10 +85,14 @@ if ($SubscriptionIds.Count -eq 0)
         SubsProcessed         = 0
         Completed             = @()
         Failed                = @()
+        Skipped               = @()
+        NoReport              = @()
+        Incomplete            = @()
         ResourceCounts        = @()
         ConsumptionRecords    = 0
         ConsumptionFailedSubs = @()
         MetricsFailedSubs     = @()
+        CollectorFailures     = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
     exit 0
 }
@@ -129,7 +133,17 @@ catch
                 $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
                 [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
             })
-        ResourceCounts = @()
+        # Every property of the full summary, so the wrapper reads it under
+        # Set-StrictMode too.
+        SubsProcessed         = 0
+        Skipped               = @()
+        NoReport              = @()
+        Incomplete            = @()
+        ResourceCounts        = @()
+        ConsumptionRecords    = 0
+        ConsumptionFailedSubs = @()
+        MetricsFailedSubs     = @()
+        CollectorFailures     = @()
     } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
     exit 1
 }

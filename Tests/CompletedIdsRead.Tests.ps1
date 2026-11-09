@@ -27,8 +27,9 @@ Describe 'The startup read of the completed ids' {
         @{ Label = 'two ids'; Ids = @('sub-a', 'sub-c'); Expected = @('sub-a', 'sub-c', 'sub-b') }
     ) {
         function Get-CompletedSubscriptionIds { param($Path, $Tenant) return $Ids }
-        $ResumeStateFile = 'unused'
-        $TenantID = 'unused'
+        # Read by the lifted statement.
+        Set-Variable -Name ResumeStateFile -Value 'unused'
+        Set-Variable -Name TenantID -Value 'unused'
         . ([scriptblock]::Create($script:ReadText))
         $CompletedIds += 'sub-b'
         @($CompletedIds) | Should -Be $Expected

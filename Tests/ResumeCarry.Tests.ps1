@@ -722,6 +722,24 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         @($R.Run.SubResourceCounts | ForEach-Object Id) | Should -Contain 'sub-a'
     }
 
+    It 'a stream that did not start keeps the count of failed runs of an entry already on the retry list, and names a subscription it had no name for from the run''s list' {
+        $S = script:Read-State -Path $script:State
+        $Earlier = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 2 })
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'failed-to-start'; Reason = 'stand-in'; Completed = @(); ResourceCounts = @()
+            Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stream did not start: Az context import failed' }, @{ Id = 'sub-c'; Name = '<unknown>'; Reason = 'stream did not start: Az context import failed' })
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2 })
+        # Read by the lifted block, which names a subscription from the run's list.
+        Set-Variable -Name Subscriptions -Value @($script:A, $script:B, [pscustomobject]@{ Id = 'sub-c'; Name = 'Sub C' })
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Earlier $S.Reports 6>$null
+
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 2 -Because 'the cause is the stream''s sign-in, not the subscription'
+        [int](@($After | Where-Object Id -eq 'sub-c')[0].Attempts) | Should -Be 1
+        @($After | Where-Object Id -eq 'sub-c')[0].Name | Should -Be 'Sub C'
+    }
+
     It 'a stream that did not start with an id it could not read (the unknown-id marker, or a blank id) puts no retry entry for it, and the run still keeps the state' {
         $S = script:Read-State -Path $script:State
         $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'

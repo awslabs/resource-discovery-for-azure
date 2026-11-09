@@ -389,7 +389,7 @@ Describe 'Retry limit on the sequential path' {
         @(script:Get-Lines -Run $Run4 -Like 'Not retried:*') | Should -BeNullOrEmpty
         [int](script:Get-Entry -Id 'sub-x').Attempts | Should -Be 4
         Test-Path -LiteralPath $script:State | Should -BeTrue -Because 'it failed again in this run'
-        $Run4.Result.WrapperExitCode | Should -Be 0
+        $Run4.Result.WrapperExitCode | Should -Be 2 -Because 'Sub X failed in this run'
         $Global:RdaRlFailIds = @()
         $Run5 = script:Invoke-Run -Subs $Subs
         @($Run5.Calls) | Should -Contain 'sub-x'

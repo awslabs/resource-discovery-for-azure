@@ -2200,6 +2200,12 @@ if ($null -ne $OuterZipFile)
         try { $OuterZipFile = Move-RunOutputFile -Source $OuterZipFile -Directory $InventoryRoot -Stem $OuterZipStem -Extension '.zip' }
         catch { $NameProblem = $_.Exception.Message }
     }
+    if ($NameProblem -and -not (Test-Path -LiteralPath $OuterZipFile -PathType Leaf))
+    {
+        # The move failed because the zip itself went away: it is lost.
+        $ZipProblem = 'the zip is not on disk.'
+        $NameProblem = $null
+    }
     if ($NameProblem)
     {
         # The zip passed its check but could not take its name: it is kept

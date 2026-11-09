@@ -355,6 +355,13 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
     }
 
+    It 'a zip that goes away as it takes its name is reported as lost, not as kept' {
+        Mock Move-RunOutputFile { [System.IO.File]::Delete($Source); throw [System.IO.FileNotFoundException]::new('gone') }
+        $R = Invoke-FoldBlock -Root (Join-Path $TestDrive 'gone-at-move')
+        $R.BundleBuildError | Should -Be 'The consolidated zip was lost while the run summary was added to it: the zip is not on disk.'
+        $R.OuterZipFile | Should -BeNullOrEmpty
+    }
+
     It 'a fold that fails but leaves every report in the zip is only a warning' {
         Mock Compress-Archive -ParameterFilter { $Update } { throw [System.IO.IOException]::new('No space left on device') }
         $R = Invoke-FoldBlock -Root (Join-Path $TestDrive 'fold-kept')

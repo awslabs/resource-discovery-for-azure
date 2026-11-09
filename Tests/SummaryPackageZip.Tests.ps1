@@ -256,10 +256,23 @@ Describe 'Build-MainSummaryFromZip -PackageZip over a folder of the same name th
             ('Consumption_' + $Base + '.csv')
         )
         foreach ($Name in $script:Stale) { 'real names from an earlier call' | Out-File -FilePath (Join-Path $script:SameDir $Name) -Encoding utf8 }
+        # A valid inventory of an earlier call, named so it sorts first.
+        $script:StaleInventory = 'Inventory_000.json'
+        '{"Version":"3.2.3","PublicIP":[{"Name":"pip-stale","Subscription":"Stale Real Subscription"}]}' | Out-File -FilePath (Join-Path $script:SameDir $script:StaleInventory) -Encoding utf8
+        $script:Stale += $script:StaleInventory
 
         & $script:Script -InputZip $script:InputZip -OutputDirectory $script:Same -PackageZip 6>$null | Out-Null
         $script:SamePackage = $script:Same + '.zip'
         $script:SameEntries = if (Test-Path -LiteralPath $script:SamePackage) { Get-ZipEntryNames -ZipPath $script:SamePackage } else { @() }
+        $script:SameExtract = Join-Path $script:TmpRoot 'same_name_extracted'
+        if (Test-Path -LiteralPath $script:SamePackage) { Expand-Archive -LiteralPath $script:SamePackage -DestinationPath $script:SameExtract -Force }
+    }
+
+    It 'reads only the rebuilt files for the summary: no name from a file already there, and every link resolves in the bundle' {
+        $Summary = Join-Path $script:SameExtract 'MainSummary.html'
+        Get-Content -LiteralPath $Summary -Raw | Should -Not -Match 'Stale Real Subscription'
+        Get-SummaryLinks -HtmlPath $Summary | Should -Be (Get-ExpectedLinks -Stamps $script:Stamps)
+        foreach ($Link in @(Get-SummaryLinks -HtmlPath $Summary)) { Test-Path -LiteralPath (Join-Path $script:SameExtract $Link) | Should -BeTrue }
     }
 
     It 'holds exactly the summary and the files rebuilt from the input zip, none of the files already there' {

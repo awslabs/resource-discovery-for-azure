@@ -213,7 +213,12 @@ function New-RdaAllSubHtmlSummary
         # Optional: the report folder names to list. When given, only these
         # folders are listed and counted, so other ResourcesReport* folders in
         # -RunOutputDirectory are not.
-        $ReportFolders = $null
+        $ReportFolders = $null,
+
+        # Optional: the full paths of the files to read in those folders. When
+        # given, a folder's inventory and report html are taken only from
+        # these, so other files in a folder of the same name are not read.
+        $ReportFiles = $null
     )
 
     $ErrorActionPreference = 'Stop'
@@ -238,6 +243,11 @@ function New-RdaAllSubHtmlSummary
 
     $ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     $Samples = New-Object System.Collections.Generic.List[string]
+    $AllowedFiles = $null
+    if ($null -ne $ReportFiles)
+    {
+        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), [System.StringComparer]::Ordinal)
+    }
     # Only the folders -ReportFolders names, when given.
     if ($null -ne $ReportFolders)
     {
@@ -249,7 +259,7 @@ function New-RdaAllSubHtmlSummary
 
     foreach ($Folder in $Folders)
     {
-        $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $null -eq $AllowedFiles -or $AllowedFiles.Contains($_.FullName) } | Select-Object -First 1
         if ($null -eq $InvFile) { continue }
         try
         {
@@ -286,7 +296,7 @@ function New-RdaAllSubHtmlSummary
         if (-not $SubName) { $SubName = '(name unavailable - 0 resources)' }
 
         $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+            Where-Object { $_.Name -notlike '*_revealed*' -and ($null -eq $AllowedFiles -or $AllowedFiles.Contains($_.FullName)) } | Select-Object -First 1
         # Relative link so the summary travels with the report folder.
         $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
 
@@ -689,7 +699,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     # already hold other ResourcesReport* folders, which are not in this zip.
     $ReconstructedNames = @($ReconstructedDirs | ForEach-Object { Split-Path -Path $_ -Leaf } | Sort-Object -Unique)
     New-RdaAllSubHtmlSummary -RunOutputDirectory $OutputDirectory -HtmlFile $HtmlFile -Detailed:$Detailed `
-        -ReportFolders $ReconstructedNames -TenantId $TenantId -Version $Version -PlatOS $PlatOS
+        -ReportFolders $ReconstructedNames -ReportFiles @($WrittenFiles.Values | ForEach-Object { $_ }) -TenantId $TenantId -Version $Version -PlatOS $PlatOS
 
     Write-Host ("Reconstructed {0} per-subscription report(s) into: {1}" -f $Reconstructed, $OutputDirectory) -ForegroundColor Green
     Write-Host ("Open this summary (links resolve from here): {0}" -f $HtmlFile) -ForegroundColor Green

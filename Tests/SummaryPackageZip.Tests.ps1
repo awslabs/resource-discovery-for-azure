@@ -1258,3 +1258,68 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip render swap on a stop, and the budget 
         @(Get-ChildItem -LiteralPath $Out -Recurse -File).Count | Should -Be 1001
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip with case-variant names, a renderer path with brackets, and the skipped-render line' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        function script:New-PairsZip
+        {
+            param([string]$Root, [string]$Stamp, [object[]]$Pairs)
+            $Stage = Join-Path $Root 'outer'
+            [void][System.IO.Directory]::CreateDirectory($Stage)
+            $Zip = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+            try { foreach ($Pair in $Pairs) { $E = $Zip.CreateEntry($Pair[0]); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write($Pair[1]) } finally { $W.Dispose() } } }
+            finally { $Zip.Dispose() }
+            $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-80.zip'
+            [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Outer)
+            $Outer
+        }
+    }
+    AfterAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'bundles a file once when two entry names differ only in case on a file system that ignores case' {
+        # This host may keep case apart, so the comparer is the one a
+        # case-ignoring file system gives.
+        Mock Get-RdaPathComparer { [System.StringComparer]::OrdinalIgnoreCase }
+        $Root = Join-Path $script:TmpRoot 'case-entries'
+        $Stamp = '20260102030405161'
+        $Zip = New-PairsZip -Root $Root -Stamp $Stamp -Pairs @(@(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3"}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>a</html>'), @(('resourcesreport_' + $Stamp + '.html'), '<html>b</html>'))
+        $Out = Join-Path $Root 'out'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -PackageZip -KeepOriginalReports 6>$null | Out-Null
+        $Names = @(Get-ZipEntryNames -ZipPath ($Out + '.zip') | ForEach-Object { $_.ToLowerInvariant() })
+        $Names.Count | Should -Be @($Names | Select-Object -Unique).Count
+    }
+
+    It 'finds the renderer when the repo folder name holds brackets' {
+        $Tree = Join-Path $script:TmpRoot 'rda[2]'
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $Tree 'Functions'))
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $Tree 'Extension'))
+        [System.IO.File]::Copy((Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1'), (Join-Path $Tree 'Functions/AllSubHtmlSummary.Functions.ps1'), $true)
+        [System.IO.File]::WriteAllText((Join-Path $Tree 'Extension/Summary.ps1'), 'param($JsonFile, $HtmlFile, $Title, $Version, $PlatOS) [System.IO.File]::WriteAllText($HtmlFile, "<html>rendered</html>")')
+        . (Join-Path $Tree 'Functions/AllSubHtmlSummary.Functions.ps1')
+        $Root = Join-Path $script:TmpRoot 'bracket-render'
+        $Stamp = '20260102030405162'
+        $Zip = New-PairsZip -Root $Root -Stamp $Stamp -Pairs @(@(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3"}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>original</html>'))
+        $Out = Join-Path $Root 'out'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null | Out-Null
+        [System.IO.File]::ReadAllText((Join-Path $Out ('ResourcesReport_' + $Stamp + '/ResourcesReport_' + $Stamp + '.html'))) | Should -Be '<html>rendered</html>'
+    }
+
+    It 'does not say "kept original" when the earlier html could not be put back' {
+        $Root = Join-Path $script:TmpRoot 'label-not-in-place'
+        $Stamp = '20260102030405163'
+        $Zip = New-PairsZip -Root $Root -Stamp $Stamp -Pairs @(@(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3","PublicIP":[{"Name":"pip","Subscription":"Sub"}]}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>original</html>'))
+        $Out = Join-Path $Root 'out'
+        # The render cannot move in (the second html move in; the first is the
+        # html from the zip), and the html moved aside cannot be put back.
+        $script:HtmlMovesIn = 0
+        Mock Move-RdaFile {
+            if ($Path -like '*.html.rda-*.partial' -and $Destination -like '*.html' -and ++$script:HtmlMovesIn -eq 2) { throw 'locked' }
+            if ($Path -like '*.html.rda-*.bak') { throw 'locked too' }
+            [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
+        }
+        $Said = New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out -WarningAction SilentlyContinue 6>&1 | Out-String
+        $Said | Should -BeLike '*Re-render skipped for ResourcesReport_*(the earlier html is not in place; see the warning)*'
+        $Said | Should -Not -BeLike '*kept original*'
+    }
+}

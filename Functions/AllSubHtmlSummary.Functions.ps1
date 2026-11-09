@@ -856,7 +856,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         $PlanCount = 1
         # The re-render writes an html for a report that has none, but only
         # when it runs (not with -KeepOriginalReports, nor without the renderer).
-        $WillRender = (-not $KeepOriginalReports) -and (Test-Path -Path (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1') -PathType Leaf)
+        $WillRender = (-not $KeepOriginalReports) -and (Test-Path -LiteralPath (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1') -PathType Leaf)
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which
@@ -1004,8 +1004,10 @@ function New-RdaAllSubHtmlSummaryFromZip
         $SwapDone = $true
         foreach ($Staged in $StagedFiles)
         {
-            if (-not $WrittenFiles.ContainsKey($Staged.Dest)) { $WrittenFiles[$Staged.Dest] = New-Object System.Collections.Generic.List[string] }
-            if (-not $WrittenFiles[$Staged.Dest].Contains($Staged.Target)) { $WrittenFiles[$Staged.Dest].Add($Staged.Target) }
+            # One entry per file as the file system compares names, so two
+            # spellings of one file are listed (and bundled) once.
+            if (-not $WrittenFiles.ContainsKey($Staged.Dest)) { $WrittenFiles[$Staged.Dest] = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory)) }
+            [void]$WrittenFiles[$Staged.Dest].Add($Staged.Target)
         }
         foreach ($Dest in $DirsPlanned) { if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) } }
         $Reconstructed = $DirsPlanned.Count
@@ -1057,7 +1059,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     if (-not $KeepOriginalReports)
     {
         $SummaryScript = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Extension/Summary.ps1'
-        if (Test-Path -Path $SummaryScript -PathType Leaf)
+        if (Test-Path -LiteralPath $SummaryScript -PathType Leaf)
         {
             $ReRendered = 0
             foreach ($SubDir in @($ReconstructedDirs | ForEach-Object { Get-Item -LiteralPath $_ }))
@@ -1079,6 +1081,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 $RenderPartial = '{0}.rda-{1}.partial' -f $TargetHtml, [guid]::NewGuid().ToString('N')
                 $RenderBackup = $null
                 $RenderDone = $false
+                $RenderError = $null
                 try
                 {
                     & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $RenderPartial -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
@@ -1090,14 +1093,10 @@ function New-RdaAllSubHtmlSummaryFromZip
                     Move-RdaFile -Path $RenderPartial -Destination $TargetHtml
                     $RenderDone = $true
                     # Listed only once it is written.
-                    if (-not $WrittenFiles[$SubDir.FullName].Contains($TargetHtml)) { $WrittenFiles[$SubDir.FullName].Add($TargetHtml) }
+                    [void]$WrittenFiles[$SubDir.FullName].Add($TargetHtml)
                     $ReRendered++
                 }
-                catch
-                {
-                    $Kept = if ($null -ne $ExistingHtml) { 'kept original' } else { 'no html for this report' }
-                    Write-Host ("  Re-render skipped for {0} ({1}): {2}" -f $SubDir.Name, $Kept, $_.Exception.Message) -ForegroundColor Yellow
-                }
+                catch { $RenderError = $_.Exception.Message }
                 finally
                 {
                     # The earlier html is removed only once the new one is in;
@@ -1113,6 +1112,12 @@ function New-RdaAllSubHtmlSummaryFromZip
                         }
                     }
                     Clear-RdaLeftover -Path $RenderPartial
+                }
+                # Said after the put-back, so it tells what is on disk.
+                if ($null -ne $RenderError)
+                {
+                    $Kept = if ($null -eq $ExistingHtml) { 'no html for this report' } elseif (Test-Path -LiteralPath $TargetHtml) { 'kept original' } else { 'the earlier html is not in place; see the warning' }
+                    Write-Host ("  Re-render skipped for {0} ({1}): {2}" -f $SubDir.Name, $Kept, $RenderError) -ForegroundColor Yellow
                 }
             }
             Write-Host ("Re-rendered {0} per-subscription report(s) with the current renderer." -f $ReRendered) -ForegroundColor Green

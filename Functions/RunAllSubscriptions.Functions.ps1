@@ -540,7 +540,9 @@ function Save-CompletedSubscriptionIds
         # a large tenant / Cloud Shell run that gets killed). The temp file shares
         # the target directory so the move stays on the same volume.
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8
+        # Stop on a failed write (a full disk leaves a cut temp file), so the
+        # move below never puts it over the good state.
+        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8 -ErrorAction Stop
         [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch

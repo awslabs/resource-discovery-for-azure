@@ -359,6 +359,42 @@ Describe 'Resume state messages whose error text holds braces' {
     }
 }
 
+Describe 'Save-CompletedSubscriptionIds keeps the old state when its write fails' {
+    BeforeEach {
+        $script:KeepDir = Join-Path $script:TestRoot ('keep_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:KeepDir -Force | Out-Null
+        $script:KeepPath = Join-Path $script:KeepDir 'state.json'
+        Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1') -FailedAttempts @([pscustomobject]@{ Id = 'failed-1'; Name = 'F'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 })
+        $script:KeepBefore = Get-Content -LiteralPath $script:KeepPath -Raw
+    }
+
+    It 'a write that stops part-way (a full disk) leaves the old state, warns, and leaks no error' {
+        # The write leaves a cut temp file and a non-terminating error, as
+        # Set-Content does when the disk fills.
+        Mock Set-Content -MockWith {
+            [System.IO.File]::WriteAllText([string]$PesterBoundParameters['Path'], '{"TenantID": "t", "Compl')
+            Write-Error 'stand-in: no space left on the disk'
+        }
+        Mock Write-Host -MockWith { }
+        $Out = @(Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1', 'done-2') 2>&1)
+        @($Out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count | Should -Be 0
+        Get-Content -LiteralPath $script:KeepPath -Raw | Should -Be $script:KeepBefore
+        @(Get-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't') | Should -Be @('done-1')
+        @(Get-FailedAttempts -Path $script:KeepPath -Tenant 't').Id | Should -Be @('failed-1')
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '*WARNING: Failed to persist resume state to *no space left on the disk*' }
+        Test-Path -LiteralPath "$script:KeepPath.tmp" | Should -BeFalse
+    }
+
+    It 'a temp path that cannot be written (a folder is there) leaves the old state, warns about the write, and leaks no error' {
+        New-Item -ItemType Directory -Path "$script:KeepPath.tmp" -Force | Out-Null
+        Mock Write-Host -MockWith { }
+        $Out = @(Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1', 'done-2') 2>&1)
+        @($Out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count | Should -Be 0
+        Get-Content -LiteralPath $script:KeepPath -Raw | Should -Be $script:KeepBefore
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('WARNING: Failed to persist resume state to {0}: *' -f $script:KeepPath) }
+    }
+}
+
 Describe 'A resume state warning that cannot be written' {
     # Both state writes run inside a subscription's try, after its success
     # row is added. When the inventory folder is gone the console or

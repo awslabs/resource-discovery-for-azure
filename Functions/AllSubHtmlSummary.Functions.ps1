@@ -309,11 +309,11 @@ function New-RdaAllSubHtmlSummary
     $VersionSafe = if ([string]::IsNullOrWhiteSpace([string]$Version)) { '' } else { ConvertTo-HtmlSafe ([string]$Version) }
     $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { ConvertTo-HtmlSafe ([string]$PlatOS) }
 
-    # Follows the redaction gate, so an obfuscated run whose reports hold no
-    # records to sample still says it is obfuscated.
-    # "Safe to share" only when the caller says the run masked its output
-    # (-Obfuscated, which the wrapper passes for -Obfuscate). Names that only
-    # look masked in a sample of records prove nothing about the rest.
+    # Follows the redaction gate ($IsObfuscated), so an -Obfuscated run whose
+    # reports hold no records to sample still says it is obfuscated. "Safe to
+    # share" only when the caller says the run masked its output (-Obfuscated,
+    # which the wrapper passes for -Obfuscate): names that only look masked in
+    # a sample of records prove nothing about the rest.
     $PrivacyBanner = if ($Obfuscated.IsPresent)
     {
         '<div class="privacy-banner obfuscated"><span>&#128274;</span><div><b>Obfuscated.</b> Names shown are deterministic pseudonyms (prod_/nonprod_ prefixes); no real identifiers are present. Safe to share.</div></div>'
@@ -472,7 +472,7 @@ $ChartsHtml
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
     # The same gate as the privacy banner, so an obfuscated run whose reports
     # hold no records to sample does not call itself identifiable here either.
-    $PrivacyText = if ($IsObfuscated) { 'obfuscated' } else { 'identifiable' }
+    $PrivacyText = if ($Obfuscated.IsPresent) { 'obfuscated' } elseif ($IsObfuscated) { 'obfuscated (sample only; review before sharing)' } else { 'identifiable' }
     Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $PrivacyText) -ForegroundColor DarkGray
 }
 

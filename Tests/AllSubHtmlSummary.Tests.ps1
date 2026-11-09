@@ -183,6 +183,9 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         $Html | Should -Not -Match 'Safe to share|no real identifiers are present'
         $Html | Should -Match 'Only a sample was checked'
 
+        $Console = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Sampled 6>&1 | ForEach-Object { [string]$_ } | Where-Object { $_ -like '*Privacy:*' })
+        $Console[0] | Should -BeLike '* Privacy: obfuscated (sample only; review before sharing).'
+
         $Told = Join-Path $Run 'told.html'
         New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Told -Obfuscated | Out-Null
         Get-Content -Path $Told -Raw | Should -Match 'Safe to share'

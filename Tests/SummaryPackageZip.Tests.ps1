@@ -533,3 +533,71 @@ Describe 'Get-RdaPathComparer and Get-RdaOnDiskName in an empty or reused folder
         Get-RdaOnDiskName -Path (Join-Path $Dir 'ResourcesReport_X') | Should -BeExactly 'ResourcesReport_X'
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip writes within one budget, and only real reports' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        function script:New-InnerZip
+        {
+            param([string]$Path, [string]$Stamp, [int]$ExtraHtml = 0, [switch]$NoInventory, [string]$Html = '<html>new</html>')
+            $Zip = [System.IO.Compression.ZipFile]::Open($Path, 'Create')
+            try
+            {
+                $Put = { param($Name, $Text) $E = $Zip.CreateEntry($Name); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write($Text) } finally { $W.Dispose() } }
+                if (-not $NoInventory) { & $Put ('Inventory_ResourcesReport_' + $Stamp + '.json') '{"Version":"3.2.3","PublicIP":[{"Name":"pip","Subscription":"Sub"}]}' }
+                & $Put ('ResourcesReport_' + $Stamp + '.html') $Html
+                foreach ($N in 1..$ExtraHtml) { & $Put ('extra-' + $N + '.html') 'x' }
+            }
+            finally { $Zip.Dispose() }
+        }
+    }
+
+    It 'stops before writing anything when the report zips together hold more than 2000 files to write' {
+        $Root = Join-Path $script:TmpRoot 'budget'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        New-InnerZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405061.zip') -Stamp '20260102030405061' -ExtraHtml 1000
+        New-InnerZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405062.zip') -Stamp '20260102030405062' -ExtraHtml 1000
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-10.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $Out = Join-Path $Root 'out'
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*more than 2000 files in all*'
+        @(Get-ChildItem -LiteralPath $Out -Recurse -File -ErrorAction SilentlyContinue) | Should -BeNullOrEmpty
+    }
+
+    It 'leaves a file already in the folder alone when a report zip of that name holds no inventory' {
+        $Root = Join-Path $script:TmpRoot 'html-only'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        New-InnerZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405071.zip') -Stamp '20260102030405071'
+        New-InnerZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405072.zip') -Stamp '20260102030405072' -NoInventory
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-11.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $Out = Join-Path $Root 'out'
+        $Kept = Join-Path $Out 'ResourcesReport_20260102030405072/ResourcesReport_20260102030405072.html'
+        New-Item -ItemType Directory -Path (Split-Path $Kept -Parent) -Force | Out-Null
+        Set-Content -LiteralPath $Kept -Value 'an earlier report' -NoNewline
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null | Out-Null
+        Get-Content -LiteralPath $Kept -Raw | Should -Be 'an earlier report'
+    }
+
+    It 'keeps the extracted report html when the re-render fails part-way' {
+        # A copy of the functions beside a stand-in renderer that writes part of its file, then fails.
+        $Tree = Join-Path $script:TmpRoot 'render-tree'
+        New-Item -ItemType Directory -Path (Join-Path $Tree 'Functions'), (Join-Path $Tree 'Extension') -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') -Destination (Join-Path $Tree 'Functions')
+        Set-Content -LiteralPath (Join-Path $Tree 'Extension/Summary.ps1') -Value 'param($JsonFile, $HtmlFile, $Title, $Version, $PlatOS) Set-Content -LiteralPath $HtmlFile -Value "<html>part"; throw "renderer failed"'
+        . (Join-Path $Tree 'Functions/AllSubHtmlSummary.Functions.ps1')
+        $Root = Join-Path $script:TmpRoot 'render'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        New-InnerZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405081.zip') -Stamp '20260102030405081' -Html '<html>original</html>'
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-12.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $Out = Join-Path $Root 'out'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null | Out-Null
+        Get-Content -LiteralPath (Join-Path $Out 'ResourcesReport_20260102030405081/ResourcesReport_20260102030405081.html') -Raw | Should -Be '<html>original</html>'
+        @(Get-ChildItem -LiteralPath (Join-Path $Out 'ResourcesReport_20260102030405081') -Filter '*.partial') | Should -BeNullOrEmpty
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+    }
+}

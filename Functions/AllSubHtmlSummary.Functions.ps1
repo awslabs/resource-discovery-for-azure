@@ -686,7 +686,12 @@ function New-RdaAllSubHtmlSummaryFromZip
     # readable by this user only on Linux and macOS: it holds customer reports.
     $Staging = Join-Path ([System.IO.Path]::GetTempPath()) ('RdaFromZip_' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $Staging -ErrorAction Stop | Out-Null
-    if (-not $IsWindows) { [System.IO.File]::SetUnixFileMode($Staging, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute') }
+    if (-not $IsWindows)
+    {
+        # File.SetUnixFileMode needs .NET 7 (PowerShell 7.3); chmod otherwise.
+        if ('System.IO.UnixFileMode' -as [type]) { [System.IO.File]::SetUnixFileMode($Staging, ('System.IO.UnixFileMode' -as [type])::UserRead -bor ('System.IO.UnixFileMode' -as [type])::UserWrite -bor ('System.IO.UnixFileMode' -as [type])::UserExecute) }
+        else { & chmod 700 $Staging }
+    }
     try
     {
         Expand-Archive -LiteralPath $InputZip -DestinationPath $Staging -Force
@@ -708,53 +713,68 @@ function New-RdaAllSubHtmlSummaryFromZip
         # same name may already hold other files (an earlier bundle's report, a
         # revealed copy); -PackageZip bundles only these files, never the rest.
         $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer -Path $OutputDirectory))
+        # First, read only: which report zips to rebuild and which of their
+        # entries to write. A second zip of a name already planned is skipped
+        # (the first one is kept), so is a zip with no inventory (it is not a
+        # report), and nothing is written until every planned entry fits one
+        # budget for the whole rebuild: the 2000 entries and 32 GB a report
+        # zip may hold in all.
+        $Plan = New-Object System.Collections.Generic.List[object]
+        $PlanSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
+        [long]$PlanBytes = 0
+        $PlanCount = 0
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which
             # matches the ResourcesReport* glob New-RdaAllSubHtmlSummary discovers.
             $FolderName = [System.IO.Path]::GetFileNameWithoutExtension($InnerZip.Name)
             $Dest = Join-Path $OutputDirectory $FolderName
-            # A second report zip of the same name (in another folder of the
-            # input) would write over the first: the first one is kept.
-            if ($DestSeen.Contains($Dest))
+            if ($PlanSeen.Contains($Dest))
             {
                 Write-Host ("  Skipped a second report zip named {0} in the input zip; the first one is used." -f $InnerZip.Name) -ForegroundColor Yellow
                 continue
             }
             Assert-RdaZipWithinLimits -Path $InnerZip.FullName
-            $DestNew = -not (Test-Path -LiteralPath $Dest)
-            New-Item -ItemType Directory -Path $Dest -Force | Out-Null
-            $HasInventory = $false
             $Archive = [System.IO.Compression.ZipFile]::OpenRead($InnerZip.FullName)
             try
             {
-                foreach ($Entry in $Archive.Entries)
+                # Never pull a *_revealed* (de-obfuscated) report across: it holds
+                # real identifiers and would otherwise ride along in a shareable
+                # -PackageZip bundle. Only the obfuscated per-sub html + the
+                # Inventory json (the summary's input) are reconstructed.
+                $Picked = @($Archive.Entries | Where-Object { ($_.Name -like 'Inventory_*.json') -or (($_.Name -like '*.html') -and ($_.Name -notlike '*_revealed*')) } | ForEach-Object { [pscustomobject]@{ Name = $_.Name; FullName = $_.FullName; Length = $_.Length } })
+            }
+            finally { $Archive.Dispose() }
+            if (@($Picked | Where-Object { $_.Name -like 'Inventory_*.json' }).Count -eq 0)
+            {
+                Write-Host ("  Skipped {0}: it holds no Inventory_*.json." -f $InnerZip.Name) -ForegroundColor Yellow
+                continue
+            }
+            $PlanCount += $Picked.Count
+            foreach ($P in $Picked) { $PlanBytes += $P.Length }
+            if ($PlanCount -gt 2000) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report zips in {0} would write more than 2000 files in all.' -f $ZipItem.Name) }
+            if ($PlanBytes -gt 32GB) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report zips in {0} would write more than 32 GB in all.' -f $ZipItem.Name) }
+            [void]$PlanSeen.Add($Dest)
+            $Plan.Add([pscustomobject]@{ Zip = $InnerZip; Dest = $Dest; Entries = @($Picked | ForEach-Object { $_.FullName }) })
+        }
+
+        # Then the writes, only the planned entries.
+        foreach ($Item in $Plan)
+        {
+            $Dest = $Item.Dest
+            New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+            $Archive = [System.IO.Compression.ZipFile]::OpenRead($Item.Zip.FullName)
+            try
+            {
+                foreach ($Entry in @($Archive.Entries | Where-Object { $Item.Entries -ccontains $_.FullName }))
                 {
-                    # Never pull a *_revealed* (de-obfuscated) report across: it holds
-                    # real identifiers and would otherwise ride along in a shareable
-                    # -PackageZip bundle. Only the obfuscated per-sub html + the
-                    # Inventory json (the summary's input) are reconstructed.
-                    if (($Entry.Name -like 'Inventory_*.json') -or (($Entry.Name -like '*.html') -and ($Entry.Name -notlike '*_revealed*')))
-                    {
-                        $Target = Join-Path $Dest $Entry.Name
-                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
-                        if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
-                        if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
-                        if ($Entry.Name -like 'Inventory_*.json') { $HasInventory = $true }
-                    }
+                    $Target = Join-Path $Dest $Entry.Name
+                    [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
+                    if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
+                    if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
                 }
             }
             finally { $Archive.Dispose() }
-            # A report needs its inventory; a zip without one is not a report
-            # and is not counted (its html, if any, is left out too).
-            if (-not $HasInventory)
-            {
-                Write-Host ("  Skipped {0}: it holds no Inventory_*.json." -f $InnerZip.Name) -ForegroundColor Yellow
-                foreach ($Written in @($WrittenFiles[$Dest] | Where-Object { $_ })) { Remove-Item -LiteralPath $Written -Force -ErrorAction SilentlyContinue }
-                [void]$WrittenFiles.Remove($Dest)
-                if ($DestNew) { Remove-Item -LiteralPath $Dest -Force -Recurse -ErrorAction SilentlyContinue }
-                continue
-            }
             if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) }
             $Reconstructed++
         }
@@ -829,14 +849,22 @@ function New-RdaAllSubHtmlSummaryFromZip
                 $ExistingHtml = $Mine | Where-Object { $_.Name -like '*.html' -and $_.Name -notlike '*_revealed*' } | Select-Object -First 1
                 $TargetHtml = if ($null -ne $ExistingHtml) { $ExistingHtml.FullName } else { Join-Path $SubDir.FullName ($SubDir.Name + '.html') }
                 if (-not $WrittenFiles[$SubDir.FullName].Contains($TargetHtml)) { $WrittenFiles[$SubDir.FullName].Add($TargetHtml) }
+                # Rendered to a private name beside it and moved over the html
+                # only when it worked, so a failed render keeps the original.
+                $RenderPartial = '{0}.rda-{1}.partial' -f $TargetHtml, [guid]::NewGuid().ToString('N')
                 try
                 {
-                    & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $TargetHtml -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
+                    & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $RenderPartial -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
+                    [System.IO.File]::Move($RenderPartial, $TargetHtml, $true)
                     $ReRendered++
                 }
                 catch
                 {
                     Write-Host ("  Re-render skipped for {0} (kept original): {1}" -f $SubDir.Name, $_.Exception.Message) -ForegroundColor Yellow
+                }
+                finally
+                {
+                    if (Test-Path -LiteralPath $RenderPartial) { Remove-Item -LiteralPath $RenderPartial -Force -ErrorAction SilentlyContinue }
                 }
             }
             Write-Host ("Re-rendered {0} per-subscription report(s) with the current renderer." -f $ReRendered) -ForegroundColor Green

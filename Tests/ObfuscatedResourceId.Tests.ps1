@@ -29,13 +29,14 @@ BeforeAll {
 
     # A masked id with each prod_/nonprod_ token taken out, so a leak check on
     # a short real name ('aa-a') is not set off by a token's random GUID. Only
-    # tokens go (the same form as $script:Token): a real subscription GUID left
-    # in the text is still seen, and nothing is put in their place that a real
-    # name could match.
+    # whole path segments that are a token go (the same form as
+    # $script:Token): a real subscription GUID, or a real name that holds a
+    # token-like part, is still seen, and nothing is put in their place that a
+    # real name could match.
     function Get-TextOutsideTokenGuid
     {
         param([string]$Text)
-        return ($Text -replace $script:Token, '')
+        return ($Text -replace ('(?<=^|/)' + $script:Token + '(?=/|$)'), '')
     }
 
     function Reset-ObfuscationState
@@ -87,6 +88,7 @@ Describe 'Get-ObfuscatedResourceId' {
         Get-TextOutsideTokenGuid ($Masked + '/runbooks/aa-a') | Should -Match ([regex]::Escape('aa-a')) -Because 'a real name outside a token is still caught'
         Get-TextOutsideTokenGuid "/subscriptions/$script:Sub/resourcegroups/prod_11111111-1111-4111-8111-111111111111" | Should -Match ([regex]::Escape($script:Sub)) -Because 'a real subscription GUID is not a token, so it is still caught'
         Get-TextOutsideTokenGuid $Masked | Should -Not -Match 'token' -Because 'nothing a real name such as token could match is left where a token was'
+        Get-TextOutsideTokenGuid ($Masked + '/runbooks/rb-prod_11111111-1111-4111-8111-111111111111') | Should -Match ([regex]::Escape('rb-prod_11111111-1111-4111-8111-111111111111')) -Because 'a real segment that only holds a token-like part is not taken out'
     }
 
     It 'uses the parent resource''s own name token for the parent segment' {

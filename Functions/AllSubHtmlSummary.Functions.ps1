@@ -575,7 +575,18 @@ $ChartsHtml
 </div></body></html>
 "@
 
-    $Html | Out-File -FilePath $HtmlFile -Encoding utf8
+    # Written under a private name beside it and moved over it only when the
+    # write worked, so a failed write keeps an earlier summary whole.
+    $HtmlPartial = '{0}.rda-{1}.partial' -f $HtmlFile, [guid]::NewGuid().ToString('N')
+    try
+    {
+        $Html | Out-File -FilePath $HtmlPartial -Encoding utf8
+        [System.IO.File]::Move($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HtmlPartial), $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HtmlFile), $true)
+    }
+    finally
+    {
+        if (Test-Path -LiteralPath $HtmlPartial) { Remove-Item -LiteralPath $HtmlPartial -Force -ErrorAction SilentlyContinue }
+    }
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
     Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
 }
@@ -666,6 +677,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     # Checked before anything is created or extracted, as downstream checks a
     # report zip.
     Assert-RdaZipWithinLimits -Path $ZipItem.FullName
+    $OutputMade = -not (Test-Path -LiteralPath $OutputDirectory)
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).ProviderPath
 
@@ -795,6 +807,8 @@ function New-RdaAllSubHtmlSummaryFromZip
         {
             $ExtractedFolders = @(Get-ChildItem -LiteralPath $Staging -Recurse -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -notlike '*_revealed*' })
+            # Planned first, against the same budget as report zips.
+            $FolderPlan = New-Object System.Collections.Generic.List[object]
             foreach ($Ef in $ExtractedFolders)
             {
                 $Files = @(Get-ChildItem -LiteralPath $Ef.FullName -File -ErrorAction SilentlyContinue | Where-Object { ($_.Name -like 'Inventory_*.json') -or (($_.Name -like '*.html') -and ($_.Name -notlike '*_revealed*')) })
@@ -802,13 +816,24 @@ function New-RdaAllSubHtmlSummaryFromZip
                 if (@($Files | Where-Object { $_.Name -like 'Inventory_*.json' }).Count -eq 0) { continue }
                 $Dest = Join-Path $OutputDirectory $Ef.Name
                 # A second folder of the same name: the first one is kept, as for report zips.
-                if ($DestSeen.Contains($Dest))
+                if ($PlanSeen.Contains($Dest))
                 {
                     Write-Host ("  Skipped a second report folder named {0} in the input zip; the first one is used." -f $Ef.Name) -ForegroundColor Yellow
                     continue
                 }
+                $PlanCount += $Files.Count
+                if (@($Files | Where-Object { $_.Name -like '*.html' }).Count -eq 0) { $PlanCount++ }
+                foreach ($F in $Files) { $PlanBytes += $F.Length }
+                if ($PlanCount -gt 2000) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report folders in {0} would write more than 2000 files in all.' -f $ZipItem.Name) }
+                if ($PlanBytes -gt 32GB) { throw ('New-RdaAllSubHtmlSummaryFromZip: the report folders in {0} would write more than 32 GB in all.' -f $ZipItem.Name) }
+                [void]$PlanSeen.Add($Dest)
+                $FolderPlan.Add([pscustomobject]@{ Dest = $Dest; Files = $Files })
+            }
+            foreach ($Item in $FolderPlan)
+            {
+                $Dest = $Item.Dest
                 New-Item -ItemType Directory -Path $Dest -Force | Out-Null
-                foreach ($F in $Files)
+                foreach ($F in $Item.Files)
                 {
                     $Target = Join-Path $Dest $F.Name
                     Copy-Item -LiteralPath $F.FullName -Destination $Target -Force
@@ -819,6 +844,12 @@ function New-RdaAllSubHtmlSummaryFromZip
                 $Reconstructed++
             }
         }
+    }
+    catch
+    {
+        # A refused or failed rebuild leaves no empty -OutputDirectory it made.
+        if ($OutputMade -and @(Get-ChildItem -LiteralPath $OutputDirectory -Force -ErrorAction SilentlyContinue).Count -eq 0) { Remove-Item -LiteralPath $OutputDirectory -Force -ErrorAction SilentlyContinue }
+        throw
     }
     finally
     {
@@ -938,17 +969,10 @@ function New-RdaAllSubHtmlSummaryFromZip
                 foreach ($E in $Entries) { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Package, $E.Path, $E.Name) }
             }
             finally { $Package.Dispose() }
-            # Checked as written (the re-rendered html can be larger than what
-            # was extracted) before it takes its name.
-            $Check = [System.IO.Compression.ZipFile]::OpenRead($PartialPackage)
-            try
-            {
-                $Count = @($Check.Entries).Count
-                [long]$Bytes = 0
-                foreach ($E in $Check.Entries) { $Bytes += $E.Length }
-            }
-            finally { $Check.Dispose() }
-            if ($Count -gt 2000 -or $Bytes -gt 32GB) { throw ('New-RdaAllSubHtmlSummaryFromZip: the bundle would hold {0} files and {1:N0} bytes, more than 2000 files or 32 GB.' -f $Count, $Bytes) }
+            # Checked as written, with the limits a report zip is held to (the
+            # re-rendered html can be larger than what was extracted, and
+            # recompressing can pack it tighter), before it takes its name.
+            Assert-RdaZipWithinLimits -Path $PartialPackage
             [System.IO.File]::Move($PartialPackage, $PackageZipPath, $true)
         }
         finally

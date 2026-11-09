@@ -625,3 +625,58 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip counts the files it renders in its bud
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory (Join-Path $Root 'out') 6>$null } | Should -Throw '*more than 2000 files in all*'
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip budget for extracted folders, the bundle check and the summary write' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'plans extracted report folders against the same budget, writing nothing when they pass it' {
+        $Root = Join-Path $script:TmpRoot 'folder-budget'
+        $Stage = Join-Path $Root 'outer'
+        foreach ($N in 1..1000)
+        {
+            $Stamp = '2026010204{0:D7}' -f $N
+            $Dir = Join-Path $Stage ('ResourcesReport_' + $Stamp)
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $Dir ('Inventory_ResourcesReport_' + $Stamp + '.json')) -Value '{"Version":"3.2.3"}'
+        }
+        $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-14.zip'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Outer)
+        $Out = Join-Path $Root 'out'
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $Out 6>$null } | Should -Throw '*more than 2000 files in all*'
+        Test-Path -LiteralPath $Out | Should -BeFalse -Because 'a refused rebuild leaves no folder it made'
+    }
+
+    It 'checks the bundle as written with the report zip limits, and leaves no bundle when it fails them' {
+        $Root = Join-Path $script:TmpRoot 'bundle-ratio'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        $Stamp = '20260102030405091'
+        # The inventory stored without compression: inside limits as given,
+        # but the bundle packs it far tighter than 100 to 1.
+        $Inner = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+        try
+        {
+            $E = $Inner.CreateEntry('Inventory_ResourcesReport_' + $Stamp + '.json', 'NoCompression')
+            $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('{"Version":"3.2.3"' + (' ' * 4MB) + '}') } finally { $W.Dispose() }
+        }
+        finally { $Inner.Dispose() }
+        $Outer = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-15.zip'
+        $O = [System.IO.Compression.ZipFile]::Open($Outer, 'Create'); try { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($O, (Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), ('ResourcesReport_' + $Stamp + '.zip'), 'NoCompression') } finally { $O.Dispose() }
+        $Out = Join-Path $Root 'out'
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $Out -PackageZip -KeepOriginalReports 6>$null } | Should -Throw '*more than 100 to 1*'
+        Test-Path -LiteralPath ($Out + '.zip') | Should -BeFalse
+    }
+
+    It 'keeps an earlier main summary whole when writing the new one fails' {
+        $Run = Join-Path $script:TmpRoot 'summary-write'
+        $Dir = Join-Path $Run 'ResourcesReport_20260102030405095'
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        '{"Version":"3.2.3","PublicIP":[{"Name":"pip","Subscription":"Sub"}]}' | Set-Content -LiteralPath (Join-Path $Dir 'Inventory_ResourcesReport_20260102030405095.json')
+        $Html = Join-Path $Run 'MainSummary.html'
+        Set-Content -LiteralPath $Html -Value 'an earlier summary' -NoNewline
+        Mock Out-File { Set-Content -LiteralPath $FilePath -Value '<html>part'; throw 'disk full' } -RemoveParameterType Encoding
+        { New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Html 6>$null } | Should -Throw '*disk full*'
+        Get-Content -LiteralPath $Html -Raw | Should -Be 'an earlier summary'
+        @(Get-ChildItem -LiteralPath $Run -Filter '*.partial') | Should -BeNullOrEmpty
+    }
+}

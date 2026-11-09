@@ -499,6 +499,13 @@ Describe 'Retry limit on the parallel path' {
         @(script:Get-Lines -Run $Run4 -Like 'Not retried:*') | Should -Be @($script:NotRetriedX)
     }
 
+    It 'a run in which a subscription fails exits 2, not 0 (<Label>)' -ForEach @(@{ Label = 'sequential'; Streams = 1 }, @{ Label = 'parallel'; Streams = 2 }) {
+        $Global:RdaRlFailIds = @('sub-x')
+        $R = script:Invoke-Run -Subs @($script:A, $script:B, $script:X) -Streams $Streams
+        @($R.Result.FailedSubscriptions).Count | Should -BeGreaterThan 0
+        $R.Result.WrapperExitCode | Should -Be 2
+    }
+
     It 'a parallel -Resume after a merged run collects only what is left, not the completed subscriptions again' {
         $Global:RdaRlFailIds = @('sub-x')
         $Subs = @($script:A, $script:B, $script:X)

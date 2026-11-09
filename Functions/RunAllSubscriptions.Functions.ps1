@@ -906,6 +906,7 @@ function Get-RunSummaryLogContent
         [int]$Processed,
         [int]$Skipped,
         # Per-subscription health collections ({ Name; Id } / { Name; Id; Message }).
+        # FailedSubscriptions may also hold text (a stream with no readable summary).
         $EmptyNoAccess = @(),
         $EmptyGenuinelyEmpty = @(),
         $EmptyUndetermined = @(),
@@ -1085,7 +1086,13 @@ function Get-RunSummaryLogContent
         {
             $Lines.Add('')
             $Lines.Add('Failed subscriptions (detail):')
-            foreach ($FailedSub in $Failed) { $Lines.Add(('  - {0} ({1})' -f [string]$FailedSub.Name, [string]$FailedSub.Id)) }
+            # The wrapper passes { Name; Id } for a subscription that failed and
+            # text for a stream it could not read; text is printed as given.
+            foreach ($FailedSub in $Failed)
+            {
+                if ($FailedSub -is [string]) { $Lines.Add(('  - {0}' -f $FailedSub)) }
+                else { $Lines.Add(('  - {0} ({1})' -f [string]$FailedSub.Name, [string]$FailedSub.Id)) }
+            }
         }
         if ($NoAccess.Count -gt 0)
         {

@@ -400,6 +400,9 @@ Disable-ConsoleQuickEdit
 
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
+# The same failures for RunSummary.log: { Name; Id } for a subscription, the
+# $FailedSubscriptions text for a stream with no readable summary.
+$FailedSubscriptionDetail = @()
 
 # Per-subscription metrics-phase auth health, aggregated across the whole run.
 # This is the metrics counterpart to $Global:ConsumptionFailedSubs and works the
@@ -991,6 +994,7 @@ if ($ParallelStreams -le 1)
             catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
 
             $FailedSubscriptions += $Sub.Name
+            $FailedSubscriptionDetail += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id }
             # Persist the failure to the resume-state file so a future run with
             # -ResumeFailedOnly can target it. Use the exception message as the
             # Reason so the operator can see at a glance why each sub failed
@@ -1104,6 +1108,7 @@ else
                 try { $DiagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
                 catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
                 $FailedSubscriptions += $Sub.Name
+                $FailedSubscriptionDetail += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id }
                 # Mirror the sequential branch: persist failure to the
                 # resume-state file so -ResumeFailedOnly works even for the
                 # single-sub-collapses-to-inline corner case.
@@ -1277,6 +1282,7 @@ else
                 {
                     Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $S.StreamId, $S.SummaryPath) -ForegroundColor Yellow
                     $FailedSubscriptions += ("stream-{0} (no summary)" -f $S.StreamId)
+                    $FailedSubscriptionDetail += $FailedSubscriptions[-1]
                     continue
                 }
                 try
@@ -1287,6 +1293,7 @@ else
                 {
                     Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $S.StreamId, $S.SummaryPath, $_.Exception.Message) -ForegroundColor Red
                     $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
+                    $FailedSubscriptionDetail += $FailedSubscriptions[-1]
                     continue
                 }
 
@@ -1319,6 +1326,7 @@ else
                     foreach ($f in $StreamSummary.Failed)
                     {
                         $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $f.Name, $S.StreamId, $f.Reason)
+                        $FailedSubscriptionDetail += [pscustomobject]@{ Name = $f.Name; Id = $f.Id }
                     }
                 }
 
@@ -1947,7 +1955,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
             -Visible $AllSubscriptions.Count -Excluded $Excluded.Count `
             -Eligible $Subscriptions.Count -Processed ($Subscriptions.Count - $SkippedCount) -Skipped $SkippedCount `
             -EmptyNoAccess $NoAccessSubs -EmptyGenuinelyEmpty $GenuinelyEmptySubs -EmptyUndetermined $UnknownSubs `
-            -FailedSubscriptions $FailedSubscriptions `
+            -FailedSubscriptions $FailedSubscriptionDetail `
             -CollectorFailures $Global:CollectorFailures `
             -MetricsFailedSubs $Global:MetricsFailedSubs `
             -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `

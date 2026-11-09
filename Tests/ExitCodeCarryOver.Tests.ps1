@@ -360,6 +360,27 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
+    It 'sequential: RunSummary.log lists the failed subscription by its name and id' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -FailSub $script:SubA.Id
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.RunSummary | Should -Match ('(?m)^  - {0} \({1}\)\s*$' -f [regex]::Escape($script:SubA.Name), [regex]::Escape($script:SubA.Id)) -Because $Run.RunSummary
+        $Run.RunSummary | Should -Not -Match '(?m)^  -  \(\)' -Because $Run.RunSummary
+    }
+
+    It 'one stream: RunSummary.log lists the subscription that failed in a stream by its name and id' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -FailSub $script:SubA.Id -Streams 2
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.RunSummary | Should -Match ('(?m)^  - {0} \({1}\)\s*$' -f [regex]::Escape($script:SubA.Name), [regex]::Escape($script:SubA.Id)) -Because $Run.RunSummary
+        $Run.RunSummary | Should -Not -Match '(?m)^  -  \(\)' -Because $Run.RunSummary
+    }
+
+    It 'two streams: RunSummary.log lists a stream whose summary could not be read as the wrapper names it' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -CorruptStreamSummary
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.RunSummary | Should -Match '(?m)^  - stream-0 \(corrupt summary\)\s*$' -Because $Run.RunSummary
+        $Run.RunSummary | Should -Not -Match '(?m)^  -  \(\)' -Because $Run.RunSummary
+    }
+
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -PriorExitCode 1
         $Run.Console | Should -Not -Match 'ERROR processing subscription' -Because $Run.Console

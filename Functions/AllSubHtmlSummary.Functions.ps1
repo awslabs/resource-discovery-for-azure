@@ -516,7 +516,8 @@ function New-RdaAllSubHtmlSummary
     $IsObfuscated = $Obfuscated.IsPresent -or ($ObfuscationStatus -eq 'obfuscated')
 
     $SubReports = @($SubReports | Sort-Object -Property Total -Descending)
-    $RunTotalResources = [int](($SubReports | Measure-Object -Property Total -Sum).Sum)
+    # A plain sum: 0 with no reports, also under strict mode.
+    $RunTotalResources = 0; foreach ($SubRow in $SubReports) { $RunTotalResources += [int]$SubRow.Total }
     $SubCount = $SubReports.Count
     $EmptyCount = @($SubReports | Where-Object { $_.Total -eq 0 }).Count
 
@@ -898,7 +899,7 @@ function New-RdaAllSubHtmlSummaryFromZip
             $Dest = Join-Path $OutputDirectory $FolderName
             if ($PlanSeen.Contains($Dest))
             {
-                Write-Host ("  Skipped a second report zip named {0} in the input zip; the first one is used." -f $InnerZip.Name) -ForegroundColor Yellow
+                Write-Warning ("Skipped a second report zip named {0} in the input zip; the first one is used." -f $InnerZip.Name)
                 continue
             }
             Assert-RdaZipWithinLimit -Path $InnerZip.FullName
@@ -914,7 +915,7 @@ function New-RdaAllSubHtmlSummaryFromZip
             finally { $Archive.Dispose() }
             if (@($Picked | Where-Object { $_.Name -like 'Inventory_*.json' }).Count -eq 0)
             {
-                Write-Host ("  Skipped {0}: it holds no Inventory_*.json." -f $InnerZip.Name) -ForegroundColor Yellow
+                Write-Warning ("Skipped {0}: it holds no Inventory_*.json." -f $InnerZip.Name)
                 continue
             }
             # A report folder already there that is a link or junction would take
@@ -979,7 +980,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 # A second folder of the same name: the first one is kept, as for report zips.
                 if ($PlanSeen.Contains($Dest))
                 {
-                    Write-Host ("  Skipped a second report folder named {0} in the input zip; the first one is used." -f $Ef.Name) -ForegroundColor Yellow
+                    Write-Warning ("Skipped a second report folder named {0} in the input zip; the first one is used." -f $Ef.Name)
                     continue
                 }
                 # A report folder already there that is a link or junction would take

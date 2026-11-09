@@ -323,7 +323,7 @@ Describe 'Build-MainSummaryFromZip with two report zips of the same name in the 
         $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-06.zip'
         Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
         $script:TwiceOut = Join-Path $Root 'out'
-        $script:TwiceLines = @(& $script:Script -InputZip $Zip -OutputDirectory $script:TwiceOut 6>&1 | ForEach-Object { [string]$_ })
+        $script:TwiceLines = @(& $script:Script -InputZip $Zip -OutputDirectory $script:TwiceOut 3>&1 6>&1 | ForEach-Object { [string]$_ })
     }
 
     It 'rebuilds the report once, says so, and counts it once' {
@@ -341,7 +341,7 @@ Describe 'Build-MainSummaryFromZip with two extracted report folders of the same
         foreach ($Sub in 'a', 'b') { New-SubReportFiles -Dir (Join-Path $Stage ('{0}/ResourcesReport_{1}' -f $Sub, $Stamp)) -Stamp $Stamp -SubName ('Sub ' + $Sub) }
         $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-07.zip'
         Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
-        $script:TwiceFolderLines = @(& $script:Script -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>&1 | ForEach-Object { [string]$_ })
+        $script:TwiceFolderLines = @(& $script:Script -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 3>&1 6>&1 | ForEach-Object { [string]$_ })
     }
 
     It 'rebuilds the folder once, says so, and counts it once' {
@@ -364,7 +364,7 @@ Describe 'Build-MainSummaryFromZip report zips whose names differ only in case' 
         $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-08.zip'
         Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
         $script:CaseOut = Join-Path $Root 'out'
-        $script:CaseLines = @(& $script:Script -InputZip $Zip -OutputDirectory $script:CaseOut 6>&1 | ForEach-Object { [string]$_ })
+        $script:CaseLines = @(& $script:Script -InputZip $Zip -OutputDirectory $script:CaseOut 3>&1 6>&1 | ForEach-Object { [string]$_ })
         . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
     }
 
@@ -1452,5 +1452,29 @@ Describe 'Extension/Summary.ps1 service type count' {
         $Html = Join-Path $Dir 'r.html'
         & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile $Html -Title 'T' 6>$null | Out-Null
         [System.IO.File]::ReadAllText($Html) | Should -Match '<b>Service Types:</b> 1</div>'
+    }
+}
+
+Describe 'Totals of 0 under strict mode' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'renders a report with no resources with a total of 0' {
+        $Dir = Join-Path $script:TmpRoot 'zero-total'
+        [void][System.IO.Directory]::CreateDirectory($Dir)
+        $Json = Join-Path $Dir 'Inventory_zero.json'
+        [System.IO.File]::WriteAllText($Json, '{"Version":"3.2.3","PublicIP":[]}')
+        $Html = Join-Path $Dir 'r.html'
+        try { Set-StrictMode -Version Latest; & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile $Html -Title 'T' 6>$null | Out-Null }
+        finally { Set-StrictMode -Off }
+        [System.IO.File]::ReadAllText($Html) | Should -Match '<b>Total Resources:</b> 0</div>'
+    }
+
+    It 'renders the main summary of a run folder with no reports' {
+        $Run = Join-Path $script:TmpRoot 'no-reports-strict'
+        [void][System.IO.Directory]::CreateDirectory($Run)
+        $Html = Join-Path $Run 'MainSummary.html'
+        try { Set-StrictMode -Version Latest; { New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Html 6>$null } | Should -Not -Throw }
+        finally { Set-StrictMode -Off }
+        [System.IO.File]::ReadAllText($Html) | Should -BeLike '*No per-subscription reports*'
     }
 }

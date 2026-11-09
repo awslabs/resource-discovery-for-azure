@@ -436,6 +436,7 @@ function New-RdaAllSubHtmlSummary
     }
     $SubReports = @()
     $ServiceAgg = [ordered]@{}
+    $LinkByFolder = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer -Path $RunOutputDirectory))
 
     foreach ($Folder in $Folders)
     {
@@ -453,6 +454,14 @@ function New-RdaAllSubHtmlSummary
         }
         $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $null -eq $FolderAllowed -or $FolderAllowed.Contains($_.Name) } | Select-Object -First 1
         if ($null -eq $InvFile) { continue }
+        $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*_revealed*' -and ($null -eq $FolderAllowed -or $FolderAllowed.Contains($_.Name)) } | Select-Object -First 1
+        # Relative link so the summary travels with the report folder; found
+        # before the inventory is read, so a report whose inventory cannot be
+        # read still links its html.
+        $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
+
+        $LinkByFolder[$Folder.Name] = $Link
         try
         {
             $Inv = Get-Content -LiteralPath $InvFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
@@ -487,13 +496,11 @@ function New-RdaAllSubHtmlSummary
         }
         if (-not $SubName) { $SubName = '(name unavailable - 0 resources)' }
 
-        $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike '*_revealed*' -and ($null -eq $FolderAllowed -or $FolderAllowed.Contains($_.Name)) } | Select-Object -First 1
-        # Relative link so the summary travels with the report folder.
-        $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
-
         $SubReports += [pscustomobject]@{ Name = $SubName; Total = $Total; Link = $Link; Folder = $Folder.Name }
     }
+
+    # A report whose inventory could not be read keeps its html link.
+    foreach ($Sr in $SubReports) { if (-not $Sr.Link -and $LinkByFolder.ContainsKey($Sr.Folder) -and $LinkByFolder[$Sr.Folder]) { $Sr.Link = $LinkByFolder[$Sr.Folder] } }
 
     # Detect obfuscation posture the same way Summary.ps1 does (safe default: identifiable).
     $ObfuscationStatus = 'identifiable'

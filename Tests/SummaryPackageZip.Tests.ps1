@@ -1425,3 +1425,18 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip under strict mode, and the real script
         $Said | Should -Not -BeLike '*not found*'
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummary with an inventory that cannot be read' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'still links the report html' {
+        $Run = Join-Path $script:TmpRoot 'unreadable-link'
+        $Dir = Join-Path $Run 'ResourcesReport_20260102030405191'
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Dir 'Inventory_ResourcesReport_20260102030405191.json') -Value '{ not json'
+        Set-Content -LiteralPath (Join-Path $Dir 'ResourcesReport_20260102030405191.html') -Value '<html>report</html>'
+        $Html = Join-Path $Run 'MainSummary.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Html 6>$null | Out-Null
+        Get-Content -LiteralPath $Html -Raw | Should -Match 'href="ResourcesReport_20260102030405191[\\/]ResourcesReport_20260102030405191\.html"'
+    }
+}

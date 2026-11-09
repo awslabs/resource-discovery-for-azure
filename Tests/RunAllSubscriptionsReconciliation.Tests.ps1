@@ -403,6 +403,18 @@ Describe 'Save-CompletedSubscriptionIds keeps the old state when its write fails
         Get-Content -LiteralPath $script:KeepPath -Raw | Should -Be $script:KeepBefore
         Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('WARNING: Failed to persist resume state to {0}: *' -f $script:KeepPath) }
     }
+
+    It 'a folder with files at the temp path leaves the old state and the folder, warns, and does not throw' {
+        # Remove-Item on a folder with children and no -Recurse asks to
+        # confirm; in a run with no console that is a terminating error.
+        New-Item -ItemType Directory -Path "$script:KeepPath.tmp" -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path "$script:KeepPath.tmp" 'keep.txt') -Value 'x'
+        Mock Write-Host -MockWith { }
+        { $script:Out = @(Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1', 'done-2') -PassThru 2>&1) } | Should -Not -Throw
+        $script:Out[-1] | Should -BeFalse
+        Get-Content -LiteralPath $script:KeepPath -Raw | Should -Be $script:KeepBefore
+        Test-Path -LiteralPath (Join-Path "$script:KeepPath.tmp" 'keep.txt') -PathType Leaf | Should -BeTrue -Because 'only a temp file is removed, never a folder'
+    }
 }
 
 Describe 'A resume state warning that cannot be written' {

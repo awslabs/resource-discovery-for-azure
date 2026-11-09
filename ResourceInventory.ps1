@@ -527,12 +527,15 @@ Function RunInventorySetup()
                 Write-Log -Message ('Tenant ID not specified. Use -TenantID parameter if you want to specify directly.') -Severity 'Warning'
                 Write-Log -Message ('Authenticating Azure') -Severity 'Info'
 
+                # No Az debug lines during the sign-in; afterwards the caller's
+                # setting again (Continue only under -Debug).
+                $SavedDebugPreference = $DebugPreference
                 $DebugPreference = "SilentlyContinue"
                 if ($DeviceLogin.IsPresent) { Write-Log -Message ('Calling Login, using device login.') -Severity 'Info' }
                 else { Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info' }
 
-                Invoke-AzPsUserSignIn
-                $DebugPreference = "Continue"
+                try { Invoke-AzPsUserSignIn }
+                finally { $DebugPreference = $SavedDebugPreference }
 
                 # The tenants the sign-in reaches, by the tenant each
                 # subscription is accessed through (TenantId, not

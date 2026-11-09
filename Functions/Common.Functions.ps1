@@ -1319,7 +1319,15 @@ function Get-ConsumptionErrorStatusCode
     $Depth = 0
     while ($null -ne $Current -and $Depth -lt 6)
     {
-        foreach ($Candidate in @($Current.Response.StatusCode, $Current.StatusCode))
+        # Only some exceptions carry Response or StatusCode; read them only when
+        # present, so Set-StrictMode allows an exception without them.
+        $Props = $Current.PSObject.Properties
+        $Response = if ($null -ne $Props['Response']) { $Current.Response } else { $null }
+        $Candidates = @(
+            $(if ($null -ne $Response -and $null -ne $Response.PSObject.Properties['StatusCode']) { $Response.StatusCode })
+            $(if ($null -ne $Props['StatusCode']) { $Current.StatusCode })
+        )
+        foreach ($Candidate in $Candidates)
         {
             if ($null -eq $Candidate) { continue }
             try
@@ -1332,7 +1340,7 @@ function Get-ConsumptionErrorStatusCode
                 Write-Verbose ('Unrecognised status code value: {0}' -f $Candidate)
             }
         }
-        $Current = $Current.InnerException
+        $Current = if ($null -ne $Props['InnerException']) { $Current.InnerException } else { $null }
         $Depth++
     }
     return $null

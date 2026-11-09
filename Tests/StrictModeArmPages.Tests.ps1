@@ -44,6 +44,36 @@ Describe 'Reading an ARM page without nextLink under Set-StrictMode -Version Lat
     }
 }
 
+Describe 'Reading a failed call''s status under Set-StrictMode -Version Latest' {
+    BeforeEach { Set-StrictMode -Version Latest }
+    AfterEach { Set-StrictMode -Off }
+
+    It 'reads the status of an exception that has no Response, and none from one that has neither' {
+        $Http = [System.Net.Http.HttpRequestException]::new('HTTP 429', $null, [System.Net.HttpStatusCode]::TooManyRequests)
+        Get-ConsumptionErrorStatusCode -Exception $Http | Should -Be 429
+        Get-ConsumptionErrorStatusCode -Exception ([System.IO.IOException]::new('Error while copying content to a stream.')) | Should -BeNullOrEmpty
+        Get-ConsumptionErrorStatusCode -Exception ([System.Exception]::new('outer', $Http)) | Should -Be 429
+    }
+
+    It 'retries a role check call that was throttled once, and reads the next answer' {
+        Mock Start-Sleep { }
+        $script:RestCalls = 0
+        $script:ArmAnswer = $null
+        function global:Invoke-AzRestMethod { param([string]$Method, [string]$Path, [string]$Payload) $script:RestCalls++; if ($script:RestCalls -eq 1) { [pscustomobject]@{ StatusCode = 429; Content = '{}' } } else { [pscustomobject]@{ StatusCode = 200; Content = '{"value":[{"id":"a"}]}' } } }
+        try
+        {
+            $R = Invoke-RoleCheckGet -Path '/subscriptions/x/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01'
+        }
+        finally
+        {
+            function global:Invoke-AzRestMethod { param([string]$Method, [string]$Path, [string]$Payload) $script:ArmAnswer }
+        }
+        $R.Error | Should -BeNullOrEmpty
+        $R.Status | Should -Be 200
+        $script:RestCalls | Should -Be 2
+    }
+}
+
 Describe 'Reading a check result without Failed under Set-StrictMode -Version Latest' {
     BeforeAll {
         $script:Sub = [pscustomobject]@{ Id = '00000000-0000-0000-0000-000000000001'; Name = 'sub-one' }

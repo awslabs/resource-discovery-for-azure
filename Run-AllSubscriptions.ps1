@@ -513,11 +513,12 @@ if (-not (Test-Path -Path $InventoryRoot -PathType Container))
 # Start-Transcript is idempotent in the sense that we Stop it on every exit
 # path via Exit-Wrapper.
 $WrapperTranscriptStarted = $false
-$WrapperTranscriptFile = Join-Path $InventoryRoot ("RunAllSubscriptions_transcript_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+$WrapperTranscriptStem = "RunAllSubscriptions_transcript_{0}" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')
+$WrapperTranscriptFile = Join-Path $InventoryRoot ($WrapperTranscriptStem + '.txt')
 try
 {
     # Never another run's transcript of the same second (New-RunOutputFile).
-    $WrapperTranscriptFile = New-RunOutputFile -Directory $InventoryRoot -Stem ("RunAllSubscriptions_transcript_{0}" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')) -Extension '.txt'
+    $WrapperTranscriptFile = New-RunOutputFile -Directory $InventoryRoot -Stem $WrapperTranscriptStem -Extension '.txt'
     Start-Transcript -Path $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
     $WrapperTranscriptStarted = $true
     Write-Host ("Wrapper transcript: {0}" -f $WrapperTranscriptFile) -ForegroundColor DarkGray
@@ -1688,6 +1689,9 @@ $OuterZipFile = $null
 # Set when the consolidated ZIP could not be built or was lost afterwards;
 # named in the FAILED (consolidated zip) banner and gives exit code 2.
 $BundleBuildError = $null
+# Set when the inventory folder is gone at the end of a run that expected
+# report zips; named after the run summary and gives exit code 2.
+$InventoryFolderGone = $false
 
 if (Test-Path -Path $InventoryRoot -PathType Container)
 {
@@ -1741,13 +1745,9 @@ else
 {
     Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
     # Every report zip the run expected went with the folder, so none of them
-    # is in a consolidated zip: exit code 2, as for the report zip check above.
-    if ($ExpectedZipCount -gt 0)
-    {
-        Write-Host ""
-        Write-Host ("FAILED (report missing): the inventory folder {0} is gone, with the report zips and the resume state that were in it, so no consolidated zip was built. The next run collects every subscription again." -f $InventoryRoot) -ForegroundColor Red
-        Exit-Wrapper -Code 2
-    }
+    # is in a consolidated zip: a FAILED line after the run summary, and exit
+    # code 2 at the end, as for a consolidated zip that could not be built.
+    if ($ExpectedZipCount -gt 0) { $InventoryFolderGone = $true }
 }
 
 # Aggregate "main" HTML summary across all per-subscription reports from
@@ -1799,12 +1799,12 @@ if ($null -ne $OuterZipFile)
     catch
     {
         Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-        # The name this run reserved, still empty: it is removed, so no empty
-        # main summary is left or added to the consolidated zip.
+        # The name this run reserved (New-RunOutputFile): whatever the failed
+        # build left under it is removed, so no empty or partial main summary
+        # is left or added to the consolidated zip.
         if ($null -ne $MainSummaryFile)
         {
-            $Left = Get-Item -LiteralPath $MainSummaryFile -ErrorAction SilentlyContinue
-            if ($null -ne $Left -and $Left.Length -eq 0) { Remove-Item -LiteralPath $MainSummaryFile -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $MainSummaryFile -Force -ErrorAction SilentlyContinue
             $MainSummaryFile = $null
         }
     }
@@ -2199,6 +2199,14 @@ if ($null -ne $OuterZipFile)
     }
 }
 
+# The inventory folder went away during the run: its report zips and the
+# resume state went with it.
+if ($InventoryFolderGone)
+{
+    Write-Host ""
+    Write-Host ("FAILED (report missing): the inventory folder {0} is gone, with the report zips and the resume state that were in it, so no consolidated zip was built. The next run collects every subscription again." -f $InventoryRoot) -ForegroundColor Red
+}
+
 # The consolidated zip is the run's output. When it could not be built, or was
 # lost afterwards, this banner says so after the summary and the run exits 2
 # below, even though every per-subscription report was written.
@@ -2266,7 +2274,7 @@ if ($WrapperTranscriptStarted)
 
 # No consolidated zip means no report of this run is in it: exit 2, as for the
 # per-subscription verification gap, ahead of codes 3-5.
-if ($null -ne $BundleBuildError)
+if ($null -ne $BundleBuildError -or $InventoryFolderGone)
 {
     exit 2
 }

@@ -376,7 +376,7 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
 Describe 'Run-AllSubscriptions.ps1: the end of a run without a consolidated zip' {
     BeforeAll {
         $script:BannerBlock = [scriptblock]::Create((Find-WrapperIf -Condition '$null -ne $BundleBuildError' -Contains 'FAILED (consolidated zip)').Extent.Text)
-        $ExitIf = Find-WrapperIf -Condition '$null -ne $BundleBuildError' -Contains 'exit 2'
+        $ExitIf = Find-WrapperIf -Condition '$null -ne $BundleBuildError -or $InventoryFolderGone' -Contains 'exit 2'
         # From the exit-2 check to the end of the wrapper: the exit-code statements as they run.
         $script:TailText = $script:WrapperAst.Extent.Text.Substring($ExitIf.Extent.StartOffset - $script:WrapperAst.Extent.StartOffset)
         $script:Pwsh = (Get-Process -Id $PID).Path
@@ -472,18 +472,21 @@ Describe 'Run-AllSubscriptions.ps1: the transcript and the main summary of the s
         Mock Start-Transcript { }
         Set-Variable -Name InventoryRoot -Value $Root
         $WrapperTranscriptFile = $null
-        $null = @(. ([scriptblock]::Create($Try[0].Extent.Text)) 6>&1)
+        $Stem = @($script:WrapperAst.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$WrapperTranscriptStem' })
+        $Stem.Count | Should -Be 1
+        $null = @(. ([scriptblock]::Create($Stem[0].Extent.Text + "`n" + $Try[0].Extent.Text)) 6>&1)
         $WrapperTranscriptFile | Should -Be (Join-Path $Root 'RunAllSubscriptions_transcript_2026-11-02_15-04-05-2.txt')
         Get-Content -LiteralPath (Join-Path $Root 'RunAllSubscriptions_transcript_2026-11-02_15-04-05.txt') -Raw | Should -Be 'another run'
     }
 
-    It 'a main summary that cannot be built leaves no empty file under the name it took and is not added to the zip' {
+    It 'a main summary that cannot be built leaves no file under the name it took, empty or partial, and is not added to the zip' {
         $SummaryIf = Find-WrapperIf -Condition '$null -ne $OuterZipFile' -Contains 'New-RdaAllSubHtmlSummary'
         # The block loads the summary functions from the wrapper's folder; here a
         # stand-in folder whose builder fails.
         $Fake = Join-Path $TestDrive 'fake-root'
         $null = New-Item -ItemType Directory -Path (Join-Path $Fake 'Functions') -Force
-        Set-Content -LiteralPath (Join-Path $Fake 'Functions/AllSubHtmlSummary.Functions.ps1') -Value 'function New-RdaAllSubHtmlSummary { throw "disk full" }'
+        # It writes part of the file, then fails, as a full disk does.
+        Set-Content -LiteralPath (Join-Path $Fake 'Functions/AllSubHtmlSummary.Functions.ps1') -Value 'function New-RdaAllSubHtmlSummary { param($HtmlFile) Set-Content -LiteralPath $HtmlFile -Value "<html>part"; throw "disk full" }'
         $Text = $SummaryIf.Extent.Text.Replace('$PSScriptRoot', ('''{0}''' -f $Fake.Replace("'", "''")))
         $Root = Join-Path $TestDrive 'summary-failed'
         $null = New-Item -ItemType Directory -Path $Root
@@ -509,7 +512,10 @@ Describe 'Run-AllSubscriptions.ps1: the inventory folder gone at the end of the 
             (Find-WrapperIf -Condition '$ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container)' -Contains 'Per-subscription output verification').Extent.Text
             '$OuterZipFile = $null'
             '$BundleBuildError = $null'
+            '$InventoryFolderGone = $false'
             (Find-WrapperIf -Condition 'Test-Path -Path $InventoryRoot -PathType Container' -Contains 'AllSubscriptions_ResourcesReport_').Extent.Text
+            (Find-WrapperIf -Condition '$InventoryFolderGone' -Contains 'FAILED (report missing)').Extent.Text
+            (Find-WrapperIf -Condition '$null -ne $BundleBuildError -or $InventoryFolderGone' -Contains 'exit 2').Extent.Text
             'exit 0'
         ) -join "`n"
         $script:Pwsh = (Get-Process -Id $PID).Path
@@ -583,3 +589,4 @@ Describe 'Move-RunOutputFile: moves a file to a free name, never over one that i
         Test-Path -LiteralPath $Src | Should -BeTrue
     }
 }
+

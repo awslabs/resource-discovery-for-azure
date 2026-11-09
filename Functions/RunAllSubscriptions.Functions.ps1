@@ -1179,9 +1179,10 @@ function New-RunOutputFile
             $Stream.Dispose()
             return $Path
         }
-        catch [System.IO.IOException]
+        catch [System.IO.IOException], [System.UnauthorizedAccessException]
         {
-            # Taken: try the next name. Any other failure is the caller's.
+            # Taken (Windows gives access denied for a folder of that name):
+            # try the next name. Any other failure is the caller's.
             if (-not ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path))) { throw }
         }
     }

@@ -434,6 +434,14 @@ $Global:MetricsFailedSubs = @()
 #     in its summary JSON; the aggregation loop below concatenates them.
 $Global:CollectorFailures = @()
 
+# The consumption counterparts: ResourceInventory.ps1 only sets them when they
+# are $null and then adds to them, and the stream aggregation below adds to
+# them too. Reset here, so a run in the same PowerShell session as an earlier
+# one does not report that run's consumption failure (exit 3) or add its
+# record count to this run's.
+$Global:ConsumptionFailedSubs = @()
+$Global:ConsumptionRecordCount = 0
+
 # The tenant's subscription list ResourceInventory.ps1 -RunAllSubs keeps for
 # the rest of this process (see LoginSession). Cleared here so a second run in
 # the same PowerShell session lists the subscriptions again.

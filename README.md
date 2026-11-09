@@ -268,7 +268,7 @@ The wrapper prints the count of excluded subscriptions and a per-state breakdown
 
 Before doing any inventory work, `Run-AllSubscriptions.ps1` verifies that the signed-in identity can actually read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity has no role on — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions (and, for consumption data, it can even attribute one subscription's billing to another).
 
-The check makes one cheap control-plane call per subscription (`az group list`) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
+The check makes one cheap control-plane call per subscription with Az PowerShell, a GET of the subscription's resource groups (`Invoke-AzRestMethod -Method GET -Path '/subscriptions/<id>/resourcegroups?api-version=2021-04-01'`), to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
 
 By default, if **any** in-scope subscription is not readable, the wrapper lists the offending subscriptions (name, id, and reason) and **stops before doing any work**, so you can grant the missing Reader role and re-run:
 

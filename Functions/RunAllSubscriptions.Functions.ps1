@@ -833,6 +833,159 @@ function Write-StreamState
     }
 }
 
+# The one reader of a stream's summary (the parsed JSON a stream worker wrote)
+# for the wrapper's aggregation. The summary is taken as this run's summary of
+# the stream only when every field the aggregation reads has the shape the
+# worker writes:
+#   StreamId               this stream's
+#   ResourceCounts         absent, or a list of rows: Id text, Name text or
+#                          empty, Count a whole number of 0 or more, Zip
+#                          empty or a path
+#   Failed                 absent, or a list of rows: Id text, Name text or
+#                          empty, Reason text
+#   ConsumptionRecords     absent, or a whole number of 0 or more
+#   ConsumptionFailedSubs, MetricsFailedSubs, CollectorFailures
+#                          absent, or lists of rows: Id text; Name, Message
+#                          and Module text or empty when present
+#   Status, Reason         absent, or text
+# and it holds a row (ResourceCounts or Failed) for every subscription the
+# stream ran this time (-ExpectedIds). Returns Accepted $true with the checked
+# values, which are all the aggregation uses, or Accepted $false with the
+# reason. The reason is fixed text and counts only (the values can hold real
+# names). A bad value never throws here.
+function Resolve-StreamSummary
+{
+    param($Summary, [string]$StreamId, [string[]]$ExpectedIds = @())
+
+    $NotConfirmed = { param([string]$Reason) [pscustomobject]@{ Accepted = $false; Reason = $Reason } }
+    $IsObject = { param($Value) $Value -is [System.Management.Automation.PSCustomObject] }
+    # A JSON list, or absent. One object, text or a number is not a list.
+    $IsList = { param($Value) $null -eq $Value -or $Value -is [array] }
+    $IsText = { param($Value) $Value -is [string] }
+    $IsTextOrEmpty = { param($Value) $null -eq $Value -or $Value -is [string] }
+    $IsCount = { param($Value) ($Value -is [int] -or $Value -is [long]) -and $Value -ge 0 -and $Value -le [int]::MaxValue }
+    $Field = { param($Object, [string]$Name) $Object.PSObject.Properties[$Name] }
+    # The rows of a list field; none when it is absent or empty.
+    $ListRows = { param($Object, [string]$Name) $List = & $Field $Object $Name; if ($null -ne $List -and $List.Value -is [array]) { , $List.Value } else { , @() } }
+
+    if (-not (& $IsObject $Summary)) { return (& $NotConfirmed 'it is not a JSON object') }
+    $StreamField = & $Field $Summary 'StreamId'
+    if ($null -eq $StreamField -or [string]$StreamField.Value -ne [string]$StreamId)
+    {
+        $Named = if ($null -eq $StreamField) { '' } else { [string]$StreamField.Value }
+        return (& $NotConfirmed ("it names stream '{0}'" -f $Named))
+    }
+    foreach ($Name in @('Status', 'Reason'))
+    {
+        $Value = & $Field $Summary $Name
+        if ($null -ne $Value -and -not (& $IsTextOrEmpty $Value.Value)) { return (& $NotConfirmed ('its {0} is not text' -f $Name)) }
+    }
+    foreach ($Name in @('ResourceCounts', 'Failed', 'ConsumptionFailedSubs', 'MetricsFailedSubs', 'CollectorFailures'))
+    {
+        $Value = & $Field $Summary $Name
+        if ($null -ne $Value -and -not (& $IsList $Value.Value)) { return (& $NotConfirmed ('its {0} is not a list' -f $Name)) }
+    }
+
+    # Success rows: Count must be there (on a row with no Count, $Row.Count is
+    # PowerShell's own count of 1) and a whole number of 0 or more; Zip empty
+    # or a path the output verification can look for.
+    $ResourceCounts = @()
+    $BadRows = 0
+    foreach ($Row in (& $ListRows $Summary 'ResourceCounts'))
+    {
+        $Ok = (& $IsObject $Row)
+        if ($Ok)
+        {
+            $Id = & $Field $Row 'Id'
+            $RowName = & $Field $Row 'Name'
+            $Count = & $Field $Row 'Count'
+            $Zip = & $Field $Row 'Zip'
+            $ZipValue = if ($null -eq $Zip) { $null } else { $Zip.Value }
+            $Ok = $null -ne $Id -and (& $IsText $Id.Value) -and $Id.Value -ne '' -and
+                ($null -eq $RowName -or (& $IsTextOrEmpty $RowName.Value)) -and
+                $null -ne $Count -and (& $IsCount $Count.Value) -and
+                ($null -eq $ZipValue -or ((& $IsText $ZipValue) -and ($ZipValue -eq '' -or $(try { $null = [System.IO.Path]::GetFullPath($ZipValue); $true } catch { $false }))))
+        }
+        if (-not $Ok) { $BadRows++; continue }
+        $ResourceCounts += [pscustomobject]@{
+            Name  = if ($null -eq $RowName) { '' } else { [string]$RowName.Value }
+            Id    = [string]$Id.Value
+            Count = [int]$Count.Value
+            Zip   = [string]$ZipValue
+        }
+    }
+    if ($BadRows -gt 0) { return (& $NotConfirmed ('{0} of its success row(s) have a Count that is not a whole number of 0 or more, or a Zip that is not a path' -f $BadRows)) }
+
+    $Failed = @()
+    $BadRows = 0
+    foreach ($Row in (& $ListRows $Summary 'Failed'))
+    {
+        $Ok = (& $IsObject $Row)
+        if ($Ok)
+        {
+            $Id = & $Field $Row 'Id'
+            $RowName = & $Field $Row 'Name'
+            $Reason = & $Field $Row 'Reason'
+            $Ok = $null -ne $Id -and (& $IsText $Id.Value) -and $Id.Value -ne '' -and
+                ($null -eq $RowName -or (& $IsTextOrEmpty $RowName.Value)) -and
+                $null -ne $Reason -and (& $IsText $Reason.Value)
+        }
+        if (-not $Ok) { $BadRows++; continue }
+        $Failed += [pscustomobject]@{
+            Id     = [string]$Id.Value
+            Name   = if ($null -eq $RowName) { '' } else { [string]$RowName.Value }
+            Reason = [string]$Reason.Value
+        }
+    }
+    if ($BadRows -gt 0) { return (& $NotConfirmed ('{0} of its failed row(s) have no Id or Reason text' -f $BadRows)) }
+
+    $ConsumptionRecords = $null
+    $RecordsField = & $Field $Summary 'ConsumptionRecords'
+    if ($null -ne $RecordsField -and $null -ne $RecordsField.Value)
+    {
+        if (-not (& $IsCount $RecordsField.Value)) { return (& $NotConfirmed 'its ConsumptionRecords is not a whole number of 0 or more') }
+        $ConsumptionRecords = [int]$RecordsField.Value
+    }
+
+    # The health lists: the wrapper reads Id, Name, Message and Module.
+    $Health = @{}
+    foreach ($Name in @('ConsumptionFailedSubs', 'MetricsFailedSubs', 'CollectorFailures'))
+    {
+        $Rows = @((& $ListRows $Summary $Name) | Where-Object { $null -ne $_ })
+        $BadRows = @($Rows | Where-Object {
+                $Row = $_
+                if (-not (& $IsObject $Row)) { return $true }
+                $Id = & $Field $Row 'Id'
+                if ($null -eq $Id -or -not (& $IsText $Id.Value) -or $Id.Value -eq '') { return $true }
+                foreach ($Text in @('Name', 'Message', 'Module'))
+                {
+                    $Value = & $Field $Row $Text
+                    if ($null -ne $Value -and -not (& $IsTextOrEmpty $Value.Value)) { return $true }
+                }
+                $false
+            }).Count
+        if ($BadRows -gt 0) { return (& $NotConfirmed ('{0} of its {1} row(s) have no Id, or a Name, Message or Module that is not text' -f $BadRows, $Name)) }
+        $Health[$Name] = $Rows
+    }
+
+    $RowIds = @(@($ResourceCounts) + @($Failed) | ForEach-Object { $_.Id })
+    $NoRow = @(@($ExpectedIds) | Where-Object { $RowIds -notcontains $_ })
+    if ($NoRow.Count -gt 0) { return (& $NotConfirmed ('it has no row for {0} of the {1} subscription(s) the stream ran' -f $NoRow.Count, @($ExpectedIds).Count)) }
+
+    return [pscustomobject]@{
+        Accepted              = $true
+        Reason                = $null
+        Status                = if ($null -eq $Summary.Status) { '' } else { [string]$Summary.Status }
+        StatusReason          = if ($null -eq $Summary.Reason) { '' } else { [string]$Summary.Reason }
+        ResourceCounts        = @($ResourceCounts)
+        Failed                = @($Failed)
+        ConsumptionRecords    = $ConsumptionRecords
+        ConsumptionFailedSubs = @($Health['ConsumptionFailedSubs'])
+        MetricsFailedSubs     = @($Health['MetricsFailedSubs'])
+        CollectorFailures     = @($Health['CollectorFailures'])
+    }
+}
+
 
 # Classify a consumption-probe error message into an access outcome. Pure (no
 # Azure calls) so the classification rules are unit-testable without a live

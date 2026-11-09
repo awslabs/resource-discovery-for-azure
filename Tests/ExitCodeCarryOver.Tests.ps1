@@ -125,6 +125,16 @@ if ((Get-RdaStandInScenario).NarrationFail)
         }
     }
 }
+# With FailuresLogFail, the wrapper cannot read the size of stream 0's
+# failures log while it reads that stream's summary.
+if ((Get-RdaStandInScenario).FailuresLogFail)
+{
+    function Get-Item
+    {
+        if (([string]$args[0]) -like '*_stream-0.log' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the stream failures log cannot be read' }
+        Microsoft.PowerShell.Management\Get-Item @args
+    }
+}
 function Start-Transcript
 {
     if ((Get-RdaStandInScenario).RemoveRoot -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the transcript cannot start' }
@@ -262,7 +272,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -319,7 +329,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
@@ -768,6 +778,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         @{ Case = 'a Count below 0'; Row = '"Count":-1' }
         @{ Case = 'a Count that is not a whole number'; Row = '"Count":1.5' }
         @{ Case = 'a Count that is text'; Row = '"Count":"many"' }
+        @{ Case = 'no Count'; Row = '"Zip":""' }
     ) {
         # Stream 0 runs Sub A, and its summary names Sub A with this row.
         $Json = ('{{"StreamId":"0","Status":"ok","ResourceCounts":[{{"Name":"Sub A","Id":"{0}",{1}}}],"Failed":[]}}' -f $script:SubA.Id, $Row)
@@ -777,6 +788,47 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
         $Run.ZipCount | Should -Be 1 -Because $Run.Console
         $Run.StateKept | Should -BeTrue -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams: a stream summary whose <Case> is not confirmed, and the next stream is still read' -ForEach @(
+        @{ Case = 'ConsumptionRecords is text'; Extra = '"ConsumptionRecords":"abc"'; Reason = 'its ConsumptionRecords is not a whole number of 0 or more' }
+        @{ Case = 'ConsumptionRecords is below 0'; Extra = '"ConsumptionRecords":-1'; Reason = 'its ConsumptionRecords is not a whole number of 0 or more' }
+        @{ Case = 'ConsumptionFailedSubs is not a list'; Extra = '"ConsumptionFailedSubs":{"Id":"x"}'; Reason = 'its ConsumptionFailedSubs is not a list' }
+        @{ Case = 'MetricsFailedSubs is not a list'; Extra = '"MetricsFailedSubs":"x"'; Reason = 'its MetricsFailedSubs is not a list' }
+        @{ Case = 'CollectorFailures row has no Id'; Extra = '"CollectorFailures":[{"Module":"m","Message":"x"}]'; Reason = '1 of its CollectorFailures row(s) have no Id' }
+        @{ Case = 'Failed row has no Reason'; Extra = '"Failed":[{"Id":"x","Name":"Sub X"}]'; Reason = '1 of its failed row(s) have no Id or Reason text' }
+    ) {
+        # Stream 0 runs Sub A, and its summary names Sub A with a good row;
+        # one other field holds a value the worker never writes. Stream 1
+        # runs Sub B.
+        $Json = ('{{"StreamId":"0","Status":"ok","ResourceCounts":[{{"Name":"Sub A","Id":"{0}","Count":1,"Zip":""}}],{1}}}' -f $script:SubA.Id, $Extra)
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamSummaryJson $Json
+        $Run.Console | Should -Match ('\[stream-0\] ERROR: summary file .+ is not this run''s summary of stream 0: ' + [regex]::Escape($Reason)) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 could not be read; its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.Console
+        # Stream 1 is still read: Sub B is the one success the output
+        # verification checks.
+        $Run.Console | Should -Match 'Per-subscription output verification: OK \(each of the 1 successful sub\(s\) has its zip' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.StateKept | Should -BeTrue -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams: a throw while one stream''s summary is read keeps its results and still reads the next stream' {
+        # Stream 0 runs Sub A (fails) then Sub C, so it writes a failures
+        # log, and the wrapper cannot read that log's size. Stream 1 runs
+        # Sub B.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -FailSub $script:SubA.Id -FailuresLogFail
+        $Run.Console | Should -Match '\[stream-0\] ERROR processing Sub A' -Because $Run.Console
+        # Sub C (stream 0) and Sub B (stream 1) both count as successes, and
+        # Sub A as the one failure.
+        $Run.Console | Should -Match 'Per-subscription output verification: OK \(each of the 2 successful sub\(s\) has its zip' -Because $Run.Console
+        $Run.Console | Should -Match '\[stream-0\] WARNING: after its results were read: stand-in: the stream failures log cannot be read' -Because $Run.Console
+        $Run.Console | Should -Match '(?m)^Subscriptions Failed:\s+1 \(Sub A \(stream-0: ' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Stream Summary' -Because 'both stream summaries were read'
+        $Run.FailedIds | Should -Be @($script:SubA.Id)
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 

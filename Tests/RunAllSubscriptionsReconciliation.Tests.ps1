@@ -249,6 +249,83 @@ Describe 'Get-WrapperExitCode' {
     # summary the wrapper cannot read.
 }
 
+Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
+    # The summaries are JSON text, parsed as the wrapper parses the file, so
+    # the values have the types ConvertFrom-Json gives them.
+    BeforeAll {
+        $script:GoodRow = '{"Id":"sub-a","Name":"Sub A","Count":3,"Zip":"/reports/a/ResourcesReport_a.zip"}'
+        function script:Read-Case
+        {
+            param([string]$Json, [string[]]$Expected = @('sub-a'))
+            Resolve-StreamSummary -Summary ($Json | ConvertFrom-Json) -StreamId '0' -ExpectedIds $Expected
+        }
+    }
+
+    It 'accepts a good summary and gives back its values with their types' {
+        $Json = '{"StreamId":"0","Status":"partial-failure","ResourceCounts":[' + $script:GoodRow + '],"Failed":[{"Id":"sub-b","Name":"Sub B","Reason":"it failed"}],"ConsumptionRecords":7,"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m"}],"MetricsFailedSubs":[{"Id":"sub-a","Name":"Sub A","Message":"m"}],"CollectorFailures":[{"Id":"sub-a","Module":"VM","Message":"m"}]}'
+        $Read = Read-Case -Json $Json -Expected @('sub-a', 'sub-b')
+        $Read.Accepted | Should -BeTrue -Because $Read.Reason
+        $Read.Status | Should -Be 'partial-failure'
+        @($Read.ResourceCounts).Count | Should -Be 1
+        $Read.ResourceCounts[0].Count | Should -BeOfType [int]
+        $Read.ResourceCounts[0].Count | Should -Be 3
+        $Read.ResourceCounts[0].Zip | Should -Be '/reports/a/ResourcesReport_a.zip'
+        $Read.Failed[0].Reason | Should -Be 'it failed'
+        $Read.ConsumptionRecords | Should -BeOfType [int]
+        $Read.ConsumptionRecords | Should -Be 7
+        @($Read.ConsumptionFailedSubs).Count | Should -Be 1
+        @($Read.MetricsFailedSubs).Count | Should -Be 1
+        @($Read.CollectorFailures).Count | Should -Be 1
+    }
+
+    It 'accepts a summary whose lists and record count are absent, when the stream ran nothing' {
+        $Read = Read-Case -Json '{"StreamId":"0","Status":"ok"}' -Expected @()
+        $Read.Accepted | Should -BeTrue -Because $Read.Reason
+        @($Read.ResourceCounts).Count | Should -Be 0
+        $Read.ConsumptionRecords | Should -BeNullOrEmpty
+    }
+
+    It 'does not confirm a summary whose <Case>' -ForEach @(
+        @{ Case = 'success row has no Count'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Name":"Sub A","Zip":"/r/a.zip"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is text'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":"abc"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is below 0'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":-1}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is not a whole number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1.5}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is too big'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":3000000000}]}'; Reason = 'success row' }
+        @{ Case = 'success row has no Id'; Json = '{"StreamId":"0","ResourceCounts":[{"Name":"Sub A","Count":1}],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Id is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":5,"Count":1}],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Name is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Name":5,"Count":1}]}'; Reason = 'success row' }
+        @{ Case = 'success row Zip is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1,"Zip":5}]}'; Reason = 'success row' }
+        @{ Case = 'success row is not an object'; Json = '{"StreamId":"0","ResourceCounts":["sub-a"],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'success row' }
+        @{ Case = 'ResourceCounts is one object, not a list'; Json = '{"StreamId":"0","ResourceCounts":{"Id":"sub-a","Count":1}}'; Reason = 'ResourceCounts is not a list' }
+        @{ Case = 'failed row has no Reason'; Json = '{"StreamId":"0","Failed":[{"Id":"sub-a","Name":"Sub A"}]}'; Reason = 'failed row' }
+        @{ Case = 'failed row Reason is a number'; Json = '{"StreamId":"0","Failed":[{"Id":"sub-a","Name":"Sub A","Reason":5}]}'; Reason = 'failed row' }
+        @{ Case = 'failed row has no Id'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":[{"Name":"Sub X","Reason":"r"}]}'; Reason = 'failed row' }
+        @{ Case = 'Failed is text, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":"none"}'; Reason = 'Failed is not a list' }
+        @{ Case = 'ConsumptionRecords is text'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionRecords":"abc"}'; Reason = 'ConsumptionRecords' }
+        @{ Case = 'ConsumptionRecords is below 0'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionRecords":-1}'; Reason = 'ConsumptionRecords' }
+        @{ Case = 'ConsumptionRecords is not a whole number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionRecords":1.5}'; Reason = 'ConsumptionRecords' }
+        @{ Case = 'ConsumptionFailedSubs is one object, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":{"Id":"sub-a"}}'; Reason = 'ConsumptionFailedSubs is not a list' }
+        @{ Case = 'MetricsFailedSubs is text, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"MetricsFailedSubs":"sub-a"}'; Reason = 'MetricsFailedSubs is not a list' }
+        @{ Case = 'CollectorFailures is a number, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"CollectorFailures":3}'; Reason = 'CollectorFailures is not a list' }
+        @{ Case = 'CollectorFailures row has no Id'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"CollectorFailures":[{"Module":"VM","Message":"m"}]}'; Reason = 'CollectorFailures row' }
+        @{ Case = 'MetricsFailedSubs row Message is a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"MetricsFailedSubs":[{"Id":"sub-a","Message":["m"]}]}'; Reason = 'MetricsFailedSubs row' }
+        @{ Case = 'ConsumptionFailedSubs row is text'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":["sub-a"]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'Status is a number'; Json = '{"StreamId":"0","Status":1,"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'Status is not text' }
+        @{ Case = 'StreamId names another stream'; Json = '{"StreamId":"1","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
+        @{ Case = 'StreamId is missing'; Json = '{"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
+        @{ Case = 'rows miss a subscription the stream ran'; Json = '{"StreamId":"0","ResourceCounts":[],"Failed":[]}'; Reason = 'no row for 1 of the 1' }
+        @{ Case = 'text is a list'; Json = '[]'; Reason = 'not a JSON object' }
+    ) {
+        $Read = Read-Case -Json $Json
+        $Read.Accepted | Should -BeFalse
+        $Read.Reason | Should -Match ([regex]::Escape($Reason))
+    }
+
+    It 'never throws on a bad value' {
+        { Read-Case -Json '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":{"a":1},"Zip":{"b":2}}],"ConsumptionRecords":[1,2]}' } | Should -Not -Throw
+    }
+}
+
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
     # Regression: -Existing was typed [System.Collections.IEnumerable], but when
     # the list holds exactly one prior failure PowerShell collapses it to a lone

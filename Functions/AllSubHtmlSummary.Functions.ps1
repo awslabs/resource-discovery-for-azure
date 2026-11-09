@@ -471,7 +471,8 @@ $ChartsHtml
 </div></body></html>
 "@
 
-    $Html | Out-File -FilePath $HtmlFile -Encoding utf8
+    # By its literal path: a folder or file name may hold [ or ].
+    $Html | Out-File -LiteralPath $HtmlFile -Encoding utf8
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
     # The same gate as the privacy banner, so an obfuscated run whose reports
     # hold no records to sample does not call itself identifiable here either.

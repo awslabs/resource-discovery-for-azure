@@ -1501,6 +1501,18 @@ else
 
 Write-Host "All subscriptions processed!" -ForegroundColor Green
 
+# The phases skipped for sign-in and whether a collector failed. Every run has
+# ended by here, so these are final; they are worked out before the output
+# verification so its exit-2 stop can name the 3-5 condition it hides.
+$AuthSkippedPhases = @()
+if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
+$ConsumptionAuthSkipped = @(
+    if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
+) | Where-Object { $_.Id -eq '(auth)' }
+if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
+$AuthSkipped = $AuthSkippedPhases.Count -gt 0
+$CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
+
 # === Per-subscription output verification (hard-stop) ========================
 #
 # Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if the
@@ -1558,6 +1570,20 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         if ($WrapperTranscriptStarted)
         {
             Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
+        }
+        # This stop comes before the summary, RunSummary.log (no zip is made)
+        # and the FAILED banners, so the failed-subscription count and the
+        # Exit code lines (with any 3-5 condition 2 hides) are printed here.
+        # Count only: each failed subscription already has its ERROR line above.
+        $GapSubscriptionsFailed = @($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0
+        if ($GapSubscriptionsFailed)
+        {
+            Write-Host ("Subscriptions Failed:    {0} (see the ERROR lines above)" -f $FailedSubscriptions.Count) -ForegroundColor Red
+        }
+        Write-Host ""
+        foreach ($ExitLine in @(Get-WrapperExitCodeSummary -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed $GapSubscriptionsFailed -UnreadableStreams $UnreadableStreamSummaries -VerificationGap $true -ReportMade $false))
+        {
+            Write-Host $ExitLine -ForegroundColor Yellow
         }
         Exit-Wrapper -Code 2
     }
@@ -1916,16 +1942,9 @@ if ($WrapperTranscriptStarted)
 }
 Write-Host "=========================================" -ForegroundColor Green
 
-# The phases skipped for sign-in and the exit code, worked out here so
-# RunSummary.log below and the end of the console say the same thing.
-$AuthSkippedPhases = @()
-if (@($Global:MetricsFailedSubs).Count -gt 0) { $AuthSkippedPhases += 'Metrics' }
-$ConsumptionAuthSkipped = @(
-    if ($null -ne $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs } else { @() }
-) | Where-Object { $_.Id -eq '(auth)' }
-if ($ConsumptionAuthSkipped.Count -gt 0) { $AuthSkippedPhases += 'Consumption' }
-$AuthSkipped = $AuthSkippedPhases.Count -gt 0
-$CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
+# The exit code, worked out here so RunSummary.log below and the end of the
+# console say the same thing ($AuthSkipped and $CollectorsFailed are worked
+# out above the output verification).
 $SubscriptionsFailed = @($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0
 # An unreadable stream summary also gives 2 (its subscriptions are not
 # confirmed), but it is named as such, not as a failed subscription.

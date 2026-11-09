@@ -219,6 +219,15 @@ Describe 'Get-WrapperExitCode' {
         $Both[1] | Should -Match '^Exit code 2: the summary of stream 1 could not be read'
     }
 
+    It 'Get-WrapperExitCodeSummary describes the verification-gap stop (auth <Auth>, collectors <Collectors>, failed <Failed>)' -ForEach @(
+        @{ Auth = $false; Collectors = $false; Failed = $false; Also = @() }
+        @{ Auth = $true; Collectors = $false; Failed = $false; Also = @('Exit code 2 takes priority over exit code 3, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem.') }
+        @{ Auth = $true; Collectors = $true; Failed = $true; Also = @('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.', 'Exit code 2 takes priority over exit code 5, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem and one or more collectors failed.') }
+    ) {
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $Failed -VerificationGap $true -ReportMade $false)
+        $Lines | Should -Be (@('Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.') + $Also)
+    }
+
     # That the wrapper passes its failed subscriptions in is tested by running
     # it, in Tests/ExitCodeCarryOver.Tests.ps1: sequential, one subscription
     # with -ParallelStreams, a failed subscription in a stream, and a stream

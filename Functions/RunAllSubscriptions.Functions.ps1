@@ -910,10 +910,11 @@ function Resolve-StreamSummary
             $Count = & $Field $Row 'Count'
             $Zip = & $Field $Row 'Zip'
             $ZipValue = if ($null -eq $Zip) { $null } else { $Zip.Value }
-            $Ok = $null -ne $Id -and (& $IsText $Id.Value) -and $Id.Value -ne '' -and
-                ($null -eq $RowName -or (& $IsTextOrEmpty $RowName.Value)) -and
-                $null -ne $Count -and (& $IsCount $Count.Value) -and
-                ($null -eq $ZipValue -or ((& $IsText $ZipValue) -and ($ZipValue -eq '' -or $(try { $null = [System.IO.Path]::GetFullPath($ZipValue); $true } catch { $false }))))
+            $IdOk = $null -ne $Id -and (& $IsText $Id.Value) -and $Id.Value -ne ''
+            $NameOk = $null -eq $RowName -or (& $IsTextOrEmpty $RowName.Value)
+            $CountOk = $null -ne $Count -and (& $IsCount $Count.Value)
+            $ZipOk = $null -eq $ZipValue -or ((& $IsText $ZipValue) -and ($ZipValue -eq '' -or $(try { $null = [System.IO.Path]::GetFullPath($ZipValue); $true } catch { $false })))
+            $Ok = $IdOk -and $NameOk -and $CountOk -and $ZipOk
         }
         if (-not $Ok) { $BadRows++; continue }
         $ResourceCounts += [pscustomobject]@{
@@ -935,9 +936,10 @@ function Resolve-StreamSummary
             $Id = & $Field $Row 'Id'
             $RowName = & $Field $Row 'Name'
             $Reason = & $Field $Row 'Reason'
-            $Ok = $null -ne $Id -and (& $IsText $Id.Value) -and $Id.Value -ne '' -and
-                ($null -eq $RowName -or (& $IsTextOrEmpty $RowName.Value)) -and
-                $null -ne $Reason -and (& $IsText $Reason.Value)
+            $IdOk = $null -ne $Id -and (& $IsText $Id.Value) -and $Id.Value -ne ''
+            $NameOk = $null -eq $RowName -or (& $IsTextOrEmpty $RowName.Value)
+            $ReasonOk = $null -ne $Reason -and (& $IsText $Reason.Value)
+            $Ok = $IdOk -and $NameOk -and $ReasonOk
         }
         if (-not $Ok) { $BadRows++; continue }
         $Failed += [pscustomobject]@{

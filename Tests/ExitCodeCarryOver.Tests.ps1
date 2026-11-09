@@ -472,14 +472,15 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -MissingStreamSummary -Resume
         $Run.Console | Should -Match '\[stream-0\] WARNING: no summary file' -Because $Run.Console
         $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
-        $Run.Console | Should -Match 'Stream Summary Unreadable:\s+stream-0 \(2 subscription\(s\) not confirmed; check the consolidated zip\)' -Because $Run.Console
-        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 could not be read; its 2 subscription(s) are not confirmed; check the consolidated zip for their reports.'))
+        $Run.Console | Should -Match 'Stream Summary Missing:\s+stream-0 \(2 subscription\(s\) not confirmed; check the consolidated zip\)' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'could not be read' -Because 'the summary file is missing, not unreadable'
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 is missing; its 2 subscription(s) are not confirmed; check the consolidated zip for their reports.'))
         # No subscription was skipped: all three ran this time.
         $Run.Console | Should -Match '(?m)^Subscriptions Skipped:\s+0 \(already completed\)' -Because $Run.Console
         $Run.Console | Should -Match '(?m)^Subscriptions Processed: 3\s*$' -Because $Run.Console
         $Run.ZipCount | Should -Be 1 -Because $Run.Console
         $Run.RunSummary | Should -Match '(?m)^  Failed subscriptions\s+: 0\s*$' -Because $Run.RunSummary
-        $Run.MainSummary | Should -Match ([regex]::Escape('The summary of stream 0 could not be read.</b> Its 2 subscription(s) are not confirmed')) -Because $Run.Console
+        $Run.MainSummary | Should -Match ([regex]::Escape('The summary of stream 0 is missing.</b> Its 2 subscription(s) are not confirmed')) -Because $Run.Console
         $Run.MainSummary | Should -Not -Match 'failed to process' -Because 'no subscription failed'
         # The resume state is kept, and nothing is put on the retry list.
         $Run.StateKept | Should -BeTrue -Because $Run.Console
@@ -545,7 +546,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
         $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
         $Run.Console | Should -Not -Match 'ERROR lines above' -Because $Run.Console
-        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 could not be read; its 2 subscription(s) are not confirmed; no consolidated zip was made.'))
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 is missing; its 2 subscription(s) are not confirmed; no consolidated zip was made.'))
         $Run.ZipCount | Should -Be 0 -Because $Run.Console
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }

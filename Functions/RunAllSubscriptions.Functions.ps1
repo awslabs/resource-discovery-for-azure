@@ -733,9 +733,10 @@ function Get-WrapperExitCodeSummary
         [bool]$AuthSkipped,
         [bool]$CollectorsFailed,
         [bool]$SubscriptionsFailed = $false,
-        # Streams whose summary file could not be read: { StreamId; SubCount }.
-        # Their subscriptions are not confirmed, so the code is 2, but they are
-        # not failed subscriptions.
+        # Streams whose summary file is missing or could not be read:
+        # { StreamId; SubCount; Reason }, Reason 'Missing' or 'Unreadable'
+        # (no Reason reads as 'Unreadable'). Their subscriptions are not
+        # confirmed, so the code is 2, but they are not failed subscriptions.
         [object[]]$UnreadableStreams = @(),
         # The wrapper stopped at the per-subscription output verification gap
         # (a subscription reported success but its zip is missing): 2, before
@@ -766,7 +767,8 @@ function Get-WrapperExitCodeSummary
             foreach ($U in $Unreadable)
             {
                 $ZipText = if ($ReportMade) { 'check the consolidated zip for their reports' } else { 'no consolidated zip was made' }
-                $Lines.Add(('Exit code 2: the summary of stream {0} could not be read; its {1} subscription(s) are not confirmed; {2}.' -f $U.StreamId, $U.SubCount, $ZipText))
+                $StateText = if ($U.Reason -eq 'Missing') { 'is missing' } else { 'could not be read' }
+                $Lines.Add(('Exit code 2: the summary of stream {0} {1}; its {2} subscription(s) are not confirmed; {3}.' -f $U.StreamId, $StateText, $U.SubCount, $ZipText))
             }
         }
         3 { $Lines.Add(('Exit code 3: {0} (see FAILED (auth)); the rest of the report was made.' -f $AuthText)) }

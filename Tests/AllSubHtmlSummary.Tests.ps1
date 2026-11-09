@@ -163,6 +163,23 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         (Get-Content -Path $ObfOut -Raw) | Should -Match ([regex]::Escape('The summary of stream 0 could not be read.</b> Its 3 subscription(s) are not confirmed'))
     }
 
+    It 'says a stream summary that is missing is missing, not that it could not be read' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Sub A' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        $Streams = @(
+            [pscustomobject]@{ StreamId = 0; SubCount = 3; Reason = 'Missing' }
+            [pscustomobject]@{ StreamId = 2; SubCount = 1; Reason = 'Unreadable' }
+        )
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -UnreadableStreams $Streams | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 0 is missing.</b> Its 3 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        $Html | Should -Not -Match ([regex]::Escape('The summary of stream 0 could not be read.'))
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 2 could not be read.</b> Its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        (Get-Card $Html 'Failed') | Should -Be '0' -Because 'a missing stream summary is not a failed subscription'
+    }
+
     It 'detects obfuscated posture from prod_/nonprod_ tokens' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 3; StorageAcc = 2 } -Obfuscated | Out-Null

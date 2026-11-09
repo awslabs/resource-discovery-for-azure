@@ -240,6 +240,37 @@ Describe 'Build-MainSummaryFromZip -PackageZip into a folder that already holds 
     }
 }
 
+Describe 'Build-MainSummaryFromZip -PackageZip over a folder of the same name that holds other files' {
+
+    BeforeAll {
+        # The output folder already holds a folder named like one this call
+        # rebuilds, with a revealed report and older files in it.
+        $script:Same = Join-Path $script:TmpRoot 'same_name'
+        $Base = 'ResourcesReport_' + $script:Stamps[0]
+        $script:SameDir = Join-Path $script:Same $Base
+        New-Item -ItemType Directory -Path $script:SameDir -Force | Out-Null
+        $script:Stale = @(
+            ($Base + '_revealed.html'),
+            ('Inventory_' + $Base + '_revealed.json'),
+            'old-report.html',
+            ('Consumption_' + $Base + '.csv')
+        )
+        foreach ($Name in $script:Stale) { 'real names from an earlier call' | Out-File -FilePath (Join-Path $script:SameDir $Name) -Encoding utf8 }
+
+        & $script:Script -InputZip $script:InputZip -OutputDirectory $script:Same -PackageZip 6>$null | Out-Null
+        $script:SamePackage = $script:Same + '.zip'
+        $script:SameEntries = if (Test-Path -LiteralPath $script:SamePackage) { Get-ZipEntryNames -ZipPath $script:SamePackage } else { @() }
+    }
+
+    It 'holds exactly the summary and the files rebuilt from the input zip, none of the files already there' {
+        $script:SameEntries | Should -Be (Get-ExpectedEntries -Stamps $script:Stamps)
+    }
+
+    It 'leaves the files already in the folder in place' {
+        foreach ($Name in $script:Stale) { Test-Path -LiteralPath (Join-Path $script:SameDir $Name) | Should -BeTrue }
+    }
+}
+
 Describe 'Build-MainSummaryFromZip -PackageZip into a new folder' {
 
     BeforeAll {

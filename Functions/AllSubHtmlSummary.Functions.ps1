@@ -562,6 +562,10 @@ function New-RdaAllSubHtmlSummaryFromZip
         $Reconstructed = 0
         # Folders this call writes; -PackageZip bundles only these.
         $ReconstructedDirs = New-Object System.Collections.Generic.List[string]
+        # The files this call writes in each of those folders. A folder of the
+        # same name may already hold other files (an earlier bundle's report, a
+        # revealed copy); -PackageZip bundles only these files, never the rest.
+        $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which
@@ -580,7 +584,10 @@ function New-RdaAllSubHtmlSummaryFromZip
                     # Inventory json (the summary's input) are reconstructed.
                     if (($Entry.Name -like 'Inventory_*.json') -or (($Entry.Name -like '*.html') -and ($Entry.Name -notlike '*_revealed*')))
                     {
-                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, (Join-Path $Dest $Entry.Name), $true)
+                        $Target = Join-Path $Dest $Entry.Name
+                        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
+                        if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
+                        if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
                     }
                 }
             }
@@ -601,7 +608,13 @@ function New-RdaAllSubHtmlSummaryFromZip
                 if ($Files.Count -eq 0) { continue }
                 $Dest = Join-Path $OutputDirectory $Ef.Name
                 New-Item -ItemType Directory -Path $Dest -Force | Out-Null
-                foreach ($F in $Files) { Copy-Item -LiteralPath $F.FullName -Destination (Join-Path $Dest $F.Name) -Force }
+                foreach ($F in $Files)
+                {
+                    $Target = Join-Path $Dest $F.Name
+                    Copy-Item -LiteralPath $F.FullName -Destination $Target -Force
+                    if (-not $WrittenFiles.ContainsKey($Dest)) { $WrittenFiles[$Dest] = New-Object System.Collections.Generic.List[string] }
+                    if (-not $WrittenFiles[$Dest].Contains($Target)) { $WrittenFiles[$Dest].Add($Target) }
+                }
                 if (-not $ReconstructedDirs.Contains($Dest)) { $ReconstructedDirs.Add($Dest) }
                 $Reconstructed++
             }
@@ -636,13 +649,16 @@ function New-RdaAllSubHtmlSummaryFromZip
             $ReRendered = 0
             foreach ($SubDir in @($ReconstructedDirs | ForEach-Object { Get-Item -LiteralPath $_ }))
             {
-                $InvJson = Get-ChildItem -LiteralPath $SubDir.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                # Only the files this call wrote in the folder: one already there
+                # is not from -InputZip.
+                $Mine = @($WrittenFiles[$SubDir.FullName] | Where-Object { $_ } | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } | Where-Object { $_ })
+                $InvJson = $Mine | Where-Object { $_.Name -like 'Inventory_*.json' } | Select-Object -First 1
                 if ($null -eq $InvJson) { continue }
-                # Overwrite the folder's existing html in place (single html per
-                # folder keeps the summary's link stable); derive a name if none.
-                $ExistingHtml = Get-ChildItem -LiteralPath $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+                # Overwrite the folder's html in place (single html per folder
+                # keeps the summary's link stable); derive a name if none.
+                $ExistingHtml = $Mine | Where-Object { $_.Name -like '*.html' -and $_.Name -notlike '*_revealed*' } | Select-Object -First 1
                 $TargetHtml = if ($null -ne $ExistingHtml) { $ExistingHtml.FullName } else { Join-Path $SubDir.FullName ($SubDir.Name + '.html') }
+                if (-not $WrittenFiles[$SubDir.FullName].Contains($TargetHtml)) { $WrittenFiles[$SubDir.FullName].Add($TargetHtml) }
                 try
                 {
                     & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $TargetHtml -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
@@ -680,13 +696,30 @@ function New-RdaAllSubHtmlSummaryFromZip
     {
         $PackageZipPath = $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar) + '.zip'
         if (Test-Path -LiteralPath $PackageZipPath) { Remove-Item -LiteralPath $PackageZipPath -Force -ErrorAction SilentlyContinue }
-        $PackageItems = @($ReconstructedDirs)
+        # Entries: the summary at the top, then <folder>/<file> for each file
+        # this call wrote, so a file that was already in a folder of the same
+        # name never travels with the bundle.
+        $Entries = New-Object System.Collections.Generic.List[object]
         $HtmlFullPath = (Resolve-Path -LiteralPath $HtmlFile).Path
         if ((Split-Path -Path $HtmlFullPath -Parent) -eq $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar))
         {
-            $PackageItems = @($HtmlFullPath) + $PackageItems
+            $Entries.Add([pscustomobject]@{ Path = $HtmlFullPath; Name = (Split-Path -Path $HtmlFullPath -Leaf) })
         }
-        Compress-Archive -LiteralPath $PackageItems -DestinationPath $PackageZipPath -Force
+        foreach ($Dir in $ReconstructedDirs)
+        {
+            $FolderName = Split-Path -Path $Dir -Leaf
+            foreach ($File in @($WrittenFiles[$Dir] | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
+            {
+                $Entries.Add([pscustomobject]@{ Path = $File; Name = ('{0}/{1}' -f $FolderName, (Split-Path -Path $File -Leaf)) })
+            }
+        }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Package = [System.IO.Compression.ZipFile]::Open($PackageZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+        try
+        {
+            foreach ($E in $Entries) { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Package, $E.Path, $E.Name) }
+        }
+        finally { $Package.Dispose() }
         Write-Host ("Portable summary bundle (links survive extraction): {0}" -f $PackageZipPath) -ForegroundColor Green
     }
 

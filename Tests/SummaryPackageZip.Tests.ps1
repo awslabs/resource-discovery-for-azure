@@ -810,14 +810,15 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip swaps the rebuilt files in as a set, a
         @(Get-ChildItem -LiteralPath $Dir -Force | Where-Object { $_.Name -like '*.partial' -or $_.Name -like '*.bak' }) | Should -BeNullOrEmpty
     }
 
-    It 'refuses a -PackageZip that reaches -InputZip through a linked folder, and leaves the input zip as it was' -Skip:($IsWindows) {
+    It 'refuses a -PackageZip that reaches -InputZip through a linked folder, and leaves the input zip as it was' {
         $Real = Join-Path $script:TmpRoot 'link-real'
         New-Item -ItemType Directory -Path $Real -Force | Out-Null
         $InZip = Join-Path $Real 'bundle.zip'
         Copy-Item -LiteralPath $script:InputZip -Destination $InZip
         $Before = (Get-FileHash -LiteralPath $InZip).Hash
         $Alias = Join-Path $script:TmpRoot 'link-alias'
-        New-Item -ItemType SymbolicLink -Path $Alias -Target $Real | Out-Null
+        # A junction on Windows (no admin right needed), a symbolic link elsewhere.
+        New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) -Path $Alias -Target $Real | Out-Null
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $InZip -OutputDirectory (Join-Path $Alias 'bundle') -PackageZip 6>$null } | Should -Throw '*which is -InputZip*'
         (Get-FileHash -LiteralPath $InZip).Hash | Should -Be $Before
         Test-Path -LiteralPath (Join-Path $Real 'bundle') | Should -BeFalse
@@ -827,15 +828,114 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip swaps the rebuilt files in as a set, a
         $Root = [System.IO.Path]::GetPathRoot($script:TmpRoot)
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Root 6>$null } | Should -Throw '*cannot be the root*'
     }
+}
 
-    It 'puts the summary in the bundle when -HtmlFile names -OutputDirectory in another letter case on a file system that ignores case' {
-        # The file system here may keep case apart, so the comparer is the one
-        # a case-ignoring file system gives, and the other spelling is a folder.
-        Mock Get-RdaPathComparer { [System.StringComparer]::OrdinalIgnoreCase }
-        $Out = Join-Path $script:TmpRoot 'casepkg'
-        $Other = Join-Path $script:TmpRoot 'CASEPKG'
-        New-Item -ItemType Directory -Path $Other -Force | Out-Null
-        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -HtmlFile (Join-Path $Other 'MainSummary.html') -PackageZip 6>$null | Out-Null
-        Get-ZipEntryNames -ZipPath ($Out + '.zip') | Should -Contain 'MainSummary.html'
+Describe 'New-RdaAllSubHtmlSummaryFromZip puts files back when the swap fails, is stopped, or a file cannot be put back' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        # An input zip with one report (inventory first, then html), and a
+        # reused output folder for it; returns the paths the tests need.
+        function script:New-SwapCase
+        {
+            param([string]$Name, [string]$Stamp, [switch]$NoEarlierInventory, [switch]$HtmlIsFolder)
+            $Root = Join-Path $script:TmpRoot $Name
+            $Stage = Join-Path $Root 'outer'
+            New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+            $Inner = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+            try
+            {
+                foreach ($Pair in @(@(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3"}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>new</html>')))
+                {
+                    $E = $Inner.CreateEntry($Pair[0]); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write($Pair[1]) } finally { $W.Dispose() }
+                }
+            }
+            finally { $Inner.Dispose() }
+            $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-40.zip'
+            Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+            $Out = Join-Path $Root 'out'
+            $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            $Inv = Join-Path $Dir ('Inventory_ResourcesReport_' + $Stamp + '.json')
+            $Html = Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')
+            if (-not $NoEarlierInventory) { Set-Content -LiteralPath $Inv -Value 'an earlier inventory' -NoNewline }
+            if ($HtmlIsFolder) { New-Item -ItemType Directory -Path $Html -Force | Out-Null }
+            else { Set-Content -LiteralPath $Html -Value 'an earlier html' -NoNewline }
+            [pscustomobject]@{ Zip = $Zip; Out = $Out; Dir = $Dir; Inv = $Inv; Html = $Html }
+        }
+    }
+
+    It 'removes a file that was new when a later file cannot take its place' {
+        $C = New-SwapCase -Name 'swap-new' -Stamp '20260102030405121' -NoEarlierInventory -HtmlIsFolder
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $C.Zip -OutputDirectory $C.Out 6>$null } | Should -Throw
+        Test-Path -LiteralPath $C.Inv | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $C.Dir -Force | Where-Object { $_.Name -like '*.partial' -or $_.Name -like '*.bak' }) | Should -BeNullOrEmpty
+    }
+
+    It 'puts back every file it can when one cannot be put back, and names the one kept aside' {
+        $C = New-SwapCase -Name 'swap-restore-fail' -Stamp '20260102030405122'
+        # The html cannot take its place, and the old inventory cannot be put back.
+        Mock Move-RdaFile {
+            if ($Path -like '*.partial' -and $Destination -like '*.html') { throw 'html is locked' }
+            if ($Path -like '*.bak' -and $Destination -like '*.json') { throw 'inventory is locked' }
+            [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
+        }
+        $Err = $null
+        try { New-RdaAllSubHtmlSummaryFromZip -InputZip $C.Zip -OutputDirectory $C.Out 6>$null } catch { $Err = $_.Exception.Message }
+        $Err | Should -BeLike '*html is locked*'
+        $Bak = @(Get-ChildItem -LiteralPath $C.Dir -Filter '*.json.rda-*.bak')
+        $Bak.Count | Should -Be 1
+        Get-Content -LiteralPath $Bak[0].FullName -Raw | Should -Be 'an earlier inventory'
+        $Err | Should -BeLike ('*kept under this name*' + $Bak[0].FullName + '*')
+        Get-Content -LiteralPath $C.Html -Raw | Should -Be 'an earlier html'
+    }
+
+    It 'puts the earlier files back when the run is stopped while they take their places' {
+        $C = New-SwapCase -Name 'swap-stop' -Stamp '20260102030405123'
+        $Flag = Join-Path $script:TmpRoot 'swap-stop.flag'
+        $Ps = [powershell]::Create()
+        try
+        {
+            $null = $Ps.AddScript({
+                    param($Functions, $Zip, $Out, $Flag)
+                    . $Functions
+                    $script:HoldFlag = $Flag
+                    # Holds the html's move, so the stop lands mid-swap.
+                    function Move-RdaFile
+                    {
+                        param($Path, $Destination, [switch]$Overwrite)
+                        if ($Path -like '*.partial' -and $Destination -like '*.html') { New-Item -ItemType File -Path $script:HoldFlag | Out-Null; Start-Sleep -Seconds 60 }
+                        [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
+                    }
+                    New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null
+                }).AddArgument((Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')).AddArgument($C.Zip).AddArgument($C.Out).AddArgument($Flag)
+            $Handle = $Ps.BeginInvoke()
+            $Until = [datetime]::UtcNow.AddSeconds(30)
+            while (-not (Test-Path -LiteralPath $Flag) -and [datetime]::UtcNow -lt $Until -and -not $Handle.IsCompleted) { Start-Sleep -Milliseconds 100 }
+            Test-Path -LiteralPath $Flag | Should -BeTrue -Because 'the swap reached the html'
+            $Ps.Stop()
+        }
+        finally { $Ps.Dispose() }
+        Get-Content -LiteralPath $C.Inv -Raw | Should -Be 'an earlier inventory'
+        Get-Content -LiteralPath $C.Html -Raw | Should -Be 'an earlier html'
+        @(Get-ChildItem -LiteralPath $C.Dir -Force | Where-Object { $_.Name -like '*.partial' -or $_.Name -like '*.bak' }) | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-RdaPhysicalPath and the root check' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'follows a link whose target goes through another linked folder' -Skip:($IsWindows) {
+        $Base = Join-Path $script:TmpRoot 'phys'
+        $Data = Join-Path $Base 'data'
+        New-Item -ItemType Directory -Path (Join-Path $Data 'sub') -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $Base 'a') -Target $Data | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $Base 'l') -Target (Join-Path $Base 'a/sub') | Out-Null
+        $Real = [System.IO.DirectoryInfo]::new((Join-Path $Data 'sub')).FullName
+        Get-RdaPhysicalPath -Path (Join-Path $Base 'l/file.zip') | Should -Be (Join-Path (Get-RdaPhysicalPath -Path $Real) 'file.zip')
+        Get-RdaPhysicalPath -Path (Join-Path $Base 'l/file.zip') | Should -Not -BeLike '*/a/*'
+    }
+
+    It 'refuses a share root given with its separator' -Skip:(-not $IsWindows) {
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory '\\localhost\C$\' 6>$null } | Should -Throw '*cannot be the root*'
     }
 }

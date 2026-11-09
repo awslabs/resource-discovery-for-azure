@@ -599,12 +599,12 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 |---|---|
 | `0` | Clean run — no failures of any kind. |
 | `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | One or more subscriptions failed (they are listed under `Subscriptions Failed` and their reports are missing), or a per-subscription output verification gap (a subscription reported success but its output zip is missing). Takes precedence over `3`–`5`. |
+| `2` | A subscription's report is missing from the consolidated zip. Either one or more subscriptions failed (they are listed under `Subscriptions Failed`): the consolidated zip is still made and holds the reports of the subscriptions that worked, or no zip is made when none worked. Or a per-subscription output verification gap (a subscription reported success but its output zip is missing): the run stops before consolidation, so no zip is made. The last console lines and `RunSummary.log` (under `Exit code:`) say which. Takes precedence over `3`–`5`; when it does, those lines also name the condition it hides (Metrics/Consumption skipped for sign-in, collector failures), and the "FAILED (auth)" and "FAILED (collectors)" banners still print. |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |
 
-Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
+Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result. Code `2` can come with a consolidated zip too (see above), so check for the `AllSubscriptions_ResourcesReport_*.zip` file, or the `Exit code:` lines, rather than reading `2` as "no report".
 
 ### Important Notes
 

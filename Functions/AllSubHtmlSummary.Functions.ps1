@@ -247,6 +247,31 @@ function Get-RdaOnDiskName
     return $Leaf
 }
 
+# The full path $Path stands for once every symbolic link or junction in it
+# is followed, part by part (a part that does not exist yet is kept as given),
+# so two paths that reach one file through a linked folder compare equal.
+# shortcut: on PowerShell 7.0/7.1 (.NET before 6) links are not followed and
+# the path is only made full; upgrade when 7.2 is the floor.
+function Get-RdaPhysicalPath
+{
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $Full = [System.IO.Path]::GetFullPath($Path)
+    if (-not ([System.IO.FileSystemInfo].GetMethod('ResolveLinkTarget'))) { return $Full }
+    $Root = [System.IO.Path]::GetPathRoot($Full)
+    $Current = $Root
+    foreach ($Part in @($Full.Substring($Root.Length).Split([char[]]@([IO.Path]::DirectorySeparatorChar, '/'), [System.StringSplitOptions]::RemoveEmptyEntries)))
+    {
+        $Current = Join-Path $Current $Part
+        $Info = if ([System.IO.Directory]::Exists($Current)) { [System.IO.DirectoryInfo]::new($Current) } elseif ([System.IO.File]::Exists($Current)) { [System.IO.FileInfo]::new($Current) } else { $null }
+        if ($null -ne $Info -and $null -ne $Info.LinkTarget)
+        {
+            $Target = $Info.ResolveLinkTarget($true)
+            if ($null -ne $Target) { $Current = $Target.FullName }
+        }
+    }
+    return $Current
+}
+
 # Stops (throws) before anything is extracted from the zip $Path when it is
 # outside the limits downstream accepts a report zip within: more than 2000
 # entries, an entry over 16 GB, over 32 GB in all, an entry or the whole
@@ -664,12 +689,21 @@ function New-RdaAllSubHtmlSummaryFromZip
         $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($ZipItem.Name)
         $OutputDirectory = Join-Path $ZipItem.DirectoryName ($BaseName + '_MainSummary')
     }
+    $OutputDirectory = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory))
+    # A drive or file system root is never the output folder: the reports
+    # would sit at the root and the bundle would be named after no folder.
+    if ($OutputDirectory -eq [System.IO.Path]::GetPathRoot($OutputDirectory))
+    {
+        throw ("New-RdaAllSubHtmlSummaryFromZip: -OutputDirectory cannot be the root {0}. Choose a folder." -f $OutputDirectory)
+    }
+    $OutputDirectory = $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar, '/')
     # -PackageZip writes <OutputDirectory>.zip, replacing a file of that name:
-    # never the input zip itself.
+    # never the input zip itself, also not when a linked folder makes the two
+    # paths look different.
     if ($PackageZip)
     {
-        $PlannedPackage = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/') + '.zip'
-        if ((Get-RdaPathComparer -Path $ZipItem.FullName).Equals($PlannedPackage, $ZipItem.FullName))
+        $PlannedPackage = $OutputDirectory + '.zip'
+        if ((Get-RdaPathComparer -Path $ZipItem.FullName).Equals((Get-RdaPhysicalPath -Path $PlannedPackage), (Get-RdaPhysicalPath -Path $ZipItem.FullName)))
         {
             throw ("New-RdaAllSubHtmlSummaryFromZip: -PackageZip would write {0}, which is -InputZip. Choose another -OutputDirectory." -f $PlannedPackage)
         }
@@ -677,7 +711,6 @@ function New-RdaAllSubHtmlSummaryFromZip
     # Checked before anything is created or extracted, as downstream checks a
     # report zip.
     Assert-RdaZipWithinLimit -Path $ZipItem.FullName
-    $OutputDirectory = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/')
 
     if ([string]::IsNullOrWhiteSpace($HtmlFile))
     {
@@ -712,6 +745,18 @@ function New-RdaAllSubHtmlSummaryFromZip
     $StagedFiles = New-Object System.Collections.Generic.List[object]
     $DirsPlanned = New-Object System.Collections.Generic.List[string]
     $MadeReportDirs = New-Object System.Collections.Generic.List[string]
+    $SwapDone = $false
+    $SwapUndone = $false
+    # Puts every target back as it was before the swap, last swapped first
+    # (a target written twice is put back in turn).
+    $UndoSwap = {
+        for ($I = $StagedFiles.Count - 1; $I -ge 0; $I--)
+        {
+            $Staged = $StagedFiles[$I]
+            if ($Staged.Swapped -and -not $Staged.Backup) { Remove-Item -LiteralPath $Staged.Target -Force -ErrorAction SilentlyContinue }
+            if ($Staged.Backup -and (Test-Path -LiteralPath $Staged.Backup)) { [System.IO.File]::Move($Staged.Backup, $Staged.Target, $true) }
+        }
+    }
     try
     {
         New-Item -ItemType Directory -Path $Staging -ErrorAction Stop | Out-Null
@@ -795,8 +840,9 @@ function New-RdaAllSubHtmlSummaryFromZip
 
         # Then the writes, only the planned entries. Each file is written under
         # a private name beside its target first; only when every file is
-        # written are they moved over their targets, so a read or write that
-        # fails part-way leaves a report already in a reused folder whole.
+        # written do they take their targets' places, each old file kept under
+        # a private name until all have, so a failure at any point puts the
+        # reports already in a reused folder back as they were.
         foreach ($Item in $Plan)
         {
             $Dest = $Item.Dest
@@ -808,7 +854,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 foreach ($Entry in @($Archive.Entries | Where-Object { $Item.Entries -ccontains $_.FullName }))
                 {
                     $Target = Join-Path $Dest $Entry.Name
-                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')) }
+                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')); Backup = $null; Swapped = $false }
                     $StagedFiles.Add($Staged)
                     [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Staged.Partial, $false)
                 }
@@ -854,7 +900,7 @@ function New-RdaAllSubHtmlSummaryFromZip
                 foreach ($F in $Item.Files)
                 {
                     $Target = Join-Path $Dest $F.Name
-                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')) }
+                    $Staged = [pscustomobject]@{ Dest = $Dest; Target = $Target; Partial = ('{0}.rda-{1}.partial' -f $Target, [guid]::NewGuid().ToString('N')); Backup = $null; Swapped = $false }
                     $StagedFiles.Add($Staged)
                     Copy-Item -LiteralPath $F.FullName -Destination $Staged.Partial
                 }
@@ -867,10 +913,21 @@ function New-RdaAllSubHtmlSummaryFromZip
             throw "New-RdaAllSubHtmlSummaryFromZip: no per-subscription reports found inside '$InputZip'. Is this a consolidated AllSubscriptions_ResourcesReport_*.zip?"
         }
 
-        # Every file is written: each now takes its target's place.
+        # Every file is written: each now takes its target's place, the old
+        # file moved aside first (put back if any later step fails).
         foreach ($Staged in $StagedFiles)
         {
-            [System.IO.File]::Move($Staged.Partial, $Staged.Target, $true)
+            if (Test-Path -LiteralPath $Staged.Target)
+            {
+                $Staged.Backup = '{0}.rda-{1}.bak' -f $Staged.Target, [guid]::NewGuid().ToString('N')
+                [System.IO.File]::Move($Staged.Target, $Staged.Backup)
+            }
+            [System.IO.File]::Move($Staged.Partial, $Staged.Target)
+            $Staged.Swapped = $true
+        }
+        $SwapDone = $true
+        foreach ($Staged in $StagedFiles)
+        {
             if (-not $WrittenFiles.ContainsKey($Staged.Dest)) { $WrittenFiles[$Staged.Dest] = New-Object System.Collections.Generic.List[string] }
             if (-not $WrittenFiles[$Staged.Dest].Contains($Staged.Target)) { $WrittenFiles[$Staged.Dest].Add($Staged.Target) }
         }
@@ -881,6 +938,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     {
         # A refused or failed rebuild leaves no empty folder it made: the
         # report folders, -OutputDirectory and its parents, deepest first.
+        if (-not $SwapDone) { $SwapUndone = $true; & $UndoSwap }
         foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
         foreach ($Dir in @(@($MadeReportDirs) + @($MadeDirs)))
         {
@@ -890,8 +948,11 @@ function New-RdaAllSubHtmlSummaryFromZip
     }
     finally
     {
-        # Private names left by a failed write, then the staging folder (only
-        # the one this call made).
+        # A stopped run (no catch) is put back too. Then the old files moved
+        # aside, the private names left by a failed write, and the staging
+        # folder (only the one this call made).
+        if (-not $SwapDone -and -not $SwapUndone) { & $UndoSwap }
+        if ($SwapDone) { foreach ($Staged in $StagedFiles) { if ($Staged.Backup) { Remove-Item -LiteralPath $Staged.Backup -Force -ErrorAction SilentlyContinue } } }
         foreach ($Staged in $StagedFiles) { if (Test-Path -LiteralPath $Staged.Partial) { Remove-Item -LiteralPath $Staged.Partial -Force -ErrorAction SilentlyContinue } }
         if ($StagingMade) { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -977,7 +1038,7 @@ function New-RdaAllSubHtmlSummaryFromZip
         # name never travels with the bundle.
         $Entries = New-Object System.Collections.Generic.List[object]
         $HtmlFullPath = (Resolve-Path -LiteralPath $HtmlFile).ProviderPath
-        if ((Split-Path -Path $HtmlFullPath -Parent) -eq $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar))
+        if ((Get-RdaPathComparer -Path $OutputDirectory).Equals((Split-Path -Path $HtmlFullPath -Parent).TrimEnd([IO.Path]::DirectorySeparatorChar, '/'), $OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar, '/')))
         {
             $Entries.Add([pscustomobject]@{ Path = $HtmlFullPath; Name = (Split-Path -Path $HtmlFullPath -Leaf) })
         }

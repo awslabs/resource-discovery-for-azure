@@ -1531,3 +1531,44 @@ Describe 'Extension/Summary.ps1 reads a consumption file in a folder with bracke
         [System.IO.File]::ReadAllText($Html) | Should -Match 'VM billing-coverage check'
     }
 }
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at once' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+    }
+
+    It 'refuses the second rebuild while the first is moving its files in, and the first finishes whole' {
+        $Out = Join-Path $script:TmpRoot 'two-at-once'
+        $script:Nested = $null
+        $script:NestedRan = $false
+        # The second rebuild starts while the first moves its first file in.
+        Mock Move-RdaFile {
+            if (-not $script:NestedRan)
+            {
+                $script:NestedRan = $true
+                try { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null }
+                catch { $script:Nested = $_.Exception.Message }
+            }
+            [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
+        }
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null
+        $script:NestedRan | Should -BeTrue
+        $script:Nested | Should -BeLike '*another rebuild is writing into*'
+        foreach ($Stamp in $script:Stamps)
+        {
+            $Base = 'ResourcesReport_' + $Stamp
+            Test-Path -LiteralPath (Join-Path $Out ('{0}/{0}.html' -f $Base)) | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $Out ('{0}/Inventory_{0}.json' -f $Base)) | Should -BeTrue
+        }
+        @(Get-ChildItem -LiteralPath $Out -Recurse -Force | Where-Object { $_.Name -like '*.rda-*' }) | Should -BeNullOrEmpty
+    }
+
+    It 'lets the next rebuild in after one that failed part-way' {
+        $Out = Join-Path $script:TmpRoot 'after-a-failure'
+        Mock Move-RdaFile { throw 'disk full' }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*disk full*'
+        Mock Move-RdaFile { [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite) }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Not -Throw
+        Test-Path -LiteralPath (Join-Path $Out 'MainSummary.html') | Should -BeTrue
+    }
+}

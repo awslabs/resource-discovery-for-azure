@@ -30,6 +30,11 @@
     replaced only when the render works, so running the rebuild again keeps
     one html per report.
 
+    One rebuild at a time writes into a folder: a second one started into the
+    same -OutputDirectory while the first runs stops before it changes
+    anything, saying another rebuild is writing there. Run it again when the
+    first has finished.
+
 .PARAMETER InputZip
     Path to the consolidated AllSubscriptions_ResourcesReport_*.zip.
 

@@ -300,6 +300,32 @@ function Move-RdaFile
     [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
 }
 
+# Takes the lock that lets one rebuild at a time write into the output folder
+# $Path (its path as followed through links), and returns it; disposing it lets
+# the next one in. A second rebuild into the same folder, in this process or
+# another, throws here before it changes anything, so the two never move,
+# replace or put back each other's files. The lock file is a private name in
+# this user's temp folder, never in the output folder, and is left there:
+# removing it could let two rebuilds hold two locks at once. The operating
+# system frees the lock when the process ends, so a stopped run never leaves
+# the folder locked.
+# shortcut: keyed on this user's name, so a rebuild by another user of the same
+# folder is not held back; upgrade if output folders become shared by users.
+function Lock-RdaOutputDirectory
+{
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $Key = '{0}|{1}' -f [Environment]::UserName, $Path.ToLowerInvariant()
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $Hash = [System.BitConverter]::ToString($Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Key))).Replace('-', '').Substring(0, 32) }
+    finally { $Sha.Dispose() }
+    $LockFile = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-rebuild-{0}.lock' -f $Hash)
+    try { return [System.IO.File]::Open($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None) }
+    catch
+    {
+        throw ("New-RdaAllSubHtmlSummaryFromZip: another rebuild is writing into {0} (lock {1}). Wait for it to finish, then run again." -f $Path, $LockFile)
+    }
+}
+
 # Removes a private file or folder this module left; one that cannot be
 # removed is named in a warning, never passed over in silence.
 function Clear-RdaLeftover
@@ -757,6 +783,20 @@ function New-RdaAllSubHtmlSummaryFromZip
         $PlatOS
     )
 
+    # The rebuild itself; the lock it takes on the output folder is held
+    # until it returns or fails.
+    $HeldLocks = [System.Collections.Generic.List[System.IDisposable]]::new()
+    try { Invoke-RdaAllSubHtmlSummaryFromZip @PSBoundParameters -HeldLocks $HeldLocks }
+    finally { foreach ($Held in $HeldLocks) { $Held.Dispose() } }
+}
+
+# The body of New-RdaAllSubHtmlSummaryFromZip, with its parameters (documented
+# there). It adds the output folder's lock to -HeldLocks, which that function
+# releases.
+function Invoke-RdaAllSubHtmlSummaryFromZip
+{
+    param($InputZip, $OutputDirectory, $HtmlFile, [switch]$Detailed, [switch]$PackageZip, [switch]$KeepOriginalReports, $TenantId, $Version, $PlatOS, [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[System.IDisposable]]$HeldLocks)
+
     $ErrorActionPreference = 'Stop'
 
     if ([string]::IsNullOrWhiteSpace($InputZip) -or -not (Test-Path -LiteralPath $InputZip -PathType Leaf))
@@ -812,6 +852,11 @@ function New-RdaAllSubHtmlSummaryFromZip
     {
         throw ("New-RdaAllSubHtmlSummaryFromZip: -HtmlFile must be in -OutputDirectory ({0}), beside the report folders its links point to; it was {1}." -f $OutputDirectory, $HtmlFile)
     }
+
+    # One rebuild at a time into this folder, from here on: every check below
+    # of what is already there, and every file this call moves, replaces or
+    # puts back, is then its own.
+    $HeldLocks.Add((Lock-RdaOutputDirectory -Path $OutputPhysical.TrimEnd([IO.Path]::DirectorySeparatorChar, '/')))
 
     # The folders New-Item -Force makes (-OutputDirectory and any missing
     # parent), deepest first, so a refused or failed rebuild can remove the

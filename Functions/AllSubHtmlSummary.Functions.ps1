@@ -307,8 +307,9 @@ function Move-RdaFile
 # of the folder finds it, whatever its user or temp folder. The file stays in
 # the folder after the rebuild: removing it would let a caller that opened it
 # just before the removal lock the removed file while another locks a new one.
-# (It is removed only with a folder this call made and removes again after a
-# failed rebuild.) The operating system lets go of the lock when the process
+# It is removed only after a failed or refused rebuild, together with a
+# -OutputDirectory this call made, while the lock is still held (see
+# $RemoveMadeDirs). The operating system lets go of the lock when the process
 # ends, so a stopped run never leaves the folder locked. Only a lock held by
 # another caller is reported as another rebuild; any other failure (a folder
 # that cannot be written, a full disk) is passed on with its own message.
@@ -875,9 +876,18 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
         # call made it.
         if ($MadeDirs.Count -gt 0)
         {
+            $LockFile = Join-Path $OutputDirectory '.rda-rebuild.lock'
+            # On Linux and macOS the file is removed while the lock is still
+            # held, so no caller can lock it after it is let go and then hold a
+            # removed file: one that opens the path afterwards makes a new one
+            # (and the folder is then not empty, so it stays). Windows does not
+            # remove a file that is open, and no caller can open it while it is
+            # held, so there it is let go first; if another rebuild takes it in
+            # between, the file and the folder stay for that rebuild.
+            if (-not $IsWindows) { Clear-RdaLeftover -Path $LockFile }
             foreach ($Held in $HeldLocks) { $Held.Dispose() }
             $HeldLocks.Clear()
-            Clear-RdaLeftover -Path (Join-Path $OutputDirectory '.rda-rebuild.lock')
+            if ($IsWindows) { try { Remove-Item -LiteralPath $LockFile -Force -ErrorAction Stop } catch { Write-Verbose ('Left the lock file {0} to the rebuild that took it: {1}' -f $LockFile, $_.Exception.Message) } }
         }
         foreach ($Dir in @($MadeDirs))
         {

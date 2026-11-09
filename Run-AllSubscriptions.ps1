@@ -977,6 +977,10 @@ if (($Resume -or $ResumeFailedOnly) -and @($FailedAttempts | Where-Object { $nul
     }
 }
 
+# The access check's result. Set by the check below, which does not run when
+# nothing is left to probe; the end of the run reads it either way.
+$AccessDecision = $null
+
 # ---------------------------------------------------------------------------
 # Up-front access gate. Before ANY per-subscription work, verify the signed-in
 # identity can actually read every in-scope subscription. Azure Resource Graph
@@ -988,9 +992,6 @@ if (($Resume -or $ResumeFailedOnly) -and @($FailedAttempts | Where-Object { $nul
 # to skip the inaccessible ones and continue. On -Resume only the subscriptions
 # this run will actually process (not already-completed ones) are probed. Runs
 # once in the parent, before the sequential/parallel split, so it gates both.
-# Set by the check below; it does not run when nothing is left to probe, and
-# the end of the run reads it either way.
-$AccessDecision = $null
 $ScopeForProbe = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }) } else { @($Subscriptions) }
 if ($ScopeForProbe.Count -gt 0)
 {

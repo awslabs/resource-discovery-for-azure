@@ -193,9 +193,11 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
             if ($Stream1SummaryJson)
             {
                 # Stream 1 then reports what this text says, not what it did.
+                # {Reports} in the text stands for this run's inventory root.
                 $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
                 $Summary = Join-Path $Reports.FullName '.rda-stream-1-summary.json'
-                Set-Content -LiteralPath $Summary -Value $Stream1SummaryJson -Encoding utf8
+                $ReportsText = (ConvertTo-Json -InputObject $Reports.FullName).Trim('"')
+                Set-Content -LiteralPath $Summary -Value $Stream1SummaryJson.Replace('{Reports}', $ReportsText) -Encoding utf8
                 [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
             }
             if ($CorruptStreamSummary)
@@ -505,6 +507,24 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # read; stream 1 runs Sub B (one zip) but reports Sub X, which has no
         # zip. Three zips for one success must not pass the check.
         $SubX = [pscustomobject]@{ Name = 'Sub X'; Id = [guid]::new(('0' * 31) + 'e').ToString(); Count = 1 }
+        $Forged = [pscustomobject]@{ Status = 'ok'; ResourceCounts = @($SubX); Failed = @() } | ConvertTo-Json -Depth 5
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
+        $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'verification: OK' -Because $Run.Console
+        $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
+        $Run.Console | Should -Match ('(?m)^\s*- Sub X \({0}\) \[1 resources\]' -f [regex]::Escape($SubX.Id)) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.'))
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams: a subscription whose named zip is gone fails the check, though other fresh zips are present' {
+        # Stream 1 runs Sub B but reports Sub X with the zip its inner script
+        # named, and that zip is not on disk (as when antivirus removes it
+        # after it was written). Stream-0's zips (Sub A, Sub C, summary
+        # unreadable) and Sub B's zip are fresh, so only the path match can
+        # find the gap.
+        $SubX = [pscustomobject]@{ Name = 'Sub X'; Id = [guid]::new(('0' * 31) + 'e').ToString(); Count = 1; Zip = '{Reports}/SubX/ResourcesReport_gone.zip' }
         $Forged = [pscustomobject]@{ Status = 'ok'; ResourceCounts = @($SubX); Failed = @() } | ConvertTo-Json -Depth 5
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
         $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console

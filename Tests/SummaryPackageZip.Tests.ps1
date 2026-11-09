@@ -1404,10 +1404,12 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip under strict mode, and the real script
         try
         {
             Set-StrictMode -Version Latest
-            { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -PackageZip 6>$null } | Should -Not -Throw
+            $Said = New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -PackageZip 6>&1 | Out-String
         }
         finally { Set-StrictMode -Off; $script:RdaCanResolveLinks = $Saved }
         Test-Path -LiteralPath ($Out + '.zip') -PathType Leaf | Should -BeTrue
+        # The renderer runs under strict mode too.
+        $Said | Should -Not -BeLike '*Re-render skipped*'
     }
 
     It 'runs Build-MainSummaryFromZip.ps1 and the real renderer from a repo folder with brackets' {
@@ -1438,5 +1440,17 @@ Describe 'New-RdaAllSubHtmlSummary with an inventory that cannot be read' {
         $Html = Join-Path $Run 'MainSummary.html'
         New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Html 6>$null | Out-Null
         Get-Content -LiteralPath $Html -Raw | Should -Match 'href="ResourcesReport_20260102030405191[\\/]ResourcesReport_20260102030405191\.html"'
+    }
+}
+
+Describe 'Extension/Summary.ps1 service type count' {
+    It 'counts one service type for an inventory that holds one service' {
+        $Dir = Join-Path $script:TmpRoot 'one-service'
+        [void][System.IO.Directory]::CreateDirectory($Dir)
+        $Json = Join-Path $Dir 'Inventory_one.json'
+        [System.IO.File]::WriteAllText($Json, '{"Version":"3.2.3","PublicIP":[{"Name":"a","Subscription":"S"},{"Name":"b","Subscription":"S"},{"Name":"c","Subscription":"S"}]}')
+        $Html = Join-Path $Dir 'r.html'
+        & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile $Html -Title 'T' 6>$null | Out-Null
+        [System.IO.File]::ReadAllText($Html) | Should -Match '<b>Service Types:</b> 1</div>'
     }
 }

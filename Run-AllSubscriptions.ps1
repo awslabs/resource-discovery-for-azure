@@ -1136,6 +1136,28 @@ else
     if ($StreamCount -ge 2)
     {
 
+        # A stream's summary file has a fixed path, so one left by an earlier
+        # run (interrupted, or its stream died before writing) would be read
+        # as this run's when this run's stream writes none. Each is removed
+        # before any stream starts; one that cannot be removed stops the run
+        # here, before anything is collected or any state changes.
+        for ($S = 0; $S -lt $StreamCount; $S++)
+        {
+            $OldSummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+            try
+            {
+                if (Test-Path -LiteralPath $OldSummaryPath -PathType Leaf) { Remove-Item -LiteralPath $OldSummaryPath -Force -ErrorAction Stop }
+                if (Test-Path -LiteralPath $OldSummaryPath) { throw 'it is not a file' }
+            }
+            catch
+            {
+                Write-Host ("ERROR: could not remove the old stream summary {0}: {1}" -f $OldSummaryPath, $_.Exception.Message) -ForegroundColor Red
+                Write-Host "This run could read it as its own stream's summary. Remove it by hand, then run again." -ForegroundColor Yellow
+                Write-Host "Exit code 2: an old stream summary could not be removed; no subscription was collected and no consolidated zip was made." -ForegroundColor Yellow
+                Exit-Wrapper -Code 2
+            }
+        }
+
         # Snapshot the parent's Az context to a shared file so each stream can
         # Import-AzContext without prompting. Save-AzContext writes a JSON file
         # containing a token cache, so it MUST NOT be left on disk after the
@@ -1220,11 +1242,15 @@ else
                     catch { Write-Verbose ("Could not read stream resume file {0}: {1}" -f $StreamStatePath, $_.Exception.Message) }
                 }
 
+                # Its summary must hold a row (ResourceCounts or Failed) for
+                # each of them to be taken as this run's.
+                $ExpectedIds = @($SliceIds | Where-Object { $PriorDone -notcontains $_ })
                 $StreamSummaries += [pscustomobject]@{
                     StreamId     = $S
                     SummaryPath  = $SummaryPath
                     FailuresPath = $FailuresPath
-                    SubCount     = @($SliceIds | Where-Object { $PriorDone -notcontains $_ }).Count
+                    SubCount     = $ExpectedIds.Count
+                    ExpectedIds  = $ExpectedIds
                 }
 
                 Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan
@@ -1321,6 +1347,32 @@ else
                 catch
                 {
                     Write-Host ("[stream-{0}] ERROR: could not parse summary file {1}: {2}" -f $S.StreamId, $S.SummaryPath, $_.Exception.Message) -ForegroundColor Red
+                    $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount; Reason = 'Unreadable' }
+                    continue
+                }
+                # Read, but taken as this run's summary of the stream only when
+                # it is a JSON object that names this stream and has a row for
+                # every subscription the stream ran this time. Anything else
+                # ('{}', 'null', a list, another stream's, too few rows) is
+                # treated as a summary that cannot be read: not confirmed.
+                $NotThisRun = $null
+                if ($StreamSummary -isnot [System.Management.Automation.PSCustomObject])
+                {
+                    $NotThisRun = 'it is not a JSON object'
+                }
+                elseif ([string]$StreamSummary.StreamId -ne [string]$S.StreamId)
+                {
+                    $NotThisRun = ("it names stream '{0}'" -f $StreamSummary.StreamId)
+                }
+                else
+                {
+                    $RowIds = @(@($StreamSummary.ResourceCounts) + @($StreamSummary.Failed) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
+                    $NoRow = @($S.ExpectedIds | Where-Object { $RowIds -notcontains $_ })
+                    if ($NoRow.Count -gt 0) { $NotThisRun = ('it has no row for {0} of the {1} subscription(s) the stream ran' -f $NoRow.Count, $S.SubCount) }
+                }
+                if ($null -ne $NotThisRun)
+                {
+                    Write-Host ("[stream-{0}] ERROR: summary file {1} is not this run's summary of stream {0}: {2}" -f $S.StreamId, $S.SummaryPath, $NotThisRun) -ForegroundColor Red
                     $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount; Reason = 'Unreadable' }
                     continue
                 }

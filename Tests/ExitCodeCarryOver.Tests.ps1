@@ -102,7 +102,36 @@ function Start-Transcript
 }
 function Get-AzContext { [CmdletBinding()] param([switch]$ListAvailable) Get-RdaStandInContext }
 function Set-AzContext { [CmdletBinding()] param($Subscription, $Tenant, $Context, $Scope) if ($Subscription) { $script:ContextSub = [string]$Subscription }; Get-RdaStandInContext }
-function Import-AzContext { [CmdletBinding()] param($Path) Get-RdaStandInContext }
+# Only a stream worker imports the context. The scenario's Plant entries for
+# that stream then set what its summary file holds, once the wrapper has
+# started the stream: Text (this text, read-only, so the stream cannot
+# replace it), Folder (a folder, so the stream can write no summary, as when
+# its job dies before the end) or Freeze (a file already there is made
+# read-only, else a folder).
+function Import-AzContext
+{
+    [CmdletBinding()] param($Path)
+    $Worker = @(Get-PSCallStack | Where-Object { $_.ScriptName -like '*Run-AllSubscriptions.Stream.ps1' -and $null -ne $_.InvocationInfo.BoundParameters -and $_.InvocationInfo.BoundParameters.ContainsKey('StreamSummaryPath') }) | Select-Object -First 1
+    if ($null -ne $Worker)
+    {
+        $Bound = $Worker.InvocationInfo.BoundParameters
+        $SummaryPath = [string]$Bound['StreamSummaryPath']
+        foreach ($Plant in @((Get-RdaStandInScenario).Plant | Where-Object { $null -ne $_ -and [string]$_.Stream -eq [string]$Bound['StreamId'] }))
+        {
+            $Kind = [string]$Plant.Kind
+            if ($Kind -eq 'Freeze') { $Kind = if (Test-Path -LiteralPath $SummaryPath -PathType Leaf) { 'Keep' } else { 'Folder' } }
+            if ($Kind -eq 'Folder') { New-Item -ItemType Directory -Path $SummaryPath -Force | Out-Null }
+            if ($Kind -eq 'Text')
+            {
+                # {Reports} in the text stands for this run's inventory root.
+                $ReportsText = (ConvertTo-Json -InputObject ([string]$Bound['InventoryRoot'])).Trim('"')
+                Set-Content -LiteralPath $SummaryPath -Value ([string]$Plant.Text).Replace('{Reports}', $ReportsText) -Encoding utf8
+            }
+            if ($Kind -eq 'Text' -or $Kind -eq 'Keep') { [System.IO.File]::SetUnixFileMode($SummaryPath, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead') }
+        }
+    }
+    Get-RdaStandInContext
+}
 function Save-AzContext { [CmdletBinding()] param($Path, [switch]$Force) Set-Content -LiteralPath $Path -Value '{}' }
 function Disable-AzContextAutosave { [CmdletBinding()] param($Scope) }
 function Get-AzContextAutosaveSetting { [CmdletBinding()] param($Scope) [pscustomobject]@{ Mode = 'Process'; ContextFile = 'None'; CacheFile = 'None' } }
@@ -194,15 +223,34 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot)
+            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
+            # What the streams' summary files hold once the wrapper has
+            # started the streams (see Import-AzContext in the stand-in).
+            $Plant = @()
             if ($MissingStreamSummary)
             {
                 # A folder where stream 0's summary file goes: the stream
                 # cannot write its summary, so the wrapper finds no summary
                 # file for it (as when its job dies before the end).
+                $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Folder' }
+            }
+            if ($StaleStreamSummaryJson)
+            {
+                # Stream 0's summary file from an earlier run, left on disk
+                # before this run starts. Stream 0 then cannot write its own
+                # summary: a file still there is made read-only, else a
+                # folder takes its place.
+                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
+                Set-Content -LiteralPath (Join-Path $Reports.FullName '.rda-stream-0-summary.json') -Value $StaleStreamSummaryJson -Encoding utf8
+                $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Freeze' }
+            }
+            if ($StreamSummaryFolderBeforeRun)
+            {
+                # A folder where stream 0's summary file goes, there before
+                # this run starts, so the wrapper cannot remove it.
                 New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports/.rda-stream-0-summary.json') -Force | Out-Null
             }
             if ($Stream0Completed.Count -gt 0)
@@ -216,33 +264,23 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
             {
                 # Stream 1 then reports what this text says, not what it did.
                 # {Reports} in the text stands for this run's inventory root.
-                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
-                $Summary = Join-Path $Reports.FullName '.rda-stream-1-summary.json'
-                $ReportsText = (ConvertTo-Json -InputObject $Reports.FullName).Trim('"')
-                Set-Content -LiteralPath $Summary -Value $Stream1SummaryJson.Replace('{Reports}', $ReportsText) -Encoding utf8
-                [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
+                $Plant += [pscustomobject]@{ Stream = '1'; Kind = 'Text'; Text = $Stream1SummaryJson }
             }
             if ($CorruptStreamSummary)
             {
-                # Stream 0's summary file is left as text that is not JSON and
-                # cannot be written, so the stream cannot replace it and the
-                # wrapper finds it but cannot read it.
-                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
-                $Summary = Join-Path $Reports.FullName '.rda-stream-0-summary.json'
-                Set-Content -LiteralPath $Summary -Value 'not json' -Encoding utf8
-                [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
+                # Stream 0's summary file is text that is not JSON and cannot
+                # be written, so the stream cannot replace it and the wrapper
+                # finds it but cannot read it.
+                $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = 'not json' }
             }
             elseif ($StreamSummaryJson)
             {
                 # The same, with a summary the wrapper can read: stream 0 then
                 # reports what this text says, not what it did.
-                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
-                $Summary = Join-Path $Reports.FullName '.rda-stream-0-summary.json'
-                Set-Content -LiteralPath $Summary -Value $StreamSummaryJson -Encoding utf8
-                [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
+                $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = $FailSub; CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = $FailSub; CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             $WrapperArgs = @('-TenantID', $script:Tenant, '-SkipMetrics', '-SkipConsumption', '-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
@@ -436,14 +474,15 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
     }
 
     It 'two streams: the verification-gap stop prints the Exit code lines, naming the sign-in skip and collector failures it hides' {
-        # Stream 0 reports two subscriptions that worked, with a collector
-        # failure and a Metrics sign-in skip; only two reports are on disk
-        # (Sub A and Sub B), so one report is missing.
+        # Stream 0 (Sub A) reports Sub A and two more subscriptions that
+        # worked, with a collector failure and a Metrics sign-in skip, and
+        # names no zip for any of them, so reports are missing.
         $SubX = [guid]::new(('0' * 31) + 'e').ToString()
         $SubY = [guid]::new(('0' * 31) + 'f').ToString()
         $Forged = [pscustomobject]@{
+            StreamId          = '0'
             Status            = 'ok'
-            ResourceCounts    = @([pscustomobject]@{ Name = 'Sub X'; Id = $SubX; Count = 1 }, [pscustomobject]@{ Name = 'Sub Y'; Id = $SubY; Count = 1 })
+            ResourceCounts    = @([pscustomobject]@{ Name = $script:SubA.Name; Id = $script:SubA.Id; Count = 1 }, [pscustomobject]@{ Name = 'Sub X'; Id = $SubX; Count = 1 }, [pscustomobject]@{ Name = 'Sub Y'; Id = $SubY; Count = 1 })
             Failed            = @()
             CollectorFailures = @([pscustomobject]@{ Id = $SubX; Name = 'Sub X'; Module = 'StandIn'; Message = 'stand-in: this collector failed' })
             MetricsFailedSubs = @([pscustomobject]@{ Id = $SubX; Name = 'Sub X'; Message = 'stand-in: no token' })
@@ -527,10 +566,12 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
 
     It 'two streams: the zips of a stream whose summary could not be read do not hide the missing zip of a subscription that reported success' {
         # Stream-0 (Sub A, Sub C) writes two zips but its summary cannot be
-        # read; stream 1 runs Sub B (one zip) but reports Sub X, which has no
-        # zip. Three zips for one success must not pass the check.
+        # read; stream 1 runs Sub B (one zip) but reports Sub X too, which has
+        # no zip (Sub B's row names none either). Three zips for two
+        # successes must not pass the check.
         $SubX = [pscustomobject]@{ Name = 'Sub X'; Id = [guid]::new(('0' * 31) + 'e').ToString(); Count = 1 }
-        $Forged = [pscustomobject]@{ Status = 'ok'; ResourceCounts = @($SubX); Failed = @() } | ConvertTo-Json -Depth 5
+        $RowB = [pscustomobject]@{ Name = $script:SubB.Name; Id = $script:SubB.Id; Count = 1 }
+        $Forged = [pscustomobject]@{ StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB, $SubX); Failed = @() } | ConvertTo-Json -Depth 5
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
         $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
         $Run.Console | Should -Not -Match 'verification: OK' -Because $Run.Console
@@ -542,13 +583,14 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
     }
 
     It 'two streams: a subscription whose named zip is gone fails the check, though other fresh zips are present' {
-        # Stream 1 runs Sub B but reports Sub X with the zip its inner script
-        # named, and that zip is not on disk (as when antivirus removes it
-        # after it was written). Stream-0's zips (Sub A, Sub C, summary
-        # unreadable) and Sub B's zip are fresh, so only the path match can
-        # find the gap.
+        # Stream 1 runs Sub B but also reports Sub X with the zip its inner
+        # script named, and that zip is not on disk (as when antivirus
+        # removes it after it was written). Stream-0's zips (Sub A, Sub C,
+        # summary unreadable) and Sub B's zip are fresh, so only the path
+        # match can find Sub X's gap.
         $SubX = [pscustomobject]@{ Name = 'Sub X'; Id = [guid]::new(('0' * 31) + 'e').ToString(); Count = 1; Zip = '{Reports}/SubX/ResourcesReport_gone.zip' }
-        $Forged = [pscustomobject]@{ Status = 'ok'; ResourceCounts = @($SubX); Failed = @() } | ConvertTo-Json -Depth 5
+        $RowB = [pscustomobject]@{ Name = $script:SubB.Name; Id = $script:SubB.Id; Count = 1 }
+        $Forged = [pscustomobject]@{ StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB, $SubX); Failed = @() } | ConvertTo-Json -Depth 5
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
         $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
         $Run.Console | Should -Not -Match 'verification: OK' -Because $Run.Console
@@ -580,15 +622,70 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
     }
 
     It 'two streams: the verification-gap stop does not count a stream with no summary file as a failed subscription' {
-        # Stream 1 reports four subscriptions that worked; only three reports
-        # are on disk, so the run stops at the output verification.
+        # Stream 1 (Sub B) reports Sub B and four more subscriptions that
+        # worked, with no zip named, so the run stops at the output
+        # verification.
         $Phantoms = @('6', '7', '8', '9' | ForEach-Object { [pscustomobject]@{ Name = ('Sub {0}' -f $_); Id = [guid]::new(('0' * 31) + $_).ToString(); Count = 1 } })
-        $Forged = [pscustomobject]@{ Status = 'ok'; ResourceCounts = $Phantoms; Failed = @() } | ConvertTo-Json -Depth 5
+        $RowB = [pscustomobject]@{ Name = $script:SubB.Name; Id = $script:SubB.Id; Count = 1 }
+        $Forged = [pscustomobject]@{ StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB) + $Phantoms; Failed = @() } | ConvertTo-Json -Depth 5
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -MissingStreamSummary -Stream1SummaryJson $Forged
         $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
         $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
         $Run.Console | Should -Not -Match 'ERROR lines above' -Because $Run.Console
         $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 is missing; its 2 subscription(s) are not confirmed; no consolidated zip was made.'))
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams: a stream summary left by an earlier run is not read as this run''s' {
+        # An earlier run left stream 0's summary on disk ("ok", no rows, as
+        # an interrupted -Resume run that skipped everything writes it). This
+        # run's stream 0 then writes no summary.
+        $Stale = [pscustomobject]@{ StreamId = '0'; Tenant = $script:Tenant; Status = 'ok'; Completed = @(); Failed = @(); ResourceCounts = @() } | ConvertTo-Json -Depth 5
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StaleStreamSummaryJson $Stale
+        $Run.Console | Should -Match '\[stream-0\] WARNING: no summary file' -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 is missing; its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Exit code 0' -Because $Run.Console
+        # The resume state is kept, and nothing is put on the retry list.
+        $Run.StateKept | Should -BeTrue -Because $Run.Console
+        $Run.FailedIds.Count | Should -Be 0 -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams: a stream summary that is <Case> is not confirmed' -ForEach @(
+        @{ Case = 'an empty object'; Json = '{}' }
+        @{ Case = 'null'; Json = 'null' }
+        @{ Case = 'a list'; Json = '[]' }
+        @{ Case = 'without a row for every subscription the stream ran'; Json = '{"StreamId":"0","Status":"ok","ResourceCounts":[],"Failed":[]}' }
+    ) {
+        # Stream 0 runs Sub A then Sub C.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -StreamSummaryJson $Json
+        $Run.Console | Should -Match '\[stream-0\] ERROR: summary file .+ is not this run''s summary of stream 0' -Because $Run.Console
+        $Run.Console | Should -Match 'Stream Summary Unreadable:\s+stream-0 \(2 subscription\(s\) not confirmed; check the consolidated zip\)' -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 could not be read; its 2 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.StateKept | Should -BeTrue -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams with -Resume: a summary that names another stream is not confirmed, though the stream had nothing left to run' {
+        # Stream 0 holds Sub A and Sub C, both done in an earlier run.
+        $Wrong = '{"StreamId":"1","Status":"ok","ResourceCounts":[],"Failed":[]}'
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -Resume -Stream0Completed @($script:SubA.Id, $script:SubC.Id) -StreamSummaryJson $Wrong
+        $Run.Console | Should -Match '\[stream-0\] skipping \(already completed\): Sub C' -Because $Run.Console
+        $Run.Console | Should -Match '\[stream-0\] ERROR: summary file .+ is not this run''s summary of stream 0' -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 could not be read; its 0 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.Console
+        $Run.StateKept | Should -BeTrue -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams: an old stream summary the wrapper cannot remove stops the run before any stream starts' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamSummaryFolderBeforeRun
+        $Run.Console | Should -Match 'ERROR: could not remove the old stream summary .+\.rda-stream-0-summary\.json' -Because $Run.Console
+        $Run.Console | Should -Match 'Remove it by hand, then run again\.' -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: an old stream summary could not be removed; no subscription was collected and no consolidated zip was made.')) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'queued:' -Because 'no stream may start while its old summary is still there'
         $Run.ZipCount | Should -Be 0 -Because $Run.Console
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }

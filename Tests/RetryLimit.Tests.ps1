@@ -81,13 +81,8 @@ $Global:ResourceCount = 1
     # filter and everything else the wrapper does before the check.
     $SeedAt = script:Find-TopIndex -What 'the startup read of the completed ids' -Match { param($s) $s.Extent.Text -match '^\$CompletedIds = (@\()?Get-CompletedSubscriptionIds ' }
     $ScopeAt = script:Find-TopIndex -After $SeedAt -What 'the access-check scope' -Match { param($s) $s.Extent.Text.StartsWith('$ScopeForProbe = ') }
-    # The completed ids are read as an array: an empty or one-id list comes back
-    # from Get-CompletedSubscriptionIds as $null or a bare string, and `+=` would
-    # then join the next id onto it. A wrapper that already reads it this way is
-    # left as written.
-    $StartText = (script:Join-Top -From $SeedAt -To ($ScopeAt - 1)).Replace(
-        '$CompletedIds = Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID' + "`n",
-        '$CompletedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $_ })' + "`n")
+    # Run as written: the completed ids are read as the wrapper reads them.
+    $StartText = script:Join-Top -From $SeedAt -To ($ScopeAt - 1)
 
     # The access check: its scope as written, then a stand-in that finds the ids in
     # $Global:RdaRlUnreadableIds not readable and every other readable (under

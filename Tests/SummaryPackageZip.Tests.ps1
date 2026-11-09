@@ -95,7 +95,7 @@ BeforeAll {
     # The report links a summary html holds, with '/' separators, sorted. The
     # summary joins each link with Join-Path, so on Windows it holds '\'; a
     # '/' path resolves on every platform.
-    function Get-SummaryLinks
+    function Get-SummaryLinkList
     {
         param([Parameter(Mandatory)][string]$HtmlPath)
         $Html = Get-Content -LiteralPath $HtmlPath -Raw
@@ -103,7 +103,7 @@ BeforeAll {
     }
 
     # The links a summary of these stamps holds, one per reconstructed folder.
-    function Get-ExpectedLinks
+    function Get-ExpectedLinkList
     {
         param([Parameter(Mandatory)][string[]]$Stamps)
         @($Stamps | ForEach-Object { '{0}/{0}.html' -f ('ResourcesReport_' + $_) } | Sort-Object)
@@ -182,14 +182,14 @@ Describe 'Build-MainSummaryFromZip -PackageZip into a folder that already holds 
 
     It 'lists only the folders reconstructed from the input zip in the packaged summary' {
         $Summary = Join-Path $script:ReusedExtract 'MainSummary.html'
-        Get-SummaryLinks -HtmlPath $Summary | Should -Be (Get-ExpectedLinks -Stamps $script:Stamps)
+        Get-SummaryLinkList -HtmlPath $Summary | Should -Be (Get-ExpectedLinkList -Stamps $script:Stamps)
         $Html = Get-Content -LiteralPath $Summary -Raw
         $Html | Should -Not -Match 'Wrapper Subscription' -Because 'the wrapper folder is not in the input zip'
         $Html | Should -Not -Match 'ResourcesReport_?20251201' -Because 'neither earlier folder is in the input zip'
     }
 
     It 'keeps every packaged summary link resolvable after extraction' {
-        $Links = @(Get-SummaryLinks -HtmlPath (Join-Path $script:ReusedExtract 'MainSummary.html'))
+        $Links = @(Get-SummaryLinkList -HtmlPath (Join-Path $script:ReusedExtract 'MainSummary.html'))
         $Links.Count | Should -Be $script:Stamps.Count
         foreach ($Link in $Links) { Test-Path -LiteralPath (Join-Path $script:ReusedExtract $Link) | Should -BeTrue -Because "'$Link' is in the package" }
     }
@@ -225,11 +225,11 @@ Describe 'Build-MainSummaryFromZip -PackageZip into a folder that already holds 
             $Html | Should -Not -Match 'Plain Outside Subscription'
             $Html | Should -Not -Match 'ResourcesReport_?20251201000000009'
             $Html | Should -Match 'class="privacy-banner obfuscated"'
-            Get-SummaryLinks -HtmlPath (Join-Path $script:ObfExtract 'MainSummary.html') | Should -Be (Get-ExpectedLinks -Stamps $script:ObfStamps)
+            Get-SummaryLinkList -HtmlPath (Join-Path $script:ObfExtract 'MainSummary.html') | Should -Be (Get-ExpectedLinkList -Stamps $script:ObfStamps)
         }
 
         It 'keeps every packaged summary link resolvable after extraction' {
-            $Links = @(Get-SummaryLinks -HtmlPath (Join-Path $script:ObfExtract 'MainSummary.html'))
+            $Links = @(Get-SummaryLinkList -HtmlPath (Join-Path $script:ObfExtract 'MainSummary.html'))
             $Links.Count | Should -Be $script:ObfStamps.Count
             foreach ($Link in $Links) { Test-Path -LiteralPath (Join-Path $script:ObfExtract $Link) | Should -BeTrue -Because "'$Link' is in the package" }
         }
@@ -271,8 +271,8 @@ Describe 'Build-MainSummaryFromZip -PackageZip over a folder of the same name th
     It 'reads only the rebuilt files for the summary: no name from a file already there, and every link resolves in the bundle' {
         $Summary = Join-Path $script:SameExtract 'MainSummary.html'
         Get-Content -LiteralPath $Summary -Raw | Should -Not -Match 'Stale Real Subscription'
-        Get-SummaryLinks -HtmlPath $Summary | Should -Be (Get-ExpectedLinks -Stamps $script:Stamps)
-        foreach ($Link in @(Get-SummaryLinks -HtmlPath $Summary)) { Test-Path -LiteralPath (Join-Path $script:SameExtract $Link) | Should -BeTrue }
+        Get-SummaryLinkList -HtmlPath $Summary | Should -Be (Get-ExpectedLinkList -Stamps $script:Stamps)
+        foreach ($Link in @(Get-SummaryLinkList -HtmlPath $Summary)) { Test-Path -LiteralPath (Join-Path $script:SameExtract $Link) | Should -BeTrue }
     }
 
     It 'holds exactly the summary and the files rebuilt from the input zip, none of the files already there' {
@@ -512,7 +512,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip checks a zip before it extracts it' {
         $Root = Join-Path $script:TmpRoot 'no-inventory'
         $Stage = Join-Path $Root 'outer'
         New-Item -ItemType Directory -Path $Stage -Force | Out-Null
-        $Inner = New-RawZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405051.zip') -Fill { param($Z) $E = $Z.CreateEntry('ResourcesReport_20260102030405051.html'); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('<html></html>') } finally { $W.Dispose() } }
+        $null = New-RawZip -Path (Join-Path $Stage 'ResourcesReport_20260102030405051.zip') -Fill { param($Z) $E = $Z.CreateEntry('ResourcesReport_20260102030405051.html'); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('<html></html>') } finally { $W.Dispose() } }
         $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-09.zip'
         Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>$null } | Should -Throw '*no per-subscription reports found*'
@@ -775,5 +775,67 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip over a reused folder when a write fail
         New-Item -ItemType Directory -Path $Out -Force | Out-Null
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*no per-subscription reports found*'
         Test-Path -LiteralPath $Out -PathType Container | Should -BeTrue
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip swaps the rebuilt files in as a set, and the paths it refuses' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'puts an earlier report back whole when a later file cannot take its place' {
+        $Root = Join-Path $script:TmpRoot 'swap-fail'
+        $Stage = Join-Path $Root 'outer'
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        $Stamp = '20260102030405111'
+        $Inner = [System.IO.Compression.ZipFile]::Open((Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')), 'Create')
+        try
+        {
+            # The inventory first, so it is swapped in before the html fails.
+            foreach ($Pair in @(@(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3"}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>new</html>')))
+            {
+                $E = $Inner.CreateEntry($Pair[0]); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write($Pair[1]) } finally { $W.Dispose() }
+            }
+        }
+        finally { $Inner.Dispose() }
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-30.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $Out = Join-Path $Root 'out'
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        $Inv = Join-Path $Dir ('Inventory_ResourcesReport_' + $Stamp + '.json')
+        Set-Content -LiteralPath $Inv -Value 'an earlier inventory' -NoNewline
+        # A folder where the html goes: no file can take that place.
+        New-Item -ItemType Directory -Path (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')) -Force | Out-Null
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw
+        Get-Content -LiteralPath $Inv -Raw | Should -Be 'an earlier inventory'
+        @(Get-ChildItem -LiteralPath $Dir -Force | Where-Object { $_.Name -like '*.partial' -or $_.Name -like '*.bak' }) | Should -BeNullOrEmpty
+    }
+
+    It 'refuses a -PackageZip that reaches -InputZip through a linked folder, and leaves the input zip as it was' -Skip:($IsWindows) {
+        $Real = Join-Path $script:TmpRoot 'link-real'
+        New-Item -ItemType Directory -Path $Real -Force | Out-Null
+        $InZip = Join-Path $Real 'bundle.zip'
+        Copy-Item -LiteralPath $script:InputZip -Destination $InZip
+        $Before = (Get-FileHash -LiteralPath $InZip).Hash
+        $Alias = Join-Path $script:TmpRoot 'link-alias'
+        New-Item -ItemType SymbolicLink -Path $Alias -Target $Real | Out-Null
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $InZip -OutputDirectory (Join-Path $Alias 'bundle') -PackageZip 6>$null } | Should -Throw '*which is -InputZip*'
+        (Get-FileHash -LiteralPath $InZip).Hash | Should -Be $Before
+        Test-Path -LiteralPath (Join-Path $Real 'bundle') | Should -BeFalse
+    }
+
+    It 'refuses a file system root as -OutputDirectory' {
+        $Root = [System.IO.Path]::GetPathRoot($script:TmpRoot)
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Root 6>$null } | Should -Throw '*cannot be the root*'
+    }
+
+    It 'puts the summary in the bundle when -HtmlFile names -OutputDirectory in another letter case on a file system that ignores case' {
+        # The file system here may keep case apart, so the comparer is the one
+        # a case-ignoring file system gives, and the other spelling is a folder.
+        Mock Get-RdaPathComparer { [System.StringComparer]::OrdinalIgnoreCase }
+        $Out = Join-Path $script:TmpRoot 'casepkg'
+        $Other = Join-Path $script:TmpRoot 'CASEPKG'
+        New-Item -ItemType Directory -Path $Other -Force | Out-Null
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -HtmlFile (Join-Path $Other 'MainSummary.html') -PackageZip 6>$null | Out-Null
+        Get-ZipEntryNames -ZipPath ($Out + '.zip') | Should -Contain 'MainSummary.html'
     }
 }

@@ -232,6 +232,8 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
     }
 
     It 'names a consolidated zip a stopped run left under its private name, and leaves it in place' {
+        # The README says when: on the next run that builds a consolidated zip.
+        (Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'README.md') -Raw).Contains('The next run in the folder that builds a consolidated zip names each one it finds in a warning') | Should -BeTrue
         $Root = Join-Path $TestDrive 'left-by-a-stop'
         $null = New-SubReport -Root $Root -Stamp 'S1'
         $Left = Join-Path $Root 'rda-build-0123456789abcdef0123456789abcdef.partial'

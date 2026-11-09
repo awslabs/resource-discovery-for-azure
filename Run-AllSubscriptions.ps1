@@ -400,10 +400,9 @@ Disable-ConsoleQuickEdit
 
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
-# The same failures for RunSummary.log: { Name; Id } for a subscription, the
-# $FailedSubscriptions text for a stream with no summary file.
+# The same failures for RunSummary.log: { Name; Id } for each subscription.
 $FailedSubscriptionDetail = @()
-# Streams whose summary file is there but could not be read: { StreamId;
+# Streams whose summary file is missing or could not be read: { StreamId;
 # SubCount }. Their subscriptions are not confirmed (exit 2), but they are not
 # counted or named as failed subscriptions.
 $UnreadableStreamSummaries = @()
@@ -1285,8 +1284,9 @@ else
                 if (-not (Test-Path -Path $S.SummaryPath -PathType Leaf))
                 {
                     Write-Host ("[stream-{0}] WARNING: no summary file at {1} - the stream did not finish cleanly" -f $S.StreamId, $S.SummaryPath) -ForegroundColor Yellow
-                    $FailedSubscriptions += ("stream-{0} (no summary)" -f $S.StreamId)
-                    $FailedSubscriptionDetail += $FailedSubscriptions[-1]
+                    # As for a summary that cannot be read: the stream's
+                    # subscriptions are not confirmed, not failed.
+                    $UnreadableStreamSummaries += [pscustomobject]@{ StreamId = $S.StreamId; SubCount = $S.SubCount }
                     continue
                 }
                 try
@@ -1574,11 +1574,14 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         # This stop comes before the summary, RunSummary.log (no zip is made)
         # and the FAILED banners, so the failed-subscription count and the
         # Exit code lines (with any 3-5 condition 2 hides) are printed here.
-        # Count only: each failed subscription already has its ERROR line above.
+        # Count only: each failed subscription already has its ERROR line
+        # above, or its stream's FATAL line when the stream did not start. A
+        # stream with a missing or unreadable summary is not in this count;
+        # the Exit code lines below name it.
         $GapSubscriptionsFailed = @($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0
         if ($GapSubscriptionsFailed)
         {
-            Write-Host ("Subscriptions Failed:    {0} (see the ERROR lines above)" -f $FailedSubscriptions.Count) -ForegroundColor Red
+            Write-Host ("Subscriptions Failed:    {0} (see the ERROR and FATAL lines above)" -f $FailedSubscriptions.Count) -ForegroundColor Red
         }
         Write-Host ""
         foreach ($ExitLine in @(Get-WrapperExitCodeSummary -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed $GapSubscriptionsFailed -UnreadableStreams $UnreadableStreamSummaries -VerificationGap $true -ReportMade $false))

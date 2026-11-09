@@ -678,7 +678,7 @@ function Merge-FailedAttempts
 #   - a failed subscription (listed under Subscriptions Failed): this function
 #     returns 2, after consolidation, so the zip holds the reports of the
 #     subscriptions that worked, or no zip is made when none worked;
-#   - a stream summary that could not be read (parallel streams): the
+#   - a stream summary that is missing or could not be read (parallel streams): the
 #     wrapper also asks this function with -SubscriptionsFailed for it, but
 #     names it to Get-WrapperExitCodeSummary as -UnreadableStreams, so its
 #     subscriptions are named as not confirmed and are not counted as
@@ -1119,8 +1119,8 @@ function Get-RunSummaryLogContent
         {
             $Lines.Add('')
             $Lines.Add('Failed subscriptions (detail):')
-            # The wrapper passes { Name; Id } for a subscription that failed and
-            # text for a stream it could not read; text is printed as given.
+            # The wrapper passes { Name; Id } for each subscription that
+            # failed; an entry given as text is printed as given.
             foreach ($FailedSub in $Failed)
             {
                 if ($FailedSub -is [string]) { $Lines.Add(('  - {0}' -f $FailedSub)) }

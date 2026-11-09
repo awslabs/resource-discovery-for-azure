@@ -1987,7 +1987,8 @@ if ($ConsumptionFailures.Count -gt 0)
     # which subs are missing billing data (e.g. to go request Reader access
     # on them). Mirrors the metrics-failure block below. Exclude the '(auth)'
     # sentinel used for the whole-phase skip - it is not a specific sub.
-    foreach ($cf in (@($ConsumptionFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object Name -Unique))
+    # By name and id: two subscriptions can share a name.
+    foreach ($cf in (@($ConsumptionFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object -Property Name, Id -Unique))
     {
         Write-Host ("  - {0} ({1})" -f $cf.Name, $cf.Id) -ForegroundColor Yellow
     }
@@ -2020,7 +2021,8 @@ if ($MetricsFailures.Count -gt 0)
 {
     Write-Host ""
     Write-Host ("Metrics Auth Failures:   {0} subscription(s) - metrics SKIPPED" -f $MetricsFailures.Count) -ForegroundColor Yellow
-    foreach ($m in ($MetricsFailures | Sort-Object Name -Unique))
+    # By name and id, as for consumption above.
+    foreach ($m in ($MetricsFailures | Sort-Object -Property Name, Id -Unique))
     {
         Write-Host ("  - {0} ({1})" -f $m.Name, $m.Id) -ForegroundColor Yellow
     }

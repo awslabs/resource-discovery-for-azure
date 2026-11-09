@@ -690,7 +690,10 @@ $ChartsHtml
         Clear-RdaLeftover -Path $HtmlPartial
     }
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
-    Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
+    # The same gate as the privacy banner, so an obfuscated run whose reports
+    # hold no records to sample does not call itself identifiable here either.
+    $PrivacyText = if ($IsObfuscated) { 'obfuscated' } else { 'identifiable' }
+    Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $PrivacyText) -ForegroundColor DarkGray
 }
 
 # =============================================================================

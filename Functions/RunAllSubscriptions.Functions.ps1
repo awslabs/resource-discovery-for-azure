@@ -1187,3 +1187,34 @@ function New-RunOutputFile
     }
     throw ('every name from {0}{1} to {0}-100{1} is taken' -f $Stem, $Extension)
 }
+
+# Moves the file $Source to <Stem><Extension> in Directory, or, when that name
+# is taken, to <Stem>-2<Extension> up to <Stem>-100<Extension>, never over a
+# file that is there (the same names New-RunOutputFile tries). Returns the new
+# path; throws when every name is taken or the move fails for another reason.
+function Move-RunOutputFile
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$Stem,
+        [Parameter(Mandatory = $true)][string]$Extension
+    )
+    for ($N = 1; $N -le 100; $N++)
+    {
+        $Name = if ($N -eq 1) { $Stem + $Extension } else { '{0}-{1}{2}' -f $Stem, $N, $Extension }
+        $Path = Join-Path $Directory $Name
+        if ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path)) { continue }
+        try
+        {
+            [System.IO.File]::Move($Source, $Path, $false)
+            return $Path
+        }
+        catch [System.IO.IOException]
+        {
+            # Taken since the look above: try the next name. Any other failure is the caller's.
+            if (-not ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path))) { throw }
+        }
+    }
+    throw ('every name from {0}{1} to {0}-100{1} is taken' -f $Stem, $Extension)
+}

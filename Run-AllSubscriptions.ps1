@@ -1697,29 +1697,24 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
     {
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
         $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
-        $Reserved = $null
         $PartialZip = $null
         try
         {
-            # Today's name, or the next free one (-2, -3, ...): never another
-            # run's consolidated zip of the same second (New-RunOutputFile).
-            $OuterZipFile = New-RunOutputFile -Directory $InventoryRoot -Stem "AllSubscriptions_ResourcesReport_$Timestamp" -Extension '.zip'
-            $Reserved = $OuterZipFile
             Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
-            # Built under a name of its own in the same folder, then moved over
-            # the reserved name, so the reserved name is never free: -Force
-            # would delete it before writing. The name matches none of the
-            # patterns the inventory folder is listed with.
+            # Built and checked under a name of its own in the same folder, so
+            # nothing sits under the name a run ships until the zip passed its
+            # check: a run stopped part-way leaves only this file. The name
+            # matches none of the patterns the inventory folder is listed with.
             $PartialZip = Join-Path $InventoryRoot ('.rda-{0}.partial' -f [guid]::NewGuid().ToString('N'))
             Compress-Archive -Path $SubZips.FullName -DestinationPath $PartialZip -ErrorAction Stop
-            # Checked before it takes the reserved name, so a zip that fails the
-            # check never sits under the name a run ships.
             $ZipProblem = Get-ConsolidatedZipProblem -Path $PartialZip -SubZipNames $SubZips.Name
             if ($ZipProblem)
             {
                 throw $ZipProblem
             }
-            [System.IO.File]::Move($PartialZip, $OuterZipFile, $true)
+            # Today's name, or the next free one (-2, -3, ...): never another
+            # run's consolidated zip of the same second (Move-RunOutputFile).
+            $OuterZipFile = Move-RunOutputFile -Source $PartialZip -Directory $InventoryRoot -Stem "AllSubscriptions_ResourcesReport_$Timestamp" -Extension '.zip'
             # Its path is printed after the run summary is added to it, once
             # the zip passed the same check again (below the summary block).
         }
@@ -1727,9 +1722,6 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
         {
             $BundleBuildError = "Could not build {0}: {1}" -f $OuterZipFile, $_.Exception.Message
             Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
-            # The name this run reserved (New-RunOutputFile created it, so no
-            # other run writes it): nothing of it is left, whatever it holds.
-            if ($null -ne $Reserved) { Remove-Item -LiteralPath $Reserved -Force -ErrorAction SilentlyContinue }
             # The main summary, the fold and the final check below all key on
             # $OuterZipFile, so none of them may point at the missing zip.
             $OuterZipFile = $null
@@ -2189,10 +2181,15 @@ if ($null -ne $OuterZipFile)
     if ($ZipProblem)
     {
         $BundleBuildError = "{0} was lost while the run summary was added to it: {1}" -f $OuterZipFile, $ZipProblem
-        Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
-        # This run's own name (New-RunOutputFile): a zip that failed the check
-        # is not left under it, as after the check before the fold.
+        # This run's own name (Move-RunOutputFile): a zip that failed the check
+        # is not left under it, as after the check before the fold. When it
+        # cannot be removed, the error says so, so it is not shipped.
         Remove-Item -LiteralPath $OuterZipFile -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $OuterZipFile)
+        {
+            $BundleBuildError += " It could not be removed: delete it, do not share it."
+        }
+        Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
         $OuterZipFile = $null
     }
     else

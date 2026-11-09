@@ -131,7 +131,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         (Get-ZipEntryNames -Path $R.OuterZipFile) | Should -Be @('ResourcesReport_X1.zip')
     }
 
-    It 'the name it took stays on disk while the zip is built: the zip is written under a name of its own in the folder, then moved over it, and that file is not left' {
+    It 'nothing is under the name a run ships while the zip is built: the zip is written under a name of its own in the folder, then moved to it, and that file is not left' {
         $Root = Join-Path $TestDrive 'reserved-kept'
         $null = New-SubReport -Root $Root -Stamp 'R1'
         $null = New-SubReport -Root $Root -Stamp 'R2'
@@ -148,7 +148,8 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         $R = Invoke-BundleBlock -Root $Root
 
         $script:Builds.Count | Should -Be 1
-        $script:Builds[0].ReservedThere | Should -BeTrue
+        # A run stopped here leaves nothing under the shipped name.
+        $script:Builds[0].ReservedThere | Should -BeFalse
         $script:Builds[0].Destination | Should -Not -Be $script:ReservedName
         Split-Path $script:Builds[0].Destination -Parent | Should -Be $Root
         Split-Path $script:Builds[0].Destination -Leaf | Should -Not -BeLike '*.zip'
@@ -158,7 +159,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         @(Get-ChildItem -LiteralPath $Root -File -Force | ForEach-Object { $_.Name }) | Should -Be @('AllSubscriptions_ResourcesReport_2026-11-02_15-04-05.zip')
     }
 
-    It 'a build that fails part-way leaves no file in the folder: neither the part written nor the name it took' {
+    It 'a build that fails part-way leaves no file in the folder: neither the part written nor a file under the shipped name' {
         $Root = Join-Path $TestDrive 'part-written'
         $null = New-SubReport -Root $Root -Stamp 'P1'
         Mock Compress-Archive -ParameterFilter { -not $Update } {
@@ -172,7 +173,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         @(Get-ChildItem -LiteralPath $Root -File -Force | ForEach-Object { $_.Name }) | Should -BeNullOrEmpty
     }
 
-    It 'a written zip that cannot be read fails the check before it takes the name: no file is left under the name or the name it was written to' {
+    It 'a written zip that cannot be read fails the check before it takes its name: no file is left under the name or the name it was written to' {
         $Root = Join-Path $TestDrive 'unreadable'
         $null = New-SubReport -Root $Root -Stamp 'U1'
         # Writes bytes that are not a zip, without an error.
@@ -185,7 +186,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*.zip' -or $_.Name -like '.rda-*.partial' }) | Should -BeNullOrEmpty
     }
 
-    It 'a consolidated zip that cannot be built leaves no empty file under the name it took' {
+    It 'a consolidated zip that cannot be built leaves no file under the shipped name' {
         $Root = Join-Path $TestDrive 'reserved-failed'
         $null = New-SubReport -Root $Root -Stamp 'F9'
         Mock Compress-Archive { throw [System.IO.IOException]::new('No space left on device') } -ParameterFilter { -not $Update }
@@ -315,6 +316,22 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         $R.OuterZipFile | Should -BeNullOrEmpty
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
         script:Get-BundleFiles -Root $Root | Should -BeNullOrEmpty
+    }
+
+    It 'a zip that fails the check after the fold and cannot be removed: the error says to delete it and not share it' {
+        Mock Compress-Archive -ParameterFilter { $Update } {
+            [System.IO.File]::Delete($DestinationPath)
+            $Zip = [System.IO.Compression.ZipFile]::Open($DestinationPath, 'Create')
+            try { $null = $Zip.CreateEntry('RunSummary.log') } finally { $Zip.Dispose() }
+        }
+        # The removal fails without an error, as on a locked file with SilentlyContinue.
+        Mock Remove-Item { } -ParameterFilter { $LiteralPath -like '*AllSubscriptions_ResourcesReport_*.zip' }
+        $R = Invoke-FoldBlock -Root (Join-Path $TestDrive 'fold-stuck')
+
+        $R.BundleBuildError | Should -BeLike ('{0} was lost while the run summary was added to it: *. It could not be removed: delete it, do not share it.' -f $R.Path)
+        @($R.Printed | Where-Object { $_ -eq ('ERROR: {0}' -f $R.BundleBuildError) }).Count | Should -Be 1
+        $R.OuterZipFile | Should -BeNullOrEmpty
+        @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
     }
 
     It 'a fold that fails but leaves every report in the zip is only a warning' {
@@ -531,5 +548,38 @@ Describe 'Run-AllSubscriptions.ps1: the inventory folder gone at the end of the 
         $R = Invoke-EndOfRun -Root (Join-Path $TestDrive 'folder-gone-none') -RunCount 0
         $R.Code | Should -Be 0
         @($R.Lines | Where-Object { $_ -like 'FAILED*' }) | Should -BeNullOrEmpty
+    }
+}
+Describe 'Move-RunOutputFile: moves a file to a free name, never over one that is there' {
+    It 'moves to the name given when it is free' {
+        $Dir = Join-Path $TestDrive 'move-free'
+        $null = New-Item -ItemType Directory -Path $Dir
+        $Src = Join-Path $Dir '.rda-x.partial'
+        Set-Content -LiteralPath $Src -Value 'zip' -NoNewline
+        Move-RunOutputFile -Source $Src -Directory $Dir -Stem 'z' -Extension '.zip' | Should -Be (Join-Path $Dir 'z.zip')
+        Test-Path -LiteralPath $Src | Should -BeFalse
+        Get-Content -LiteralPath (Join-Path $Dir 'z.zip') -Raw | Should -Be 'zip'
+    }
+
+    It 'takes -2 when the name is there, and leaves that file as it was' {
+        $Dir = Join-Path $TestDrive 'move-taken'
+        $null = New-Item -ItemType Directory -Path $Dir
+        Set-Content -LiteralPath (Join-Path $Dir 'z.zip') -Value 'another run' -NoNewline
+        $Src = Join-Path $Dir '.rda-y.partial'
+        Set-Content -LiteralPath $Src -Value 'mine' -NoNewline
+        Move-RunOutputFile -Source $Src -Directory $Dir -Stem 'z' -Extension '.zip' | Should -Be (Join-Path $Dir 'z-2.zip')
+        Get-Content -LiteralPath (Join-Path $Dir 'z.zip') -Raw | Should -Be 'another run'
+        Get-Content -LiteralPath (Join-Path $Dir 'z-2.zip') -Raw | Should -Be 'mine'
+    }
+
+    It 'says so when every name up to -100 is taken, and leaves the file where it was' {
+        $Dir = Join-Path $TestDrive 'move-full'
+        $null = New-Item -ItemType Directory -Path $Dir
+        $null = New-Item -ItemType File -Path (Join-Path $Dir 'z.zip')
+        foreach ($N in 2..100) { $null = New-Item -ItemType File -Path (Join-Path $Dir ('z-{0}.zip' -f $N)) }
+        $Src = Join-Path $Dir '.rda-z.partial'
+        Set-Content -LiteralPath $Src -Value 'mine' -NoNewline
+        { Move-RunOutputFile -Source $Src -Directory $Dir -Stem 'z' -Extension '.zip' } | Should -Throw 'every name from z.zip to z-100.zip is taken'
+        Test-Path -LiteralPath $Src | Should -BeTrue
     }
 }

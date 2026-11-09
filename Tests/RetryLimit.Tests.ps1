@@ -516,6 +516,34 @@ Describe 'Retry limit on the parallel path' {
         @(script:Get-Lines -Run $R -Like 'Skipping (already completed):*').Count | Should -Be 2
     }
 
+    It 'after an interrupted parallel run, a sequential -Resume removes the per-stream files, so the next -Resume folds nothing old back in' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $Subs = @($script:A, $script:B, $script:X)
+        $null = script:Invoke-Run -Subs $Subs -Streams 2 -Interrupted
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't').Count | Should -BeGreaterThan 0
+        $Global:RdaRlFailIds = @()
+        $R = script:Invoke-Run -Subs $Subs -Resume
+        @(script:Get-Lines -Run $R -Like 'Recovered per-stream state*').Count | Should -Be 1
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty
+        $R.Result.WrapperExitCode | Should -Be 0
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+        $R2 = script:Invoke-Run -Subs $Subs -Resume
+        @(script:Get-Lines -Run $R2 -Like 'Recovered per-stream state*') | Should -BeNullOrEmpty
+        @($R2.Calls | Sort-Object -Unique) | Should -Be @('sub-a', 'sub-b', 'sub-x')
+    }
+
+    It 'a parallel -Resume with nothing left says so, and does not call it one eligible subscription' {
+        $Subs = @($script:A, $script:B)
+        $Global:RdaRlFailIds = @()
+        $null = script:Invoke-Run -Subs $Subs -Streams 2 -Interrupted
+        $R = script:Invoke-Run -Subs $Subs -Streams 2 -Resume
+        @($R.Calls) | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R -Like 'No subscription left to process.').Count | Should -Be 1
+        @(script:Get-Lines -Run $R -Like 'Only one*') | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R -Like 'Note: -ParallelStreams * clamped to 0*') | Should -BeNullOrEmpty
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty
+    }
+
     It 'counts a run whose streams failed it before the session ended once, not twice' {
         $Global:RdaRlFailIds = @('sub-x')
         $Subs = @($script:A, $script:B, $script:X)
@@ -905,5 +933,15 @@ Describe 'The Pending Retries line' {
         $R = script:Invoke-Run -Subs @($script:A, $script:X) -Resume
         @($R.Result.FailedSubscriptions) | Should -BeNullOrEmpty
         @(script:Get-Lines -Run $R -Like 'Pending Retries:*') | Should -Be @('Pending Retries:         1 subscription(s) from a prior run still in FailedAttempts')
+    }
+}
+
+Describe 'Get-FailedAttemptCount under Set-StrictMode' {
+    It 'counts an entry without Attempts as one failed run' {
+        $Count = & {
+            Set-StrictMode -Version Latest
+            Get-FailedAttemptCount -Entry ([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X' })
+        }
+        $Count | Should -Be 1
     }
 }

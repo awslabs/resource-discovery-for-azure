@@ -776,7 +776,9 @@ function Get-FailedAttemptCount
 {
     param([object]$Entry)
     $Count = 0
-    if ($null -ne $Entry -and [int]::TryParse([string]$Entry.Attempts, [ref]$Count) -and $Count -ge 1) { return $Count }
+    # Read only when it is there, so an entry without it counts as one under
+    # Set-StrictMode too.
+    if ($null -ne $Entry -and $Entry.PSObject.Properties['Attempts'] -and [int]::TryParse([string]$Entry.Attempts, [ref]$Count) -and $Count -ge 1) { return $Count }
     return 1
 }
 

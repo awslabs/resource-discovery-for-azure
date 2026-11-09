@@ -491,7 +491,7 @@ Describe 'Parallel path, end to end: interrupted stream, then -Resume' {
         }
     }
 
-    It 'the stream records its reports, a resumed stream reports what it skipped, and the bundle has every subscription' {
+    It 'the stream records its reports, the fold removes its file, the parent leaves out what it completed, and the bundle has every subscription' {
         $Root = script:New-CaseRoot
         $Global:RdaCarryTestRoot = $Root
         $State = Join-Path $Root '.resume-state-t.json'
@@ -509,21 +509,27 @@ Describe 'Parallel path, end to end: interrupted stream, then -Resume' {
         $Folded = & $script:FoldBlock $Root 't' $State @() @() @() 6>$null
         $HealedReports = @(script:Read-StateReports -Path $State | ForEach-Object Id)
 
+        # The fold removed the stream file once the unified file held its records.
+        Test-Path -LiteralPath $StreamFile | Should -BeFalse
+
+        # The parent leaves out what the fold lists as completed before it slices
+        # (it prints the skip and records it for the carry), so the stream gets
+        # only what is left.
         $Since = Get-Date
-        $Summary = script:Invoke-Worker -Root $Root -Ids @('sub-a', 'sub-b') -Names @('Sub A', 'Sub B') -Resume
+        $ParentSkipped = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        $Summary = script:Invoke-Worker -Root $Root -Ids @('sub-b') -Names @('Sub B') -Resume
 
         # The parent aggregates the stream summary and merges per-stream state, as written.
-        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 2 })
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 1 })
         $Agg = & $script:AggregateBlock $Streams $Root 't' $State @($Folded.CompletedIds) @() @($Folded.CompletedReports) 6>$null
-        $Post = script:Invoke-Post -Root $Root -Since $Since -ThisRun $Agg.SubResourceCounts -Skipped $Agg.SkippedSubscriptions -Reports $Agg.CompletedReports
+        $Post = script:Invoke-Post -Root $Root -Since $Since -ThisRun $Agg.SubResourceCounts -Skipped $ParentSkipped -Reports $Agg.CompletedReports
 
         @(script:Get-InnerZipNames -OuterZip $Post.Result.OuterZipFile).Count | Should -Be 2 -Because 'the subscription the interrupted stream completed must not drop out of the consolidated zip'
         ($Post.Text -join "`n") | Should -Match 'verification: OK \(2 zip\(s\) match 1 successful sub\(s\) this run \+ 1 carried'
         $Run1Reports | Should -Be @('sub-a') -Because 'the stream records the zip of the subscription it completed'
         @($Folded.CompletedIds) | Should -Be @('sub-a')
         $HealedReports | Should -Be @('sub-a') -Because 'the healed unified state keeps the stranded report'
-        @($Summary.Skipped | ForEach-Object Id) | Should -Be @('sub-a')
-        @($Agg.SkippedSubscriptions | ForEach-Object Id) | Should -Be @('sub-a')
+        @($Summary.Skipped | ForEach-Object Id) | Should -BeNullOrEmpty -Because 'the stream was given only what is left'
         @($Agg.SubResourceCounts | ForEach-Object Id) | Should -Be @('sub-b')
         @(script:Read-StateReports -Path $State | ForEach-Object Id | Sort-Object) | Should -Be @('sub-a', 'sub-b')
     }

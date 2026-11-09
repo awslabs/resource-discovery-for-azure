@@ -437,6 +437,15 @@ Describe 'Run-AllSubscriptions.ps1: the end of a run without a consolidated zip'
         $Printed | Should -Contain ('The per-subscription report zips of this run are still on disk under {0}.' -f $InventoryRoot)
     }
 
+    It 'the banner says to rename a kept zip, not to run again, when the zip could not take its name' {
+        $InventoryRoot = Join-Path $TestDrive 'inv'
+        $BundleBuildError = 'The consolidated zip passed its check but could not take its name (x). It is kept as /x/rda-build-1.partial: rename it to a .zip name to use it.'
+        $ZipKeptAs = '/x/rda-build-1.partial'
+        $Printed = @(. $script:BannerBlock 6>&1 | ConvertTo-Lines)
+        @($Printed | Where-Object { $_ -like 'The zip itself is complete: rename /x/rda-build-1.partial to a .zip name*' }).Count | Should -Be 1
+        $Printed | Should -Not -Contain 'Fix the cause (for example, free up disk space), then run again.'
+    }
+
     It 'no banner when the zip was built' {
         Set-Variable -Name InventoryRoot -Value (Join-Path $TestDrive 'inv')
         Set-Variable -Name BundleBuildError -Value $null

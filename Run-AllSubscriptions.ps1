@@ -1696,6 +1696,9 @@ $BundleBuildError = $null
 # Set when the inventory folder is gone at the end of a run that expected
 # report zips; named after the run summary and gives exit code 2.
 $InventoryFolderGone = $false
+# Set when a checked zip could not take its name and is kept under its
+# private name; the banner then says to rename it, not to run again.
+$ZipKeptAs = $null
 
 if (Test-Path -Path $InventoryRoot -PathType Container)
 {
@@ -2203,6 +2206,7 @@ if ($null -ne $OuterZipFile)
         # under its private name, which the error gives, and is not printed as
         # the run's zip.
         $BundleBuildError = "The consolidated zip passed its check but could not take its name ({0}). It is kept as {1}: rename it to a .zip name to use it." -f $NameProblem, $OuterZipFile
+        $ZipKeptAs = $OuterZipFile
         Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
         $OuterZipFile = $null
     }
@@ -2243,7 +2247,14 @@ if ($null -ne $BundleBuildError)
     Write-Host "================ FAILED (consolidated zip) ================" -ForegroundColor Red
     Write-Host $BundleBuildError -ForegroundColor Red
     Write-Host ("The per-subscription report zips of this run are still on disk under {0}." -f $InventoryRoot) -ForegroundColor Red
-    Write-Host "Fix the cause (for example, free up disk space), then run again." -ForegroundColor Red
+    if ($null -ne $ZipKeptAs)
+    {
+        Write-Host ("The zip itself is complete: rename {0} to a .zip name (for example after removing old AllSubscriptions_ResourcesReport_*.zip files of that second) instead of running again." -f $ZipKeptAs) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host "Fix the cause (for example, free up disk space), then run again." -ForegroundColor Red
+    }
     Write-Host "=========================================================" -ForegroundColor Red
 }
 

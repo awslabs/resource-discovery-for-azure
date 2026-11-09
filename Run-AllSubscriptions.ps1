@@ -898,22 +898,29 @@ if ($ParallelStreams -le 1)
                 Zip   = $Global:ZipOutputFile
             }
 
-            if ($ResCount -eq 0)
+            # Narration only: a write that fails here (as when the transcript's
+            # folder is gone) must not turn the success recorded above into a
+            # failure in the catch below.
+            try
             {
-                # Loud yellow signal so this stands out in the per-iteration narration
-                # and in the wrapper transcript. The most common cause is the signed-in
-                # identity not having Reader on the subscription; second is a sub that
-                # genuinely has no resources. Either way the user almost always wants
-                # to know immediately rather than discover it days later when the
-                # consolidated report turns out to be empty for some subs.
-                Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: (Invoke-AzRestMethod -Method POST -Path '/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01' -Payload '{{""subscriptions"":[""{1}""],""query"":""resources | summarize count()""}}').Content" -f $Sub.Name, $Sub.Id) -ForegroundColor Yellow
-            }
-            else
-            {
-                Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
-            }
+                if ($ResCount -eq 0)
+                {
+                    # Loud yellow signal so this stands out in the per-iteration narration
+                    # and in the wrapper transcript. The most common cause is the signed-in
+                    # identity not having Reader on the subscription; second is a sub that
+                    # genuinely has no resources. Either way the user almost always wants
+                    # to know immediately rather than discover it days later when the
+                    # consolidated report turns out to be empty for some subs.
+                    Write-Host ("WARNING: Subscription '{0}' returned 0 resources. Likely permission gap (no Reader on the subscription) or a genuinely empty subscription. Verify with: (Invoke-AzRestMethod -Method POST -Path '/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01' -Payload '{{""subscriptions"":[""{1}""],""query"":""resources | summarize count()""}}').Content" -f $Sub.Name, $Sub.Id) -ForegroundColor Yellow
+                }
+                else
+                {
+                    Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
+                }
 
-            Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
+                Write-Host "Completed subscription: $($Sub.Name)" -ForegroundColor Green
+            }
+            catch { Write-Verbose ("Could not write the completion lines: {0}" -f $_.Exception.Message) }
 
             # Mark complete and persist immediately so a mid-run sign-out is recoverable.
             # If the sub was previously in FailedAttempts (i.e. this is a retry that
@@ -1090,14 +1097,20 @@ else
                 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
                 $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
                 $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount; Zip = $Global:ZipOutputFile }
-                if ($ResCount -eq 0)
+                # Narration only, as in the sequential branch: a failed write
+                # must not turn the success into a failure.
+                try
                 {
-                    Write-Host ("WARNING: '{0}' returned 0 resources." -f $Sub.Name) -ForegroundColor Yellow
+                    if ($ResCount -eq 0)
+                    {
+                        Write-Host ("WARNING: '{0}' returned 0 resources." -f $Sub.Name) -ForegroundColor Yellow
+                    }
+                    else
+                    {
+                        Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
+                    }
                 }
-                else
-                {
-                    Write-Host ("Resources collected: {0:N0}" -f $ResCount) -ForegroundColor DarkGreen
-                }
+                catch { Write-Verbose ("Could not write the completion line: {0}" -f $_.Exception.Message) }
                 if (-not ($CompletedIds -contains $Sub.Id))
                 {
                     $CompletedIds += $Sub.Id

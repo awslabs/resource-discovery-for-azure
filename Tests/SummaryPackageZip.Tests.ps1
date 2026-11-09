@@ -292,3 +292,29 @@ Describe 'Build-MainSummaryFromZip -PackageZip into a new folder' {
         foreach ($Link in $Links) { Test-Path -LiteralPath (Join-Path $Extract $Link) | Should -BeTrue -Because "'$Link' is in the package" }
     }
 }
+
+Describe 'Build-MainSummaryFromZip with two report zips of the same name in the input' {
+
+    BeforeAll {
+        $Root = Join-Path $script:TmpRoot 'twice'
+        $Stage = Join-Path $Root 'outer'
+        $Stamp = '20260102030405021'
+        $Src = Join-Path $Root 'sub'
+        New-SubReportFiles -Dir $Src -Stamp $Stamp
+        foreach ($Sub in 'a', 'b')
+        {
+            $Dir = Join-Path $Stage $Sub
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            Compress-Archive -Path (Join-Path $Src '*') -DestinationPath (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.zip')) -Force
+        }
+        $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-06.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $script:TwiceOut = Join-Path $Root 'out'
+        $script:TwiceLines = @(& $script:Script -InputZip $Zip -OutputDirectory $script:TwiceOut 6>&1 | ForEach-Object { [string]$_ })
+    }
+
+    It 'rebuilds the report once, says so, and counts it once' {
+        @($script:TwiceLines | Where-Object { $_ -like '*Skipped a second report zip named ResourcesReport_20260102030405021.zip*' }).Count | Should -Be 1
+        @($script:TwiceLines | Where-Object { $_ -like 'Reconstructed 1 per-subscription report(s) into:*' }).Count | Should -Be 1
+    }
+}

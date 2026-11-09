@@ -572,6 +572,13 @@ function New-RdaAllSubHtmlSummaryFromZip
             # matches the ResourcesReport* glob New-RdaAllSubHtmlSummary discovers.
             $FolderName = [System.IO.Path]::GetFileNameWithoutExtension($InnerZip.Name)
             $Dest = Join-Path $OutputDirectory $FolderName
+            # A second report zip of the same name (in another folder of the
+            # input) would write over the first: the first one is kept.
+            if ($ReconstructedDirs.Contains($Dest))
+            {
+                Write-Host ("  Skipped a second report zip named {0} in the input zip; the first one is used." -f $InnerZip.Name) -ForegroundColor Yellow
+                continue
+            }
             New-Item -ItemType Directory -Path $Dest -Force | Out-Null
             $Archive = [System.IO.Compression.ZipFile]::OpenRead($InnerZip.FullName)
             try

@@ -169,7 +169,9 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Literal
     $VmRecords = $Inventory.VirtualMachines
     if ($VmRecords)
     {
-        $RunningVmCount = @($VmRecords | Where-Object { $_.PowerState -match 'running' }).Count
+        # As pricing reads PowerState: 'running' or 'transient' is on, and so is
+        # an empty state.
+        $RunningVmCount = @($VmRecords | Where-Object { $State = if ($_.PSObject.Properties.Name -contains 'PowerState') { [string]$_.PowerState } else { '' }; [string]::IsNullOrWhiteSpace($State) -or $State -match 'running|transient' }).Count
     }
 
     # Count distinct VM-meter resources in the consumption CSV. A header-only or

@@ -14,6 +14,7 @@
 #   - a group that fails for another reason (throttling, server error) is retried
 #     and does not fall back to one call per metric;
 #   - one call never asks for more than 20 metric names;
+#   - a run with no metric definitions makes no call and writes no file;
 #   - the diagnostics summary counts metric definitions, not calls;
 #   - each metric's diagnostics time is the time of the request that answered it;
 #   - a batch written to Metrics_*.json never splits one call's metrics, and
@@ -591,6 +592,20 @@ Describe 'Metrics.ps1 fallback when Azure rejects a grouped request' {
         $Answered = @($script:DiskMetricNames | Where-Object { $_ -ne $Omitted } | ForEach-Object { $Elapsed[$_] })
         @($Answered | Select-Object -Unique).Count | Should -Be 1 -Because 'metrics answered by one request report that request''s time'
         $Elapsed[$Omitted] | Should -BeGreaterOrEqual ($Answered[0] + 1.49) -Because 'a fallback metric reports the group request plus its own request'
+    }
+}
+
+Describe 'Metrics.ps1 with no metric definitions' {
+
+    It 'makes no Get-AzMetric call and writes no Metrics file when no resource has metrics' {
+        # A storage account has no metric definitions in Metrics.ps1.
+        $Storage = New-TestResource -Type 'microsoft.storage/storageaccounts' -Provider 'Microsoft.Storage/storageAccounts' -Name 'st01'
+        $Run = Invoke-MetricsRun -Resources @($Storage) -RunName 'no-definitions'
+
+        $Run.Calls.Count | Should -Be 0
+        $Run.Files.Count | Should -Be 0
+        @($Run.DebugLines | Where-Object { $_ -match 'Starting metrics collection: 0 metric definition\(s\)' }).Count | Should -Be 1
+        @($Run.DebugLines | Where-Object { $_ -match 'Azure Monitor requests: 0 for 0 metric definition\(s\), of which 0 single-metric fallback request\(s\)' }).Count | Should -Be 1
     }
 }
 

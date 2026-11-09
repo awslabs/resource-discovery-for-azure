@@ -487,8 +487,8 @@ if ($Task -eq 'Processing')
     # lock (Monitor) on the array itself.
     $MetricRequestCounts = [long[]]::new(2)
 
-    # $MetricCount is the number of definitions to send, as it was when the batch
-    # loop counted definitions: with none to send, no group and no call is made.
+    # $MetricCount is $MetricDefs.Count, set above. The guard keeps a run with no
+    # definitions from building groups or making any Get-AzMetric call.
     if ($MetricCount -gt 0)
     {
         $MetricGroups = Group-MetricDefinition -MetricDefs $MetricDefs

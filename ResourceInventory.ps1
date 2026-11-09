@@ -1506,10 +1506,18 @@ function FinalizeOutputs
         $ReportTenantId = if ($Obfuscate.IsPresent) { $null } else { $TenantID }
         # The header's subscription, for a run of one subscription: a subscription
         # with no resources has no record for Summary.ps1 to take the name from.
-        # Under -Obfuscate, and for a run of several subscriptions, Summary.ps1
-        # keeps taking it from the first record (the masked name under -Obfuscate).
+        # A run without -SubscriptionID over several subscriptions says how many
+        # it covers (a count, so nothing to mask under -Obfuscate); naming the
+        # first record's subscription would label the whole report with one.
+        # Otherwise, under -Obfuscate, Summary.ps1 keeps taking it from the
+        # first record (the masked name).
         $ReportSubscriptionName = $null
-        if (-not $Obfuscate.IsPresent -and -not [string]::IsNullOrEmpty($SubscriptionID))
+        $RunSubscriptionCount = @(@($Global:Subscriptions) | Where-Object { $null -ne $_ }).Count
+        if ([string]::IsNullOrEmpty($SubscriptionID) -and $RunSubscriptionCount -gt 1)
+        {
+            $ReportSubscriptionName = '{0} subscriptions (consolidated)' -f $RunSubscriptionCount
+        }
+        elseif (-not $Obfuscate.IsPresent -and -not [string]::IsNullOrEmpty($SubscriptionID))
         {
             $ReportSubscriptionName = [string](@($Global:Subscriptions) | Where-Object { $null -ne $_ -and [string]$_.id -eq $SubscriptionID } | Select-Object -First 1).name
         }

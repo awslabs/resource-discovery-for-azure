@@ -339,6 +339,26 @@ Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
     }
 }
 
+Describe 'Resume state messages whose error text holds braces' {
+    # The error text goes in as a value, not into the format string, so
+    # braces in it (a path, or the bad JSON) cannot break the message.
+    It 'Save-CompletedSubscriptionIds warns and does not throw when the write fails under a folder named with braces' {
+        Mock Write-Host -MockWith { }
+        $Path = Join-Path $script:TestRoot 'gone-{folder}/state.json'
+        { Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('a') -ErrorAction SilentlyContinue } | Should -Not -Throw
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('WARNING: Failed to persist resume state to {0}: *gone-{{folder}}*' -f $Path) }
+    }
+
+    It 'Get-CompletedSubscriptionIds starts fresh and does not throw on a resume state file whose bad JSON holds braces' {
+        Mock Write-Host -MockWith { }
+        $Path = Join-Path $script:TestRoot 'bad-braces.json'
+        Set-Content -LiteralPath $Path -Value '{"TenantID": {x}' -Encoding utf8
+        { $script:Ids = Get-CompletedSubscriptionIds -Path $Path -Tenant 't' } | Should -Not -Throw
+        @($script:Ids).Count | Should -Be 0
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('Could not read resume state file ({0}); starting fresh. *' -f $Path) }
+    }
+}
+
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
     # Regression: -Existing was typed [System.Collections.IEnumerable], but when
     # the list holds exactly one prior failure PowerShell collapses it to a lone

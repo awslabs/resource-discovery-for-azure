@@ -46,8 +46,9 @@ BeforeAll {
         $FailedAttempts = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID)
         $CompletedReports = @()
         $null = $InventoryRoot, $Resume, $ResumeFailedOnly, $CompletedReports, $CompletedIds, $FailedAttempts
+        $UnreadableStreamFiles = @()
         $Lines = @(. $script:FoldBlock 6>&1 | ForEach-Object { [string]$_ })
-        [pscustomobject]@{ Lines = $Lines; Completed = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant 't'); Failed = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant 't' | Where-Object { $null -ne $_ } | ForEach-Object Id) }
+        [pscustomobject]@{ Unreadable = @($UnreadableStreamFiles); Lines = $Lines; Completed = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant 't'); Failed = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant 't' | Where-Object { $null -ne $_ } | ForEach-Object Id) }
     }
 }
 
@@ -79,6 +80,17 @@ Describe 'The per-stream resume state files at the start of a run' {
         $R = script:Invoke-Fold -Root $script:Root -Resume $true
         Test-Path -LiteralPath $Path | Should -BeTrue
         @($R.Lines | Where-Object { $_ -like 'WARNING: The resume state file * does not hold every record of the per-stream files*' }).Count | Should -Be 1
+    }
+
+    It 'that cannot be read are named, kept and recorded as unread, so the run is not clean' {
+        $Bad = Join-Path $script:Root '.resume-state-t-stream-3.json'
+        Set-Content -LiteralPath $Bad -Value '{ not json' -NoNewline
+        $Good = script:New-StreamFile -Root $script:Root -N 0 -Completed @('sub-a')
+        $R = script:Invoke-Fold -Root $script:Root -Resume $true
+        Test-Path -LiteralPath $Bad | Should -BeTrue
+        Test-Path -LiteralPath $Good | Should -BeFalse
+        $R.Unreadable | Should -Be @($Bad)
+        @($R.Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0} of an interrupted run:*Fix or delete the file*' -f $Bad) }).Count | Should -Be 1
     }
 
     It 'are removed as stale by a run without -Resume or -ResumeFailedOnly' {

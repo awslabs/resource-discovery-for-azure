@@ -39,6 +39,10 @@ param (
     # worker's binding. Default to @() and guard the body explicitly.
     [string[]] $SubscriptionIds = @(),
     [string[]] $SubscriptionNames = @(),
+    # The parent's retry-list entries for this slice ({ Id, Name, LastFailedAt,
+    # Reason, Attempts }). [object] for the same single-element collapse as
+    # Add-FailedAttempt's -Existing.
+    [object] $PriorFailedAttempts = @(),
 
     [switch] $Resume,
     # The parent already narrowed $SubscriptionIds to just the failed subs
@@ -176,6 +180,14 @@ if ($Resume -or $ResumeFailedOnly)
     {
         Write-Stream ("resume-failed-only: prior FailedAttempts list has {0} entry(ies) for this stream" -f $FailedAttempts.Count) 'DarkGray'
     }
+}
+# Start from the parent's retry-list entries, so a failure here counts one more
+# run on top of the earlier ones instead of starting again at one. The newer
+# entry wins where this stream's own state file has the same subscription.
+$Prior = @(@($PriorFailedAttempts) | Where-Object { $null -ne $_ })
+if ($Prior.Count -gt 0)
+{
+    $FailedAttempts = @(Merge-FailedAttempts -ExistingFailedAttempts $Prior -StreamFailedAttempts $FailedAttempts -CompletedIds @())
 }
 
 # ---- Build the inner-script passthrough --------------------------------------

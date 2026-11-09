@@ -414,7 +414,16 @@ function New-RdaAllSubHtmlSummary
     $AllowedFiles = $null
     if ($null -ne $ReportFiles)
     {
-        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), (Get-RdaPathComparer -Path $RunOutputDirectory))
+        # Grouped by report folder (folder names compared as the run folder
+        # compares them); each folder's files compared as that folder does,
+        # since a report folder can treat letter case apart from its parent.
+        $AllowedFiles = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer -Path $RunOutputDirectory))
+        foreach ($F in @(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }))
+        {
+            $Parent = [System.IO.Path]::GetDirectoryName($F)
+            if (-not $AllowedFiles.ContainsKey($Parent)) { $AllowedFiles[$Parent] = New-Object System.Collections.Generic.List[string] }
+            $AllowedFiles[$Parent].Add($F)
+        }
     }
     # Only the folders -ReportFolders names, when given.
     if ($null -ne $ReportFolders)
@@ -427,7 +436,13 @@ function New-RdaAllSubHtmlSummary
 
     foreach ($Folder in $Folders)
     {
-        $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $null -eq $AllowedFiles -or $AllowedFiles.Contains($_.FullName) } | Select-Object -First 1
+        $FolderAllowed = $null
+        if ($null -ne $AllowedFiles)
+        {
+            $FolderAllowed = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $Folder.FullName))
+            if ($AllowedFiles.ContainsKey($Folder.FullName)) { foreach ($F in $AllowedFiles[$Folder.FullName]) { [void]$FolderAllowed.Add($F) } }
+        }
+        $InvFile = Get-ChildItem -LiteralPath $Folder.FullName -Filter 'Inventory_*.json' -File -ErrorAction SilentlyContinue | Where-Object { $null -eq $FolderAllowed -or $FolderAllowed.Contains($_.FullName) } | Select-Object -First 1
         if ($null -eq $InvFile) { continue }
         try
         {
@@ -464,7 +479,7 @@ function New-RdaAllSubHtmlSummary
         if (-not $SubName) { $SubName = '(name unavailable - 0 resources)' }
 
         $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike '*_revealed*' -and ($null -eq $AllowedFiles -or $AllowedFiles.Contains($_.FullName)) } | Select-Object -First 1
+            Where-Object { $_.Name -notlike '*_revealed*' -and ($null -eq $FolderAllowed -or $FolderAllowed.Contains($_.FullName)) } | Select-Object -First 1
         # Relative link so the summary travels with the report folder.
         $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
 
@@ -641,7 +656,7 @@ $ChartsHtml
     $HtmlPartial = '{0}.rda-{1}.partial' -f $HtmlFile, [guid]::NewGuid().ToString('N')
     try
     {
-        $Html | Out-File -FilePath $HtmlPartial -Encoding utf8
+        $Html | Out-File -LiteralPath $HtmlPartial -Encoding utf8
         [System.IO.File]::Move($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HtmlPartial), $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($HtmlFile), $true)
     }
     finally
@@ -784,7 +799,9 @@ function New-RdaAllSubHtmlSummaryFromZip
     $SwapDone = $false
     $SwapUndone = $false
     $PartialsCleared = $false
-    $SwapSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
+    # Targets already swapped, per report folder, compared as that folder
+    # compares names (it can treat letter case apart from -OutputDirectory).
+    $SwapSeen = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer -Path $OutputDirectory))
     # Puts every target back as it was before the swap, last swapped first
     # (a target written twice is put back in turn). One that cannot be put
     # back does not stop the rest; each file left out of place is returned as
@@ -991,7 +1008,8 @@ function New-RdaAllSubHtmlSummaryFromZip
         foreach ($Staged in $StagedFiles)
         {
             # The first write of a target moves the user's earlier file aside.
-            $Staged.Earlier = $SwapSeen.Add($Staged.Target)
+            if (-not $SwapSeen.ContainsKey($Staged.Dest)) { $SwapSeen[$Staged.Dest] = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $Staged.Dest)) }
+            $Staged.Earlier = $SwapSeen[$Staged.Dest].Add($Staged.Target)
             if (Test-Path -LiteralPath $Staged.Target)
             {
                 $Staged.Backup = '{0}.rda-{1}.bak' -f $Staged.Target, [guid]::NewGuid().ToString('N')
@@ -1004,9 +1022,9 @@ function New-RdaAllSubHtmlSummaryFromZip
         $SwapDone = $true
         foreach ($Staged in $StagedFiles)
         {
-            # One entry per file as the file system compares names, so two
+            # One entry per file as its folder compares names, so two
             # spellings of one file are listed (and bundled) once.
-            if (-not $WrittenFiles.ContainsKey($Staged.Dest)) { $WrittenFiles[$Staged.Dest] = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory)) }
+            if (-not $WrittenFiles.ContainsKey($Staged.Dest)) { $WrittenFiles[$Staged.Dest] = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $Staged.Dest)) }
             [void]$WrittenFiles[$Staged.Dest].Add($Staged.Target)
         }
         foreach ($Dest in $DirsPlanned) { if ($DestSeen.Add($Dest)) { $ReconstructedDirs.Add($Dest) } }

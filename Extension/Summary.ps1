@@ -73,7 +73,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if ([string]::IsNullOrWhiteSpace($JsonFile) -or -not (Test-Path -Path $JsonFile -PathType Leaf))
+if ([string]::IsNullOrWhiteSpace($JsonFile) -or -not (Test-Path -LiteralPath $JsonFile -PathType Leaf))
 {
     throw "Summary.ps1: Inventory JSON not found at '$JsonFile'."
 }
@@ -106,7 +106,7 @@ $RenderStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 # Read input JSON. Top-level keys are service-type names; values are arrays of
 # resource records. No schema validation - a new field simply appears as a new
 # column in that service's table.
-$RawJson = Get-Content -Path $JsonFile -Raw -Encoding utf8
+$RawJson = Get-Content -LiteralPath $JsonFile -Raw -Encoding utf8
 $Inventory = $RawJson | ConvertFrom-Json
 
 # Compute summary stats. Every array-valued key becomes a (service, count)
@@ -868,7 +868,7 @@ $Js
 </html>
 "@
 
-Set-Content -Path $HtmlFile -Value $Html -Encoding utf8
+Set-Content -LiteralPath $HtmlFile -Value $Html -Encoding utf8
 Write-Host ("HTML report written: {0}" -f $HtmlFile) -ForegroundColor Green
 Write-Host ("  Total resources: {0:N0} across {1} service type(s)" -f $TotalResources, $ServiceSummary.Count) -ForegroundColor Green
 $FileSize = (Get-Item $HtmlFile).Length

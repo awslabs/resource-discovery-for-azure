@@ -24,6 +24,10 @@
 #    pwsh with stand-ins for Get-Module, Import-Module and Install-Module
 #    (Az modules only). Every Azure cmdlet the run could reach first records
 #    the call and ends the run with exit 7. No live Azure.
+# 4. A submodule whose manifest asks for an older Az.Accounts, with real
+#    empty modules on a scratch PSModulePath and one pwsh per session: the
+#    stop names it and its update command, and the sessions after the update
+#    (or after an old copy found first is removed) pass.
 #
 # Run with: Invoke-Pester ./Tests/AzAccountsVersion.Tests.ps1 -Output Detailed
 # =============================================================================
@@ -161,6 +165,111 @@ Describe 'Test-RdaAzAccountsVersion' {
     }
 }
 
+Describe 'A submodule that asks for an older Az.Accounts' -Skip:$IsWindows {
+
+    # Real modules on a scratch PSModulePath, no mocks: Az.Accounts 5.5.3 and
+    # 5.5.4, and an Az.Compute 1.0.0 whose manifest asks for exactly 5.5.3.
+    # Each session is its own pwsh, as a user opening a new one. Not on
+    # Windows, where the user's module folder is not under HOME.
+    BeforeAll {
+        $script:PinDir = Join-Path ([System.IO.Path]::GetTempPath()) ('AzAccountsPin_' + [guid]::NewGuid().ToString('N'))
+        function script:New-PinModule
+        {
+            param([string]$Root, [string]$Name, [string]$Version, [string]$Requires = '')
+            $Dir = Join-Path $Root (Join-Path $Name $Version)
+            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $Dir ($Name + '.psm1')) -Value '' -Encoding utf8
+            $Req = if ($Requires) { "; RequiredModules = @($Requires)" } else { '' }
+            Set-Content -LiteralPath (Join-Path $Dir ($Name + '.psd1')) -Value ("@{{ ModuleVersion = '{0}'; RootModule = '{1}.psm1'; FunctionsToExport = @(){2} }}" -f $Version, $Name, $Req) -Encoding utf8
+        }
+        $script:First = Join-Path $script:PinDir 'first'
+        $script:Second = Join-Path $script:PinDir 'second'
+        New-PinModule -Root $script:Second -Name 'Az.Accounts' -Version '5.5.3'
+        New-PinModule -Root $script:Second -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $script:Second -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        # One new session: loads the modules as ResourceInventory.ps1 does,
+        # then runs the check after the import.
+        $script:PinSession = Join-Path $script:PinDir 'session.ps1'
+        @'
+param([string]$Functions)
+. $Functions
+Import-Module Az.Accounts -MinimumVersion (Get-RdaAzAccountsMinimumVersion) -ErrorAction Stop | Out-Null
+Import-Module Az.Compute -ErrorAction Stop | Out-Null
+Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
+'@ | Set-Content -LiteralPath $script:PinSession -Encoding utf8
+        function script:Invoke-PinSession
+        {
+            param([string[]]$ModulePath)
+            $Old = $env:PSModulePath
+            $OldHome = $env:HOME
+            $OldData = $env:XDG_DATA_HOME
+            try
+            {
+                $env:PSModulePath = $ModulePath -join [System.IO.Path]::PathSeparator
+                # pwsh puts the user's own module folder (under HOME, or
+                # Documents on Windows) in front of PSModulePath; a scratch
+                # home keeps the host's real Az modules out.
+                $env:HOME = Join-Path $script:PinDir 'home'
+                $env:XDG_DATA_HOME = Join-Path $env:HOME '.local/share'
+                $Json = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $script:PinSession -Functions $script:AzModulesFile | Out-String
+            }
+            finally
+            {
+                $env:PSModulePath = $Old
+                $env:HOME = $OldHome
+                $env:XDG_DATA_HOME = $OldData
+            }
+            $Result = $Json | ConvertFrom-Json
+            [pscustomobject]@{ Status = [string]$Result.Status; Text = (@($Result.Messages) -join "`n") }
+        }
+    }
+
+    AfterAll {
+        if ($script:PinDir -and (Test-Path -LiteralPath $script:PinDir)) { Remove-Item -LiteralPath $script:PinDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'names the submodule and the command that updates it, and the next sessions end once it is updated' {
+        # Session 1: the pair loads and the check stops.
+        $One = Invoke-PinSession -ModulePath @($script:Second)
+        $One.Status | Should -Be 'LoadedTooOld' -Because $One.Text
+        $One.Text | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+        $One.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3'))
+        $One.Text | Should -Match ([regex]::Escape('Install-Module -Name Az.Compute -Repository PSGallery -Scope CurrentUser -Force'))
+        $One.Text | Should -Not -Match 'Install-Module -Name Az\.Accounts' -Because 'a supported Az.Accounts is installed'
+        $One.Text | Should -Match 'new PowerShell session'
+
+        # Session 2, a new session alone: the same stop, so the advice must
+        # name the update.
+        (Invoke-PinSession -ModulePath @($script:Second)).Text | Should -Be $One.Text
+
+        # Session 3, after the printed command installed a newer Az.Compute
+        # (CurrentUser scope, first on the module path): the check passes.
+        New-PinModule -Root $script:First -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        $Three = Invoke-PinSession -ModulePath @($script:First, $script:Second)
+        $Three.Status | Should -Be 'Ok' -Because $Three.Text
+    }
+
+    It 'when the old copy is still found first, says how to remove it, and the next session passes once it is gone' {
+        $Root = Join-Path $script:PinDir 'order'
+        $OldFirst = Join-Path $Root 'old'
+        $NewLater = Join-Path $Root 'new'
+        New-PinModule -Root $NewLater -Name 'Az.Accounts' -Version '5.5.3'
+        New-PinModule -Root $NewLater -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $NewLater -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        New-PinModule -Root $OldFirst -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($OldFirst, $NewLater)
+        $Stop.Status | Should -Be 'LoadedTooOld' -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Get-Module -Name Az.Compute -ListAvailable'))
+        $Stop.Text | Should -Match ([regex]::Escape('Uninstall-Module -Name Az.Compute -RequiredVersion 1.0.0'))
+
+        # The old copy removed as the message says: the next session passes.
+        Remove-Item -LiteralPath (Join-Path $OldFirst 'Az.Compute') -Recurse -Force
+        (Invoke-PinSession -ModulePath @($OldFirst, $NewLater)).Status | Should -Be 'Ok'
+    }
+}
+
 Describe 'Install-RdaAzSubModule' {
 
     It 'installs Az.Accounts with -MinimumVersion 5.5.4 and the other modules by name' {
@@ -222,6 +331,8 @@ function global:Get-Module
             return
         }
         if ($ListAvailable) { return [pscustomobject]@{ Name = $Name[0]; Version = [version]'9.9.9' } }
+        # A loaded Az.Compute that asked for the older Az.Accounts (AZV_SUB_LOADS).
+        if ($Name[0] -eq 'Az.Compute' -and $Global:AzvSubLoaded) { return [pscustomobject]@{ Name = 'Az.Compute'; Version = [version]'9.9.9'; RequiredModules = @([pscustomobject]@{ Name = 'Az.Accounts'; Version = [version]$env:AZV_SUB_LOADS }) } }
         return
     }
     Microsoft.PowerShell.Core\Get-Module @PSBoundParameters
@@ -239,7 +350,7 @@ function global:Import-Module
         # AZV_SUB_LOADS: a submodule whose manifest asks for that exact older
         # Az.Accounts (RequiredVersion), which PowerShell then loads next to
         # the new one; the lowest loaded copy is that older one.
-        if ($Name[0] -eq 'Az.Compute' -and $env:AZV_SUB_LOADS) { $Global:AzvLoaded = $env:AZV_SUB_LOADS }
+        if ($Name[0] -eq 'Az.Compute' -and $env:AZV_SUB_LOADS) { $Global:AzvLoaded = $env:AZV_SUB_LOADS; $Global:AzvSubLoaded = $true }
         if ($Name[0] -eq 'Az.Accounts' -and $env:AZV_IMPORT_LOADS)
         {
             if ($MinimumVersion -and $env:AZV_IMPORT_MIN -ne 'ignore-min' -and [version]$env:AZV_IMPORT_LOADS -lt $MinimumVersion)
@@ -465,6 +576,16 @@ exit $LASTEXITCODE
         $Run.ExitCode | Should -Be 1 -Because $Run.Output
         $Run.AzureCalls | Should -BeNullOrEmpty
         $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+    }
+
+    It 'direct run: the stop for a submodule that loads an older Az.Accounts names it and the command that updates it' {
+        $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.3,5.5.4' -SubLoads '5.5.3'
+
+        $Run.ExitCode | Should -Be 1 -Because $Run.Output
+        $Run.AzureCalls | Should -BeNullOrEmpty
+        $Run.Installs | Should -BeNullOrEmpty -Because 'the check prints the command; it installs nothing'
+        $Run.Output | Should -Match ([regex]::Escape('Az.Compute 9.9.9 asks for Az.Accounts 5.5.3'))
+        $Run.Output | Should -Match ([regex]::Escape('Install-Module -Name Az.Compute -Repository PSGallery -Scope CurrentUser -Force'))
     }
 
     It 'wrapper: imports Az.Accounts with -MinimumVersion 5.5.4, so an older copy earlier in PSModulePath is not taken' {

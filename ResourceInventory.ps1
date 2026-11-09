@@ -1512,8 +1512,8 @@ function FinalizeOutputs
         # Otherwise, under -Obfuscate, Summary.ps1 keeps taking it from the
         # first record (the masked name).
         # The count is of the subscriptions such a run inventories: the list
-        # 'az account list' gives, which LoginSession has already narrowed to
-        # -TenantID when one is given, with the same filter az applies by
+        # 'az account list' gives (outside Cloud Shell, LoginSession narrows it
+        # to -TenantID when one is given), with the same filter az applies by
         # default (state exactly 'Enabled'), so a Disabled or Warned entry is
         # never counted as covered.
         $ReportSubscriptionName = $null

@@ -291,7 +291,11 @@ Function RunInventorySetup()
             exit 1
         }
 
-        # Check the copy that actually loaded. The printed advice (a new
+        # Check the copy that actually loaded. The import above takes 5.5.4 or
+        # newer, but Az.Compute, Az.Monitor and Az.Billing load after it: one
+        # whose manifest asks for an exact older Az.Accounts (RequiredVersion)
+        # makes PowerShell load that older copy next to the new one, and the
+        # check reads the lowest loaded copy. The printed advice (a new
         # session, or the install command) is the way out; nothing retries.
         $AzAccountsCheck = Test-RdaAzAccountsVersion
         if ($AzAccountsCheck.Status -ne 'Ok')

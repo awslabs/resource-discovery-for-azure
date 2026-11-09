@@ -352,8 +352,12 @@ catch
     exit 1
 }
 
-# Check the copy that actually loaded. The printed advice is the way out;
-# nothing retries.
+# Check the copy that actually loaded. With PowerShell's own Import-Module
+# this cannot fail: the check above stopped on an older loaded copy, and
+# -MinimumVersion loads 5.5.4 or newer or throws into the catch. It guards a
+# session where Import-Module is a function that drops -MinimumVersion (one
+# a profile defines, for example), which Tests/AzAccountsVersion.Tests.ps1
+# covers. The printed advice is the way out; nothing retries.
 $AzAccountsCheck = Test-RdaAzAccountsVersion
 if ($AzAccountsCheck.Status -ne 'Ok')
 {

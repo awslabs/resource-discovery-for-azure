@@ -236,6 +236,10 @@ function global:Import-Module
         # AZV_IMPORT_LOADS: the version a plain import takes (an older copy
         # earlier in PSModulePath). With -MinimumVersion, PowerShell takes a
         # copy at or above it; 'ignore-min' takes the older copy anyway.
+        # AZV_SUB_LOADS: a submodule whose manifest asks for that exact older
+        # Az.Accounts (RequiredVersion), which PowerShell then loads next to
+        # the new one; the lowest loaded copy is that older one.
+        if ($Name[0] -eq 'Az.Compute' -and $env:AZV_SUB_LOADS) { $Global:AzvLoaded = $env:AZV_SUB_LOADS }
         if ($Name[0] -eq 'Az.Accounts' -and $env:AZV_IMPORT_LOADS)
         {
             if ($MinimumVersion -and $env:AZV_IMPORT_MIN -ne 'ignore-min' -and [version]$env:AZV_IMPORT_LOADS -lt $MinimumVersion)
@@ -283,7 +287,7 @@ exit $LASTEXITCODE
 
         function Invoke-AzvRun
         {
-            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails', [string]$ImportLoads = '', [string]$ImportMin = '', [switch]$Preloaded)
+            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails', [string]$ImportLoads = '', [string]$ImportMin = '', [switch]$Preloaded, [string]$SubLoads = '')
             $Name = [guid]::NewGuid().ToString('N')
             $Out = Join-Path $script:WorkDir ('out_' + $Name)
             New-Item -ItemType Directory -Path $Out -Force | Out-Null
@@ -295,6 +299,7 @@ exit $LASTEXITCODE
             $env:AZV_IMPORT_LOADS = $ImportLoads
             $env:AZV_IMPORT_MIN = $ImportMin
             $env:AZV_PRELOADED = if ($Preloaded) { '1' } else { '' }
+            $env:AZV_SUB_LOADS = $SubLoads
             $Pwsh = Join-Path $PSHOME 'pwsh'
             try
             {
@@ -319,6 +324,7 @@ exit $LASTEXITCODE
                 Remove-Item Env:AZV_IMPORT_LOADS -ErrorAction SilentlyContinue
                 Remove-Item Env:AZV_IMPORT_MIN -ErrorAction SilentlyContinue
                 Remove-Item Env:AZV_PRELOADED -ErrorAction SilentlyContinue
+                Remove-Item Env:AZV_SUB_LOADS -ErrorAction SilentlyContinue
             }
             $Calls = if (Test-Path -LiteralPath $CallLog) { @(Get-Content -LiteralPath $CallLog) } else { @() }
             [pscustomobject]@{
@@ -448,6 +454,15 @@ exit $LASTEXITCODE
         $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.3,5.5.4' -ImportLoads '5.5.3' -ImportMin 'ignore-min'
 
         $Run.ExitCode | Should -Be 1
+        $Run.AzureCalls | Should -BeNullOrEmpty
+        $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+    }
+
+    It 'direct run: stops with exit 1 before any Azure call when a submodule loads an older Az.Accounts next to the supported one' {
+        $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.3,5.5.4' -SubLoads '5.5.3'
+
+        $Run.Imports | Should -Contain 'import Az.Compute'
+        $Run.ExitCode | Should -Be 1 -Because $Run.Output
         $Run.AzureCalls | Should -BeNullOrEmpty
         $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
     }

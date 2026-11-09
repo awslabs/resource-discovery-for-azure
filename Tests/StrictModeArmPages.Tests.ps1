@@ -7,6 +7,9 @@
 # page without them: the role check would come back inconclusive and skip
 # every subscription.
 #
+# The role check and the consumption check read Failed, which only a check
+# that threw carries, so a result without it must not stop either check.
+#
 # Run with: Invoke-Pester ./Tests/StrictModeArmPages.Tests.ps1 -Output Detailed
 
 BeforeAll {
@@ -38,5 +41,33 @@ Describe 'Reading an ARM page without nextLink under Set-StrictMode -Version Lat
         $Page = Get-UsageAggregatesPage -SubscriptionId 'x' -ReportedStartTime ([datetime]'2026-10-01') -ReportedEndTime ([datetime]'2026-10-31')
         $Page.ContinuationToken | Should -BeNullOrEmpty
         @($Page.UsageAggregations).Count | Should -Be $Rows
+    }
+}
+
+Describe 'Reading a check result without Failed under Set-StrictMode -Version Latest' {
+    BeforeAll {
+        $script:Sub = [pscustomobject]@{ Id = '00000000-0000-0000-0000-000000000001'; Name = 'sub-one' }
+        Mock Write-Host {}
+    }
+    BeforeEach { Set-StrictMode -Version Latest }
+    AfterEach { Set-StrictMode -Off }
+
+    It 'keeps a role check record that did not fail' {
+        Mock Get-RoleCheckCallerObjectId { 'caller' }
+        Mock Get-SubscriptionRoleAccess {
+            [pscustomobject]@{ Id = $Item.Id; Name = $Item.Name; State = 'Readable'; Verdict = 'Readable'; Reason = 'reader'; UsageVerdict = $null; UsageText = $null; Assignments = 1; Permissions = $null; Seconds = 0.1 }
+        }
+        $Records = @(Test-SubscriptionRoleAccessAll -Subscriptions @($script:Sub) -ThrottleLimit 1)
+        $Records.Count | Should -Be 1
+        $Records[0].State | Should -Be 'Readable'
+    }
+
+    It 'keeps a consumption check result that did not fail' {
+        Mock Get-SubscriptionResourceCounts { @{} }
+        Mock Get-SubscriptionConsumptionCheck {
+            [pscustomobject]@{ Id = $Item.Id; Name = $Item.Name; ResourceCount = $null; Outcome = 'Pass'; Passed = $true; Detail = 'usage found'; PageCapReached = $false; PagesRead = 1; Seconds = 0.1 }
+        }
+        $Result = Invoke-ConsumptionDataCheck -Subscriptions @($script:Sub) -ThrottleLimit 1
+        $Result.ShouldBlock | Should -BeFalse
     }
 }

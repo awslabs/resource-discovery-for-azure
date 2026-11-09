@@ -940,7 +940,9 @@ function Test-SubscriptionRoleAccessAll
     $RoleRecords = [System.Collections.Generic.List[object]]::new()
     Invoke-SubscriptionCheckInOrder -Items $Subs -Command 'Get-SubscriptionRoleAccess' -Arguments $Arguments -ThrottleLimit $ThrottleLimit -OnResult {
         param($RoleRecord)
-        if ($RoleRecord.Failed)
+        # Only a check that threw carries Failed (Invoke-SubscriptionCheckInOrder);
+        # read it so Set-StrictMode allows a result without it.
+        if ($null -ne $RoleRecord.PSObject.Properties['Failed'] -and $RoleRecord.Failed)
         {
             $FailedId = [string]$RoleRecord.Item.Id
             $RoleRecord = [pscustomobject]@{
@@ -1804,7 +1806,9 @@ function Invoke-ConsumptionDataCheck
     $Arguments = @{ Window = $Window; ResourceGroup = $ResourceGroup; MaxRetries = $MaxRetries }
     Invoke-SubscriptionCheckInOrder -Items $Items -Command 'Get-SubscriptionConsumptionCheck' -Arguments $Arguments -ThrottleLimit $ThrottleLimit -OnResult {
         param($CheckResult)
-        if ($CheckResult.Failed)
+        # Only a check that threw carries Failed (Invoke-SubscriptionCheckInOrder);
+        # read it so Set-StrictMode allows a result without it.
+        if ($null -ne $CheckResult.PSObject.Properties['Failed'] -and $CheckResult.Failed)
         {
             $CheckResult = [pscustomobject]@{
                 Id             = [string]$CheckResult.Item.Id

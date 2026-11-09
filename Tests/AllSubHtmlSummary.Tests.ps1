@@ -447,4 +447,29 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
         $Html | Should -Match 'Tenant:' -Because 'an identifiable bundle shows the tenant'
         $Html | Should -Match 'Fabrikam-Billing' -Because 'an identifiable bundle names the affected subs'
     }
+
+    It '<Case>: counts each subscription with a consumption failure once and shows the sign-in skips as their own count' -ForEach @(
+        @{ Case = 'without -Obfuscated'; Obfuscated = $false }
+        @{ Case = 'with -Obfuscated'; Obfuscated = $true }
+    ) {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated:$Obfuscated | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        # Fabrikam-Billing twice (two of its pages failed), and the '(auth)'
+        # sign-in rows of two subscriptions, one of them twice.
+        $Rows = @(
+            [pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'page 2 failed' }
+            [pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'page 3 failed' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '00000000-0000-0000-0000-00000000000a' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '00000000-0000-0000-0000-00000000000b' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '00000000-0000-0000-0000-00000000000b' }
+        )
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated:$Obfuscated -ConsumptionFailedSubs $Rows | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<b>1 subscription\(s\) had consumption \(billing\) issues\.</b>'
+        $Html | Should -Match '<b>Consumption skipped for sign-in on 2 subscription\(s\)\.</b>'
+        $Html | Should -Not -Match '0000000a|0000000b' -Because 'the sign-in rows are counted, not named'
+        if ($Obfuscated) { $Html | Should -Not -Match 'Fabrikam-Billing' }
+    }
 }

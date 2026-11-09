@@ -1991,16 +1991,23 @@ if ($ConsumptionRecords -gt 0 -or $ConsumptionFailures.Count -gt 0)
 }
 if ($ConsumptionFailures.Count -gt 0)
 {
+    # One rule for the count and the list, as RunSummary.log and
+    # MainSummary.html use: each real subscription once, by name and id (two
+    # can share a name). The '(auth)' rows of a phase skipped for sign-in name
+    # no subscription here, so they get their own count line.
+    $ConsumptionView = Get-ConsumptionFailureView -ConsumptionFailedSubs $ConsumptionFailures
     Write-Host ""
-    Write-Host ("Consumption Failures:    {0} subscription(s)" -f $ConsumptionFailures.Count) -ForegroundColor Yellow
+    Write-Host ("Consumption Failures:    {0} subscription(s)" -f @($ConsumptionView.Subscriptions).Count) -ForegroundColor Yellow
     # List the affected subscriptions by name so the operator knows exactly
     # which subs are missing billing data (e.g. to go request Reader access
-    # on them). Mirrors the metrics-failure block below. Exclude the '(auth)'
-    # sentinel used for the whole-phase skip - it is not a specific sub.
-    # By name and id: two subscriptions can share a name.
-    foreach ($cf in (@($ConsumptionFailures | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object -Property Name, Id -Unique))
+    # on them). Mirrors the metrics-failure block below.
+    foreach ($cf in @($ConsumptionView.Subscriptions))
     {
         Write-Host ("  - {0} ({1})" -f $cf.Name, $cf.Id) -ForegroundColor Yellow
+    }
+    if ($ConsumptionView.SignInSkipped -gt 0)
+    {
+        Write-Host ("  Consumption skipped for sign-in on {0} subscription(s)." -f $ConsumptionView.SignInSkipped) -ForegroundColor Yellow
     }
     # The consumption failure message is repeated verbatim across every sub
     # when the cause is a broken Az module - dedupe to avoid screen wall.

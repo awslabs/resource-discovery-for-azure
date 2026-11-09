@@ -1704,31 +1704,35 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
     if ($SubZips.Count -gt 0)
     {
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-        $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
+        # The name it ships under: today's, or the next free one (-2, -3, ...)
+        # when another run of the same second has it (Move-RunOutputFile, at
+        # the last check below).
+        $OuterZipStem = "AllSubscriptions_ResourcesReport_$Timestamp"
         $PartialZip = $null
+        $PartialBuilt = $false
         try
         {
-            Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
-            # Built and checked under a name of its own in the same folder, so
-            # nothing sits under the name a run ships until the zip passed its
-            # check: a run stopped part-way leaves only this file. The name
-            # matches none of the patterns the inventory folder is listed with.
-            $PartialZip = Join-Path $InventoryRoot ('.rda-{0}.partial' -f [guid]::NewGuid().ToString('N'))
+            Write-Host ("Compressing {0} per-subscription report(s) into a consolidated zip in {1}" -f $SubZips.Count, $InventoryRoot) -ForegroundColor Cyan
+            # Built, checked, given the run summary and checked again under a
+            # name of its own in the same folder; it takes the name a run
+            # ships only after the last check, so a run stopped part-way
+            # leaves nothing under that name. The private name matches none of
+            # the patterns the inventory folder is listed with, and has no
+            # leading dot: Compress-Archive -Update does not find a hidden file.
+            $PartialZip = Join-Path $InventoryRoot ('rda-build-{0}.partial' -f [guid]::NewGuid().ToString('N'))
             Compress-Archive -Path $SubZips.FullName -DestinationPath $PartialZip -ErrorAction Stop
             $ZipProblem = Get-ConsolidatedZipProblem -Path $PartialZip -SubZipNames $SubZips.Name
             if ($ZipProblem)
             {
                 throw $ZipProblem
             }
-            # Today's name, or the next free one (-2, -3, ...): never another
-            # run's consolidated zip of the same second (Move-RunOutputFile).
-            $OuterZipFile = Move-RunOutputFile -Source $PartialZip -Directory $InventoryRoot -Stem "AllSubscriptions_ResourcesReport_$Timestamp" -Extension '.zip'
-            # Its path is printed after the run summary is added to it, once
-            # the zip passed the same check again (below the summary block).
+            # The main summary, the fold and the last check below work on it.
+            $OuterZipFile = $PartialZip
+            $PartialBuilt = $true
         }
         catch
         {
-            $BundleBuildError = "Could not build {0}: {1}" -f $OuterZipFile, $_.Exception.Message
+            $BundleBuildError = "Could not build the consolidated zip in {0}: {1}" -f $InventoryRoot, $_.Exception.Message
             Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
             # The main summary, the fold and the final check below all key on
             # $OuterZipFile, so none of them may point at the missing zip.
@@ -1736,8 +1740,8 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
         }
         finally
         {
-            # Moved into place on success; whatever a failure left of it goes.
-            if ($null -ne $PartialZip -and (Test-Path -LiteralPath $PartialZip)) { Remove-Item -LiteralPath $PartialZip -Force -ErrorAction SilentlyContinue }
+            # Whatever a failed or stopped build left of it goes.
+            if (-not $PartialBuilt -and $null -ne $PartialZip -and (Test-Path -LiteralPath $PartialZip)) { Remove-Item -LiteralPath $PartialZip -Force -ErrorAction SilentlyContinue }
         }
     }
     else
@@ -1764,6 +1768,7 @@ else
 # the per-sub reports and the consolidated zip are already written, so any
 # error is downgraded to a warning and $MainSummaryFile is left $null.
 $MainSummaryFile = $null
+$MainSummaryBuilt = $false
 if ($null -ne $OuterZipFile)
 {
     try
@@ -1799,14 +1804,18 @@ if ($null -ne $OuterZipFile)
             -CollectorFailures $Global:CollectorFailures `
             -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
             -Detailed:$Detailed -Obfuscated:$Obfuscate
+        $MainSummaryBuilt = $true
     }
     catch
     {
         Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
-        # The name this run reserved (New-RunOutputFile): whatever the failed
-        # build left under it is removed, so no empty or partial main summary
-        # is left or added to the consolidated zip.
-        if ($null -ne $MainSummaryFile)
+    }
+    finally
+    {
+        # The name this run reserved (New-RunOutputFile): whatever a failed or
+        # stopped build left under it is removed, so no empty or partial main
+        # summary is left or added to the consolidated zip.
+        if (-not $MainSummaryBuilt -and $null -ne $MainSummaryFile)
         {
             Remove-Item -LiteralPath $MainSummaryFile -Force -ErrorAction SilentlyContinue
             $MainSummaryFile = $null
@@ -2166,7 +2175,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         if ($StageItems.Count -gt 0)
         {
             Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
-            Write-Host ("Bundle finalized: RunSummary.log + MainSummary.html folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
+            Write-Host "Bundle finalized: RunSummary.log + MainSummary.html folded into the consolidated zip" -ForegroundColor Green
         }
         Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -2177,21 +2186,25 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 }
 
 # A failed fold can remove the zip itself (a full disk does), so it is checked
-# again: the extras are optional, the per-subscription zips are not. The zip's
-# path is printed only here, once this last check passed.
+# again: the extras are optional, the per-subscription zips are not. Only then
+# does it take the name a run ships, and its path is printed.
 if ($null -ne $OuterZipFile)
 {
     $ZipProblem = Get-ConsolidatedZipProblem -Path $OuterZipFile -SubZipNames $SubZips.Name
+    if (-not $ZipProblem)
+    {
+        try { $OuterZipFile = Move-RunOutputFile -Source $OuterZipFile -Directory $InventoryRoot -Stem $OuterZipStem -Extension '.zip' }
+        catch { $ZipProblem = 'it could not take its name: {0}' -f $_.Exception.Message }
+    }
     if ($ZipProblem)
     {
-        $BundleBuildError = "{0} was lost while the run summary was added to it: {1}" -f $OuterZipFile, $ZipProblem
-        # This run's own name (Move-RunOutputFile): a zip that failed the check
-        # is not left under it, as after the check before the fold. When it
-        # cannot be removed, the error says so, so it is not shipped.
+        $BundleBuildError = "The consolidated zip was lost while the run summary was added to it: {0}" -f $ZipProblem
+        # Still under its private name: it is not left in the folder. When it
+        # cannot be removed, the error names it, so it is not shipped.
         Remove-Item -LiteralPath $OuterZipFile -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $OuterZipFile)
         {
-            $BundleBuildError += " It could not be removed: delete it, do not share it."
+            $BundleBuildError += (" {0} could not be removed: delete it, do not share it." -f $OuterZipFile)
         }
         Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
         $OuterZipFile = $null

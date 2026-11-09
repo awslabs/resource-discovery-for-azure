@@ -231,7 +231,7 @@ Use `Run-AllSubscriptions.ps1` to generate a separate inventory report for each 
 ./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com"
 ```
 
-Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery. Names made from the time to the second (the wrapper transcript, this zip and `MainSummary_<time>.html`) never write over a file that is already there: when two runs in one folder start or end in the same second, the second run takes the next free name (`<name>-2`, `-3`, up to `-100`).
+Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery. Names made from the time to the second (the wrapper transcript, this zip and `MainSummary_<time>.html`) never write over a file that is already there: when two runs in one folder start or end in the same second, the second run takes the next free name (`<name>-2`, `-3`, up to `-100`). The consolidated zip is built and checked under a private name (`rda-build-<id>.partial` in the same folder) and takes its name only after its last check, so a run that is stopped part-way leaves no file under that name; a run that is killed outright (power loss, `kill -9`) can leave that `.partial` file, which is safe to delete.
 
 #### Subscription state filter
 

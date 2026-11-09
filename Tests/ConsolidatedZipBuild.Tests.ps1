@@ -104,16 +104,20 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         $script:BundleBlock = [scriptblock]::Create((Find-WrapperIf -Condition 'Test-Path -Path $InventoryRoot -PathType Container' -Contains 'AllSubscriptions_ResourcesReport_').Extent.Text)
 
         # Runs the lifted bundling block over $Root with the variables it reads.
+        $script:LastCheckBlock = [scriptblock]::Create((Find-WrapperIf -Condition '$null -ne $OuterZipFile' -Contains 'was lost while the run summary was added').Extent.Text)
         function script:Invoke-BundleBlock
         {
-            param([string]$Root)
+            param([string]$Root, [switch]$NoLastCheck)
             # Set-Variable: these are read only by the lifted block.
             Set-Variable -Name InventoryRoot -Value $Root
             Set-Variable -Name RunStartTime -Value ((Get-Date).AddMinutes(-5))
             $OuterZipFile = $null
             $BundleBuildError = $null
             $Printed = @(. $script:BundleBlock 6>&1 | ConvertTo-Lines)
-            [pscustomobject]@{ OuterZipFile = $OuterZipFile; BundleBuildError = $BundleBuildError; Printed = $Printed; SubZips = $SubZips }
+            $Built = $OuterZipFile
+            # The last check, where the zip takes the name a run ships.
+            if (-not $NoLastCheck) { $Printed += @(. $script:LastCheckBlock 6>&1 | ConvertTo-Lines) }
+            [pscustomobject]@{ OuterZipFile = $OuterZipFile; Built = $Built; BundleBuildError = $BundleBuildError; Printed = $Printed; SubZips = $SubZips }
         }
     }
 
@@ -183,7 +187,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         $R.BundleBuildError | Should -BeLike '*: the zip cannot be read: *'
         $R.OuterZipFile | Should -BeNullOrEmpty
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' }).Count | Should -Be 0
-        @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*.zip' -or $_.Name -like '.rda-*.partial' }) | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*.zip' -or $_.Name -like 'rda-build-*.partial' }) | Should -BeNullOrEmpty
     }
 
     It 'a consolidated zip that cannot be built leaves no file under the shipped name' {
@@ -203,7 +207,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         try { $R = Invoke-BundleBlock -Root $Root } finally { $Lock.Dispose() }
 
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' }).Count | Should -Be 0
-        @($R.Printed | Where-Object { $_ -like 'ERROR: Could not build *AllSubscriptions_ResourcesReport_*.zip: *' }).Count | Should -Be 1
+        @($R.Printed | Where-Object { $_ -like 'ERROR: Could not build the consolidated zip in *: *' }).Count | Should -Be 1
         $R.BundleBuildError | Should -BeLike ('*{0}*' -f (Split-Path $Held -Leaf))
         $R.OuterZipFile | Should -BeNullOrEmpty
         @(Get-ChildItem -LiteralPath $Root -Filter 'AllSubscriptions_ResourcesReport_*.zip').Count | Should -Be 0
@@ -224,17 +228,19 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         $R.BundleBuildError | Should -BeLike '*: 1 of the 2 per-subscription zip(s) are not in it.'
         $R.OuterZipFile | Should -BeNullOrEmpty
         # Neither the zip that failed the check nor the file it was written to is left.
-        @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*.zip' -or $_.Name -like '.rda-*.partial' }) | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*.zip' -or $_.Name -like 'rda-build-*.partial' }) | Should -BeNullOrEmpty
     }
 
-    It 'a zip that is built holds every report, and its path waits for the last check' {
+    It 'a zip that is built holds every report, and its path and its name wait for the last check' {
         $Root = Join-Path $TestDrive 'good'
         $null = New-SubReport -Root $Root -Stamp 'K1'
         $null = New-SubReport -Root $Root -Stamp 'K2'
-        $R = Invoke-BundleBlock -Root $Root
+        $R = Invoke-BundleBlock -Root $Root -NoLastCheck
 
         $R.BundleBuildError | Should -BeNullOrEmpty
-        $R.OuterZipFile | Should -BeLike (Join-Path $Root 'AllSubscriptions_ResourcesReport_*.zip')
+        # Still under its private name: nothing under the shipped name yet.
+        $R.OuterZipFile | Should -BeLike (Join-Path $Root 'rda-build-*.partial')
+        @(Get-ChildItem -LiteralPath $Root -Filter 'AllSubscriptions_ResourcesReport_*.zip' -File) | Should -BeNullOrEmpty
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
         (Get-ZipEntryNames -Path $R.OuterZipFile | Sort-Object) | Should -Be (@($R.SubZips.Name) | Sort-Object)
     }
@@ -251,8 +257,9 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         {
             param([string]$Root, [switch]$GoneBeforeFold)
             $SubZips = @((New-SubReport -Root $Root -Stamp 'F1'), (New-SubReport -Root $Root -Stamp 'F2') | ForEach-Object { Get-Item -LiteralPath $_ })
-            $OuterZipFile = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-01_00-00-00.zip'
+            $OuterZipFile = Join-Path $Root 'rda-build-fold.partial'
             Microsoft.PowerShell.Archive\Compress-Archive -LiteralPath $SubZips.FullName -DestinationPath $OuterZipFile -Force
+            Set-Variable -Name OuterZipStem -Value 'AllSubscriptions_ResourcesReport_2026-01-01_00-00-00'
             if ($GoneBeforeFold) { Remove-Item -LiteralPath $OuterZipFile -Force }
             # Set-Variable: these are read only by the lifted blocks.
             Set-Variable -Name InventoryRoot -Value $Root
@@ -261,7 +268,7 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
             Set-Variable -Name FailedSubscriptions -Value @()
             $BundleBuildError = $null
             $Printed = @(. { . $script:FoldBlock; . $script:FinalCheckBlock } 6>&1 | ConvertTo-Lines)
-            # Path: the zip's name as built, which a failed check sets back to $null in OuterZipFile.
+            # Path: the name the zip ships under after the last check (a failed check sets OuterZipFile back to $null).
             [pscustomobject]@{ Path = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-01_00-00-00.zip'; OuterZipFile = $OuterZipFile; BundleBuildError = $BundleBuildError; Printed = $Printed }
         }
 
@@ -275,7 +282,7 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         function script:Get-BundleFiles
         {
             param([string]$Root)
-            @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*.zip' -or $_.Name -like '.rda-*.partial' } | ForEach-Object { $_.Name })
+            @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*.zip' -or $_.Name -like 'rda-build-*.partial' } | ForEach-Object { $_.Name })
         }
     }
 
@@ -287,7 +294,7 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         }
         $R = Invoke-FoldBlock -Root (Join-Path $TestDrive 'fold-lost')
 
-        $R.BundleBuildError | Should -Be ('{0} was lost while the run summary was added to it: the zip is not on disk.' -f $R.Path)
+        $R.BundleBuildError | Should -Be 'The consolidated zip was lost while the run summary was added to it: the zip is not on disk.'
         $R.OuterZipFile | Should -BeNullOrEmpty
         @($R.Printed | Where-Object { $_ -like 'Bundle finalized*' }).Count | Should -Be 0
         @($R.Printed | Where-Object { $_ -eq ('ERROR: {0}' -f $R.BundleBuildError) }).Count | Should -Be 1
@@ -297,7 +304,7 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
     It 'a zip that is gone before the run summary is added is reported as lost too' {
         $R = Invoke-FoldBlock -Root (Join-Path $TestDrive 'gone-before') -GoneBeforeFold
 
-        $R.BundleBuildError | Should -Be ('{0} was lost while the run summary was added to it: the zip is not on disk.' -f $R.Path)
+        $R.BundleBuildError | Should -Be 'The consolidated zip was lost while the run summary was added to it: the zip is not on disk.'
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
         Test-Path -LiteralPath $R.Path | Should -BeFalse
     }
@@ -312,7 +319,7 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
         $Root = Join-Path $TestDrive 'fold-short'
         $R = Invoke-FoldBlock -Root $Root
 
-        $R.BundleBuildError | Should -Be ('{0} was lost while the run summary was added to it: 2 of the 2 per-subscription zip(s) are not in it.' -f $R.Path)
+        $R.BundleBuildError | Should -Be 'The consolidated zip was lost while the run summary was added to it: 2 of the 2 per-subscription zip(s) are not in it.'
         $R.OuterZipFile | Should -BeNullOrEmpty
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0
         script:Get-BundleFiles -Root $Root | Should -BeNullOrEmpty
@@ -325,10 +332,10 @@ Describe 'Run-AllSubscriptions.ps1: adding the run summary to the consolidated z
             try { $null = $Zip.CreateEntry('RunSummary.log') } finally { $Zip.Dispose() }
         }
         # The removal fails without an error, as on a locked file with SilentlyContinue.
-        Mock Remove-Item { } -ParameterFilter { $LiteralPath -like '*AllSubscriptions_ResourcesReport_*.zip' }
+        Mock Remove-Item { } -ParameterFilter { $LiteralPath -like '*rda-*.partial' }
         $R = Invoke-FoldBlock -Root (Join-Path $TestDrive 'fold-stuck')
 
-        $R.BundleBuildError | Should -BeLike ('{0} was lost while the run summary was added to it: *. It could not be removed: delete it, do not share it.' -f $R.Path)
+        $R.BundleBuildError | Should -BeLike ('The consolidated zip was lost while the run summary was added to it: *. {0} could not be removed: delete it, do not share it.' -f (Join-Path $TestDrive 'fold-stuck/rda-build-fold.partial'))
         @($R.Printed | Where-Object { $_ -eq ('ERROR: {0}' -f $R.BundleBuildError) }).Count | Should -Be 1
         $R.OuterZipFile | Should -BeNullOrEmpty
         @($R.Printed | Where-Object { $_ -like 'Reporting Data File:*' -or $_ -like 'Consolidated Report:*' }).Count | Should -Be 0

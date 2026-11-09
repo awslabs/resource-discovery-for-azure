@@ -423,6 +423,21 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
 
 Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak guard)' {
 
+    It 'renders health entries that carry no report folder under strict mode' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        try
+        {
+            Set-StrictMode -Version Latest
+            { New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out `
+                    -ConsumptionFailedSubs @([pscustomobject]@{ Name = 'Billing-Sub'; Id = '12345678-1234-1234-1234-123456789012' }) `
+                    -MetricsFailedSubs @([pscustomobject]@{ Name = 'Metrics-Sub'; Id = '12345678-1234-1234-1234-123456789012' }) 6>$null } | Should -Not -Throw
+        }
+        finally { Set-StrictMode -Off }
+        Get-Content -Path $Out -Raw | Should -Match 'metrics issues'
+    }
+
     It 'under -Obfuscated suppresses the tenant id and renders health banners counts-only (no subscription names)' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated | Out-Null

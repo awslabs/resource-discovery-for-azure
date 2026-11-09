@@ -803,6 +803,9 @@ function Write-RetryLimitSummary
     {
         Write-Host ("  - {0} ({1}): failed {2} runs in a row; last reason: {3}" -f $Entry.Name, $Entry.Id, (Get-FailedAttemptCount -Entry $Entry), $Entry.Reason) -ForegroundColor Yellow
     }
+    # A subscription that can never be collected would keep every run at exit
+    # 2, so the way to start over is named for all of them.
+    Write-Host ("  To start over with an empty retry list instead, delete the resume state files .resume-state-{0}.json and .resume-state-{0}-stream-*.json in the inventory folder: the next run collects every subscription." -f $TenantID) -ForegroundColor Yellow
     # A subscription missing from a listing that came back with warnings or
     # errors is kept until a complete listing: no run can tell whether it is
     # gone (then the run drops it) or only hidden (then a run without -Resume
@@ -820,7 +823,9 @@ function Write-RetryLimitSummary
     $NotReadable = @($List | Where-Object { @($NotReadableIds) -contains [string]$_.Id })
     if ($NotReadable.Count -gt 0)
     {
-        Write-Host ("  {0} skipped by the access check at the start of this run (the reason is printed there). Grant the identity Reader on {1}, then start a run without -Resume or -ResumeFailedOnly, for example:" -f ((@($NotReadable | ForEach-Object { $_.Name }) -join ', ')), $(if ($NotReadable.Count -eq 1) { 'it' } else { 'them' })) -ForegroundColor Yellow
+        # The check skips a subscription it found no role on, and one whose
+        # probe stayed inconclusive; its own lines say which and what to do.
+        Write-Host ("  {0} skipped by the access check at the start of this run (the reason and the fix are printed there). Once the check can read {1}, start a run without -Resume or -ResumeFailedOnly, for example:" -f ((@($NotReadable | ForEach-Object { $_.Name }) -join ', ') + $(if ($NotReadable.Count -eq 1) { ' was' } else { ' were' })), $(if ($NotReadable.Count -eq 1) { 'it' } else { 'them' })) -ForegroundColor Yellow
         Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow
     }
     $List = @($List | Where-Object { @($NotReadableIds) -notcontains [string]$_.Id })

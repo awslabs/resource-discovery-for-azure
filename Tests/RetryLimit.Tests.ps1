@@ -560,6 +560,43 @@ Describe 'A retry-list entry for a subscription that is no longer visible' {
     }
 }
 
+Describe 'A gone subscription''s entry left in a per-stream file of an interrupted run' {
+    BeforeAll {
+        Mock Import-Module -ParameterFilter { $Name -eq 'Az.Accounts' } -MockWith { }
+        Mock Disable-AzContextAutosave -MockWith { }
+        Mock Import-AzContext -MockWith { }
+    }
+    BeforeEach { script:New-Case }
+
+    It 'is dropped for good by the next parallel -Resume, not merged back from the stream''s file' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $Subs = @($script:A, $script:B, $script:X)
+        $null = script:Invoke-Run -Subs $Subs -Streams 2
+        # The streams fail Sub X again and the session ends before the merge.
+        $null = script:Invoke-Run -Subs $Subs -Streams 2 -Resume -Interrupted
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't').Count | Should -BeGreaterThan 0
+        $Global:RdaRlFailIds = @()
+        # Sub X is gone now.
+        $R = script:Invoke-Run -Subs @($script:A, $script:B) -Streams 2 -Resume
+        @(script:Get-Lines -Run $R -Like 'Dropped from the retry list:*').Count | Should -Be 1
+        script:Get-Entry -Id 'sub-x' | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R -Like 'Retry Limit Reached:*') | Should -BeNullOrEmpty
+    }
+
+    It 'is not folded back in after -ResumeFailedOnly drops the last entry and removes the state' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $Subs = @($script:A, $script:B, $script:X)
+        $null = script:Invoke-Run -Subs $Subs -Streams 2
+        $null = script:Invoke-Run -Subs $Subs -Streams 2 -Resume -Interrupted
+        $Global:RdaRlFailIds = @()
+        $null = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty
+        $R = script:Invoke-Run -Subs @($script:A, $script:B) -Resume
+        @(script:Get-Lines -Run $R -Like 'Recovered per-stream state*') | Should -BeNullOrEmpty
+        script:Get-Entry -Id 'sub-x' | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'A retry-list entry for a subscription outside the current subscription set' {
     BeforeEach { script:New-Case }
 
@@ -698,6 +735,31 @@ Describe 'A subscription listing that came back with warnings or errors' {
     }
 }
 
+Describe 'An Az notice of a coming breaking change from the subscription listing' {
+    BeforeEach { script:New-Case }
+
+    It 'does not keep a gone subscription on the retry list' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $null = script:Invoke-Run -Subs @($script:A, $script:X)
+        $Global:RdaRlFailIds = @()
+        $Global:RdaRlListWarnings = @('Upcoming breaking changes in the cmdlet ''Get-AzSubscription'': the output type will change.')
+        $R = script:Invoke-Run -Subs @($script:A) -Resume
+        @(script:Get-Lines -Run $R -Like 'Dropped from the retry list:*').Count | Should -Be 1
+        @(script:Get-Lines -Run $R -Like 'Kept on the retry list:*') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'The access check''s result when nothing is left to check' {
+    It 'is set to $null before the check, as the end of the run reads it' {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $Top = @($Ast.EndBlock.Statements)
+        $Init = @(for ($i = 0; $i -lt $Top.Count; $i++) { if ($Top[$i].Extent.Text -eq '$AccessDecision = $null') { $i } })
+        $Scope = @(for ($i = 0; $i -lt $Top.Count; $i++) { if ($Top[$i].Extent.Text.StartsWith('$ScopeForProbe = ')) { $i } })
+        $Init.Count | Should -Be 1
+        $Init[0] | Should -BeLessThan $Scope[0]
+    }
+}
+
 Describe 'A subscription past the retry limit that is no longer listed' {
     BeforeAll {
         Mock Import-Module -ParameterFilter { $Name -eq 'Az.Accounts' } -MockWith { }
@@ -788,7 +850,8 @@ Describe 'A subscription past the retry limit that the access check finds not re
         script:Get-Entry -Id 'sub-x' | Should -Not -BeNullOrEmpty
         $R.Result.WrapperExitCode | Should -Be 2 -Because 'Sub X stays on the retry list and its report is missing'
         @(script:Get-Lines -Run $R -Like 'Retry Limit Reached:*').Count | Should -Be 1
-        @(script:Get-Lines -Run $R -Like '  Sub X skipped by the access check at the start of this run*') | Should -Be @('  Sub X skipped by the access check at the start of this run (the reason is printed there). Grant the identity Reader on it, then start a run without -Resume or -ResumeFailedOnly, for example:')
+        @(script:Get-Lines -Run $R -Like '  Sub X was skipped by the access check at the start of this run*') | Should -Be @('  Sub X was skipped by the access check at the start of this run (the reason and the fix are printed there). Once the check can read it, start a run without -Resume or -ResumeFailedOnly, for example:')
+        @(script:Get-Lines -Run $R -Like '  To start over with an empty retry list instead*') | Should -Be @('  To start over with an empty retry list instead, delete the resume state files .resume-state-t.json and .resume-state-t-stream-*.json in the inventory folder: the next run collects every subscription.')
         @($R.Text | Where-Object { $_ -match 'IncludeDisabled' }) | Should -BeNullOrEmpty
         Test-Path -LiteralPath $script:State | Should -BeTrue
 

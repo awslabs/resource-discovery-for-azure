@@ -849,12 +849,17 @@ else
 # entry is dropped, and the warnings and errors are printed.
 $DroppedGoneEntries = $false
 $KeptNotListedIds = @()
+# The ids dropped here, kept out of the per-stream records merged later too.
+$GoneIds = @()
 if (@($FailedAttempts | Where-Object { $null -ne $_ }).Count -gt 0)
 {
     $VisibleIds = @($AllSubscriptions | ForEach-Object { [string]$_.Id })
     $GoneAttempts = @($FailedAttempts | Where-Object { $null -ne $_ -and $VisibleIds -notcontains [string]$_.Id })
     $ListingProblems = @(@($SubWarnings) + @($SubErrors) | Where-Object { $_ } | ForEach-Object {
             $Text = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } elseif ($_ -is [System.Management.Automation.WarningRecord]) { $_.Message } else { [string]$_ }
+            # An Az notice of a coming breaking change says nothing about the
+            # list, so it does not hold back a drop.
+            if ($_ -isnot [System.Management.Automation.ErrorRecord] -and [string]$Text -match '(?i)breaking change') { return }
             # The first line, at most 300 characters: what to fix, not the whole record.
             $Line = @(([string]$Text) -split "`r?`n" | Where-Object { $_.Trim() })[0]
             if ($null -eq $Line) { $Line = '' }
@@ -902,11 +907,16 @@ if ($ResumeFailedOnly)
         # The drop above emptied the retry list and no subscription is left that
         # no run has completed: nothing is owed, so the state is removed as at the
         # end of a clean run. Otherwise it would stay behind on every repeat.
-        if ($DroppedGoneEntries -and $NotReachedIds.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+        if ($DroppedGoneEntries -and $NotReachedIds.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
         {
             try
             {
-                Remove-Item -Path $ResumeStateFile -Force
+                Remove-Item -LiteralPath $ResumeStateFile -Force
+                # The per-stream files of an interrupted run were folded in at
+                # the start; left, the next -Resume would fold the gone entry
+                # back in.
+                # (Read at the start: this is a -ResumeFailedOnly run.)
+                foreach ($StreamFile in @($StrandedStreamFiles | Where-Object { $null -ne $_ })) { Remove-Item -LiteralPath $StreamFile.FullName -Force }
                 Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
             }
             catch
@@ -978,6 +988,9 @@ if (($Resume -or $ResumeFailedOnly) -and @($FailedAttempts | Where-Object { $nul
 # to skip the inaccessible ones and continue. On -Resume only the subscriptions
 # this run will actually process (not already-completed ones) are probed. Runs
 # once in the parent, before the sequential/parallel split, so it gates both.
+# Set by the check below; it does not run when nothing is left to probe, and
+# the end of the run reads it either way.
+$AccessDecision = $null
 $ScopeForProbe = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }) } else { @($Subscriptions) }
 if ($ScopeForProbe.Count -gt 0)
 {
@@ -1831,6 +1844,9 @@ else
             }
             # Reconcile failed attempts from all streams against the unified list.
             # See Merge-FailedAttempts for the recency/completion rules.
+            # A stream reads its own file, which can still hold an entry this
+            # run dropped as gone at the start (an interrupted run left it).
+            $AllFailedFromStreams = @($AllFailedFromStreams | Where-Object { $null -ne $_ -and $GoneIds -notcontains [string]$_.Id })
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $NotCompletedThisRun.Count -gt 0)
             {

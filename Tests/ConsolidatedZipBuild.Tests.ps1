@@ -609,6 +609,15 @@ Describe 'Run-AllSubscriptions.ps1: the inventory folder gone at the end of the 
         $R.Lines | Should -Contain ('FAILED (report missing): the inventory folder {0} is gone, with the report zips and the resume state that were in it, so no consolidated zip was built. The next run collects every subscription again.' -f $Gone)
     }
 
+    It 'a folder whose path holds brackets is not called gone: the run says the zip could not be built, and why, and exits 2' {
+        $Root = Join-Path $TestDrive 'inv[1]'
+        [void][System.IO.Directory]::CreateDirectory($Root)
+        $R = Invoke-EndOfRun -Root $Root -RunCount 2
+        $R.Code | Should -Be 2
+        @($R.Lines | Where-Object { $_ -like 'FAILED (report missing)*' }) | Should -BeNullOrEmpty
+        [System.IO.Directory]::Exists($Root) | Should -BeTrue
+    }
+
     It 'a run that expected no report zip keeps its exit code' {
         $R = Invoke-EndOfRun -Root (Join-Path $TestDrive 'folder-gone-none') -RunCount 0
         $R.Code | Should -Be 0

@@ -1762,7 +1762,17 @@ else
     # Every report zip the run expected went with the folder, so none of them
     # is in a consolidated zip: a FAILED line after the run summary, and exit
     # code 2 at the end, as for a consolidated zip that could not be built.
-    if ($ExpectedZipCount -gt 0) { $InventoryFolderGone = $true }
+    if ($ExpectedZipCount -gt 0)
+    {
+        # Test-Path reads [ and ] in the path as a wildcard, so a folder whose
+        # path holds them is "not found" though it is there: then its zips are
+        # all on disk, and the run says the zip could not be built, and why.
+        if ([System.IO.Directory]::Exists($InventoryRoot))
+        {
+            $BundleBuildError = ('Could not build the consolidated zip in {0}: its path holds [ or ], which the zip step cannot use. Set HOME to a folder without them and run again.' -f $InventoryRoot)
+        }
+        else { $InventoryFolderGone = $true }
+    }
 }
 
 # Aggregate "main" HTML summary across all per-subscription reports from

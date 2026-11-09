@@ -1530,6 +1530,19 @@ Describe 'Extension/Summary.ps1 reads a consumption file in a folder with bracke
         & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile $Html -Title 'T' -ConsumptionFile $Csv 6>$null | Out-Null
         [System.IO.File]::ReadAllText($Html) | Should -Match 'VM billing-coverage check'
     }
+
+    It 'counts a VM whose state is transient or empty as running in the VM billing check, as pricing does' {
+        $Dir = Join-Path $script:TmpRoot 'vm-states'
+        [void][System.IO.Directory]::CreateDirectory($Dir)
+        $Json = Join-Path $Dir 'Inventory_vms.json'
+        $Vms = @('{"Name":"vm1","Subscription":"S","PowerState":"vm running"}', '{"Name":"vm2","Subscription":"S","PowerState":"vm starting (transient)"}', '{"Name":"vm3","Subscription":"S","PowerState":""}', '{"Name":"vm4","Subscription":"S"}')
+        [System.IO.File]::WriteAllText($Json, ('{"Version":"3.2.3","VirtualMachines":[' + ($Vms -join ',') + ']}'))
+        $Csv = Join-Path $Dir 'Consumption_vms.csv'
+        [System.IO.File]::WriteAllLines($Csv, [string[]]@('MeterCategory,ResourceId', '"Virtual Machines","/x/vm1"'))
+        $Html = Join-Path $Dir 'r.html'
+        & (Join-Path $script:RepoRoot 'Extension/Summary.ps1') -JsonFile $Json -HtmlFile $Html -Title 'T' -ConsumptionFile $Csv 6>$null | Out-Null
+        [System.IO.File]::ReadAllText($Html) | Should -Match 'VM billing-coverage check'
+    }
 }
 
 Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at once' {

@@ -470,10 +470,11 @@ function Invoke-AzGraphQuerySafe
 
 # The total of a count probe (`... | summarize count()`) across every row of an
 # Invoke-AzGraphQuerySafe result: one row per subscription batch. 0 for none.
-# A row whose count_ is missing, null or not a whole number of 0 or more ends
-# the function with an error, as a failure in Invoke-AzGraphQuerySafe does,
-# instead of being read as 0, rounded or added as a negative number. An answer
-# with no rows at all is still 0. 'Stop' here for the same reason as there: the
+# A row that is null, or whose count_ is missing, null or not a whole number of
+# 0 or more, ends the function with an error, as a failure in
+# Invoke-AzGraphQuerySafe does, instead of being read as 0 (or skipped, which
+# counts too few), rounded or added as a negative number. An answer with no
+# rows at all is still 0. 'Stop' here for the same reason as there: the
 # inventory's SilentlyContinue would otherwise let the function go on past the
 # throw.
 function Get-AzGraphCount
@@ -481,9 +482,13 @@ function Get-AzGraphCount
     param([Parameter(Mandatory = $true)]$Result)
     $ErrorActionPreference = 'Stop'
     $Total = [long]0
-    foreach ($Row in @($Result.data))
+    # Not `$Rows = if ...`: a statement's output is unrolled, so a lone null
+    # row would come out as no rows at all.
+    $Rows = @()
+    if ($null -ne $Result.data) { $Rows = @($Result.data) }
+    foreach ($Row in $Rows)
     {
-        if ($null -eq $Row) { continue }
+        if ($null -eq $Row) { throw 'Resource Graph returned a count row that is null.' }
         $HasCount = if ($Row -is [System.Collections.IDictionary]) { $Row.Contains('count_') } else { $null -ne $Row.PSObject.Properties['count_'] }
         $Value = [long]0
         if (-not $HasCount -or $null -eq $Row.count_ -or -not [long]::TryParse([string]$Row.count_, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$Value) -or $Value -lt 0)

@@ -851,7 +851,10 @@ Function RunInventorySetup()
         # dictionary, each run with its own tokens, and counted them as the
         # run's own resources.
         $RunSubscriptionIds = if (![string]::IsNullOrEmpty($SubscriptionID)) { @([string]$SubscriptionID) } else { @($Global:Subscriptions | ForEach-Object { [string]$_.id }) }
-        $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()" -SubscriptionId $RunSubscriptionIds -HideRawOutput:$Obfuscate.IsPresent
+        # A -ResourceGroup run reads that group only, in lower case as
+        # ResourceInventoryLoop does, for the same reason.
+        $AVDGroupFilter = if (![string]::IsNullOrEmpty($ResourceGroup)) { " | where resourceGroup == '{0}'" -f $ResourceGroup.ToLower() } else { '' }
+        $AVDSize = Invoke-AzGraphQuerySafe -Query ("desktopvirtualizationresources{0} | summarize count()" -f $AVDGroupFilter) -SubscriptionId $RunSubscriptionIds -HideRawOutput:$Obfuscate.IsPresent
         $AVDSizeCount = Get-AzGraphCount -Result $AVDSize
 
         Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
@@ -860,7 +863,7 @@ Function RunInventorySetup()
         {
             # Every page, read with the skip token, sorted by the id in lower
             # case for the reason given above ResourceInventoryLoop.
-            $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by tolower(id) asc"
+            $GraphQuery = "desktopvirtualizationresources$AVDGroupFilter | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by tolower(id) asc"
             $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId $RunSubscriptionIds -Lowercase -HideRawOutput:$Obfuscate.IsPresent
 
             $Global:Resources += $AVD.data

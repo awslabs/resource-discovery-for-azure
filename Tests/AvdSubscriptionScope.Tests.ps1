@@ -11,7 +11,8 @@
 # other subscriptions' session hosts too. Their real ids went into each run's
 # obfuscation dictionary, each run gave them its own tokens (one resource with
 # a different token in every dictionary), and an empty subscription counted
-# them as its own resources.
+# them as its own resources. A -ResourceGroup run did the same with the other
+# resource groups of its subscription.
 #
 # The tests copy the script and its folders to a temp dir and run the REAL
 # ResourceInventory.ps1 -Obfuscate -Service AVD in a child pwsh with offline
@@ -41,6 +42,7 @@ $Global:RdaSessionInitialized = $true
 $Global:AzPowerShellLoaded = $true
 $Global:PlatformOS = 'PowerShell Unix'
 $Global:HCallLog = Join-Path $StateDir 'graph-calls.log'
+$Global:StandInScope = $Scope
 $SubA = '11111111-1111-1111-1111-111111111111'
 $SubB = '22222222-2222-2222-2222-222222222222'
 $Global:StandInSubs = @(
@@ -61,6 +63,12 @@ function global:Get-StandInHosts
     {
         @{ id = ('{0}/sessionhosts/{1}' -f (Get-StandInPoolId $P.Sub $P.Pool), $P.Host); name = ('{0}/{1}' -f $P.Pool, $P.Host); type = 'microsoft.desktopvirtualization/hostpools/sessionhosts'; location = 'eastus'; subscriptionId = $P.Sub; resourceGroup = 'rg-avd'; properties = @{ agentVersion = '1.0.0'; allowNewSession = $true; status = 'Available'; updateState = 'Succeeded' } }
     }
+    # A -ResourceGroup run's subscription also holds a session host in another
+    # resource group, which that run must not read.
+    if ($Global:StandInScope -eq 'ResourceGroupA')
+    {
+        @{ id = ('/subscriptions/{0}/resourcegroups/rg-other/providers/microsoft.desktopvirtualization/hostpools/hp-o/sessionhosts/sh-o.demo.local' -f $SubA); name = 'hp-o/sh-o.demo.local'; type = 'microsoft.desktopvirtualization/hostpools/sessionhosts'; location = 'eastus'; subscriptionId = $SubA; resourceGroup = 'rg-other'; properties = @{ agentVersion = '1.0.0'; allowNewSession = $true; status = 'Available'; updateState = 'Succeeded' } }
+    }
 }
 function global:Invoke-StandInGraph
 {
@@ -78,6 +86,13 @@ function global:Invoke-StandInGraph
     Add-Content -LiteralPath $Global:HCallLog -Value ('{0} subs={1}' -f $Table, (($Named | Sort-Object) -join ','))
     $Rows = @(if ($Table -eq 'avd') { Get-StandInHosts } else { Get-StandInPools })
     $Rows = @($Rows | Where-Object { $Named -contains $_.subscriptionId })
+    # A resource group filter in the query, as Resource Graph applies it.
+    if ($Joined -match "where resourceGroup == '([^']+)'")
+    {
+        $Group = $Matches[1]
+        if ($Table -eq 'avd') { Add-Content -LiteralPath $Global:HCallLog -Value ('avdgroup {0}' -f $Group) }
+        $Rows = @($Rows | Where-Object { $_.resourceGroup -ceq $Group })
+    }
     if ($Joined -match 'summarize count\(\)') { return ('{{"data":[{{"count_":{0}}}],"count":1}}' -f $Rows.Count) }
     return (@{ data = $Rows; count = $Rows.Count } | ConvertTo-Json -Depth 8 -Compress)
 }
@@ -174,10 +189,17 @@ Describe 'AVD session hosts follow the run''s subscription scope' {
         @($Run.RealIds | Where-Object { $_ -match '/sessionhosts/sh-a\.demo\.local$' }).Count | Should -Be 1
     }
 
-    It 'a -ResourceGroup run asks the AVD table for its subscription only' {
+    It 'a -ResourceGroup run asks the AVD table for its subscription and its resource group only' {
         $Run = Invoke-AvdScopeRun -Scope 'ResourceGroupA'
         $Run.ProcessExit | Should -Be 0 -Because $Run.Console
         @($Run.Calls | Where-Object { $_ -like 'avd *' -and $_ -ne ('avd subs={0}' -f $script:SubA) }) | Should -BeNullOrEmpty -Because ($Run.Calls -join '; ')
+        # Both AVD queries, the count and the page, name the group.
+        @($Run.Calls | Where-Object { $_ -like 'avd *' }).Count | Should -Be 2 -Because ($Run.Calls -join '; ')
+        @($Run.Calls | Where-Object { $_ -eq 'avdgroup rg-avd' }).Count | Should -Be 2 -Because ($Run.Calls -join '; ')
+        $Run.Console | Should -Match 'AVD Resources Output: 1 AVD Resources Identified'
+        $Run.DictCount | Should -Be 1
+        @($Run.RealIds | Where-Object { $_ -match '/resourcegroups/rg-other/' }) | Should -BeNullOrEmpty -Because 'a session host of another resource group is out of the run''s scope'
+        @($Run.RealIds | Where-Object { $_ -match '/sessionhosts/sh-a\.demo\.local$' }).Count | Should -Be 1
     }
 
     It 'a run over every subscription still asks the AVD table for all of them (control)' {

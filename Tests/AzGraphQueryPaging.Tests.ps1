@@ -96,6 +96,23 @@ Describe 'Invoke-AzGraphQuerySafe result shape' {
         { $ErrorActionPreference = 'SilentlyContinue'; Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, a String) that is not a whole number of 0 or more.'
     }
 
+    It 'stops on a row whose count_ is null, instead of reading it as 0' {
+        $Result = [pscustomobject]@{ data = @([pscustomobject]@{ count_ = 7 }, [pscustomobject]@{ count_ = $null }) }
+        { Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, null) that is not a whole number of 0 or more.'
+    }
+
+    It 'stops on a null count_ parsed from the Resource Graph answer' {
+        Mock -CommandName Invoke-AzRestMethod -MockWith { New-GraphResponse -Content '{"count":1,"data":[{"count_":null}],"resultTruncated":"false"}' }
+
+        $Result = Invoke-AzGraphQuerySafe -Query 'resources | summarize count()' -SubscriptionId $script:Sub
+        { $ErrorActionPreference = 'SilentlyContinue'; Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, null) that is not a whole number of 0 or more.'
+    }
+
+    It 'stops on a row that has no count_ property, instead of reading it as 0' {
+        $Result = [pscustomobject]@{ data = @([pscustomobject]@{ other = 7 }) }
+        { Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, missing) that is not a whole number of 0 or more.'
+    }
+
     It 'adds a whole number given as text' {
         Get-AzGraphCount -Result ([pscustomobject]@{ data = @([pscustomobject]@{ count_ = '12' }, [pscustomobject]@{ count_ = 3 }) }) | Should -Be 15
     }

@@ -176,6 +176,20 @@ Describe 'Get-WrapperExitCode' {
         # anything that only checks the exit code.
         Get-WrapperExitCode -AuthSkipped $true -CollectorsFailed $true | Should -Be 5 -Because 'neither failure signal may be silently dropped when both occur in the same run'
     }
+
+    It 'Returns 2 when a subscription failed, whatever else happened (a failed run is never reported as clean)' -ForEach @(
+        @{ Auth = $false; Collectors = $false }
+        @{ Auth = $true; Collectors = $false }
+        @{ Auth = $false; Collectors = $true }
+        @{ Auth = $true; Collectors = $true }
+    ) {
+        Get-WrapperExitCode -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $true | Should -Be 2
+    }
+
+    It 'Is 2 when the wrapper lists a failed subscription' {
+        $Text = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
+        $Text | Should -Match '\$WrapperExitCode = Get-WrapperExitCode [^\r\n]*-SubscriptionsFailed \(@\(\$FailedSubscriptions'
+    }
 }
 
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {

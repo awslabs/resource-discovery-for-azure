@@ -274,6 +274,8 @@ if ($FailSub)
         $Run.Console | Should -Not -Match 'ERROR processing subscription Sub B' -Because $Run.Console
         $Run.Console | Should -Match 'Completed subscription: Sub B'
         $Run.FailedIds | Should -Be @($script:SubA.Id)
+        # Sub A's report is missing, so the run is not reported as clean.
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
     It 'one stream: the subscription after one that ended with exit 1 in the same stream is not listed as failed' {
@@ -285,6 +287,7 @@ if ($FailSub)
         $Run.Console | Should -Match '\[stream-0\] done: Sub C'
         $Run.Console | Should -Match '\[stream-1\] done: Sub B'
         $Run.FailedIds | Should -Be @($script:SubA.Id)
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {
@@ -308,6 +311,7 @@ if ($FailSub)
         $Run = Invoke-CarryOverRun -Subs @($script:SubA) -Streams 2 -FailSub $script:SubA.Id
         $Run.Console | Should -Match 'ERROR processing subscription Sub A: Script exited with code 1'
         $Run.FailedIds | Should -Be @($script:SubA.Id)
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
     # With two streams the session runs no inventory itself, so only the

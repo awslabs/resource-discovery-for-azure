@@ -671,7 +671,8 @@ function Merge-FailedAttempts
 # independently, but the exit code itself must not lose information either -
 # same "do not sweep failures under the rug" requirement as everywhere else in
 # this fix). Distinct from the existing codes (1 = hard pre-flight / auth /
-# setup failure, 2 = per-subscription output verification gap, 0 = clean).
+# setup failure, 2 = a subscription failed or a per-subscription output
+# verification gap, 0 = clean).
 # Nothing inside this repo consumes the WRAPPER's exit code (it is the
 # top-level entrypoint); the inner ResourceInventory.ps1 exit code is left
 # UNCHANGED because the wrapper treats inner non-zero as "this whole
@@ -679,13 +680,18 @@ function Merge-FailedAttempts
 #
 # Priority logic pulled into its own function so it is independently
 # unit-testable (see Tests/RunAllSubscriptionsReconciliation.Tests.ps1) without
-# requiring a live wrapper run. Pure function: two booleans in, exit code out.
+# requiring a live wrapper run. Pure function: booleans in, exit code out.
 function Get-WrapperExitCode
 {
     param(
         [bool]$AuthSkipped,
-        [bool]$CollectorsFailed
+        [bool]$CollectorsFailed,
+        # A subscription failed this run (it is listed under Subscriptions
+        # Failed), so its report is missing: 2, which takes precedence over 3-5,
+        # and the run is never reported as clean.
+        [bool]$SubscriptionsFailed = $false
     )
+    if ($SubscriptionsFailed) { return 2 }
     if ($AuthSkipped -and $CollectorsFailed) { return 5 }
     if ($AuthSkipped) { return 3 }
     if ($CollectorsFailed) { return 4 }

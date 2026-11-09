@@ -414,6 +414,9 @@ $RunId = [guid]::NewGuid().ToString()
 $FailedSubscriptions = @()
 # The same failures for RunSummary.log: { Name; Id } for each subscription.
 $FailedSubscriptionDetail = @()
+# The checked Failed rows of the stream summaries ({ Id; Name; Reason }), for
+# the resume state when a stream could not write its own.
+$StreamSummaryFailed = @()
 # Streams whose summary file is missing or could not be read: { StreamId;
 # SubCount; Reason = 'Missing' or 'Unreadable' }. Their subscriptions are not
 # confirmed (exit 2), but they are not counted or named as failed
@@ -1446,6 +1449,7 @@ else
                     {
                         $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $f.Name, $S.StreamId, $f.Reason)
                         $FailedSubscriptionDetail += [pscustomobject]@{ Name = $f.Name; Id = $f.Id }
+                        $StreamSummaryFailed += $f
                     }
                     if ($null -ne $Read.ConsumptionRecords)
                     {
@@ -1572,6 +1576,17 @@ else
             if ($AllCompletedFromStreams.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
+            }
+            # A stream whose state file could not be written (Write-StreamState
+            # warns) still names the subscription in its summary's Failed rows.
+            # Its failure goes in the merge too, so -ResumeFailedOnly retries
+            # it, when no stream state holds that id.
+            $StreamStateFailedIds = @($AllFailedFromStreams | Where-Object { $_ } | ForEach-Object { [string]$_.Id })
+            foreach ($f in @($StreamSummaryFailed | Where-Object { $_ }))
+            {
+                if ($StreamStateFailedIds -contains [string]$f.Id) { continue }
+                $StreamStateFailedIds += [string]$f.Id
+                $AllFailedFromStreams += @(Add-FailedAttempt -Existing @($FailedAttempts | Where-Object { $_ -and $_.Id -eq $f.Id }) -Id $f.Id -Name $f.Name -Reason $f.Reason)
             }
             # Reconcile failed attempts from all streams against the unified list.
             # See Merge-FailedAttempts for the recency/completion rules.

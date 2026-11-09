@@ -238,6 +238,9 @@ for ($i = 0; $i -lt $PairCount; $i++)
         # leaves $LASTEXITCODE as it was: the `exit 1` of an earlier
         # subscription in this stream would mark this one failed.
         $global:LASTEXITCODE = 0
+        # Cleared too, so a run that ends before naming its zip cannot leave
+        # the previous subscription's zip as its own.
+        $Global:ZipOutputFile = $null
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
         # Only treat as failure if the inner script set a non-zero exit code.
         # Some completion paths in ResourceInventory.ps1 leave $LASTEXITCODE
@@ -250,7 +253,9 @@ for ($i = 0; $i -lt $PairCount; $i++)
         # in this stream worker's scope. The inner script resets $Global:Resources
         # to @() at the start of every invocation.
         $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-        $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount }
+        # Zip: the report zip this run wrote, which the wrapper's output
+        # verification looks for.
+        $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount; Zip = $Global:ZipOutputFile }
 
         if ($ResCount -eq 0)
         {

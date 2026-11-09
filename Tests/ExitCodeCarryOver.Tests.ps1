@@ -500,6 +500,22 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
+    It 'two streams: the zips of a stream whose summary could not be read do not hide the missing zip of a subscription that reported success' {
+        # Stream-0 (Sub A, Sub C) writes two zips but its summary cannot be
+        # read; stream 1 runs Sub B (one zip) but reports Sub X, which has no
+        # zip. Three zips for one success must not pass the check.
+        $SubX = [pscustomobject]@{ Name = 'Sub X'; Id = [guid]::new(('0' * 31) + 'e').ToString(); Count = 1 }
+        $Forged = [pscustomobject]@{ Status = 'ok'; ResourceCounts = @($SubX); Failed = @() } | ConvertTo-Json -Depth 5
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
+        $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'verification: OK' -Because $Run.Console
+        $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
+        $Run.Console | Should -Match ('(?m)^\s*- Sub X \({0}\) \[1 resources\]' -f [regex]::Escape($SubX.Id)) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.'))
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
     It 'two streams: the verification-gap stop does not count a stream with no summary file as a failed subscription' {
         # Stream 1 reports four subscriptions that worked; only three reports
         # are on disk, so the run stops at the output verification.

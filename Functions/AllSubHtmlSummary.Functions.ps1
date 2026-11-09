@@ -172,10 +172,38 @@ function New-BarChart
 # dot-sourced file), so it never has to dot-source or modify the per-subscription
 # report generator. See docs/design/main-html-summary.md.
 # =============================================================================
-# How file and folder names compare on this file system: exactly on Linux,
-# case aside on Windows and macOS (their default file systems ignore case).
+# How file and folder names compare where $Path is: case aside when the file
+# system there ignores case, else exactly. Found by looking for $Path (or the
+# nearest part of it that is there) under its name with the letter case
+# flipped, which reads nothing and writes nothing. Without a path, or when no
+# part of it has a letter, the system's default: exact on Linux, case aside on
+# Windows and macOS.
 function Get-RdaPathComparer
 {
+    param([string]$Path)
+    $Probe = $Path
+    while (-not [string]::IsNullOrEmpty($Probe))
+    {
+        if (Test-Path -LiteralPath $Probe)
+        {
+            $Leaf = Split-Path -Path $Probe -Leaf
+            $Flipped = -join @($Leaf.ToCharArray() | ForEach-Object { if ([char]::IsUpper($_)) { [char]::ToLowerInvariant($_) } else { [char]::ToUpperInvariant($_) } })
+            if ($Flipped -cne $Leaf)
+            {
+                $Parent = Split-Path -Path $Probe -Parent
+                $Twin = Join-Path $Parent $Flipped
+                # The flipped name finds an item where case is ignored. Where it
+                # is not, it finds one only if the folder holds a second item of
+                # exactly that name, which its listing shows.
+                $TwinListed = @([System.IO.Directory]::GetFileSystemEntries($Parent) | Where-Object { [System.IO.Path]::GetFileName($_) -ceq $Flipped }).Count -gt 0
+                $Same = (Test-Path -LiteralPath $Twin) -and -not $TwinListed
+                if ($Same) { return [System.StringComparer]::OrdinalIgnoreCase }
+                return [System.StringComparer]::Ordinal
+            }
+        }
+        $Parent = Split-Path -Path $Probe -Parent
+        $Probe = if ($Parent -eq $Probe) { $null } else { $Parent }
+    }
     if ($IsLinux) { return [System.StringComparer]::Ordinal }
     return [System.StringComparer]::OrdinalIgnoreCase
 }
@@ -254,12 +282,12 @@ function New-RdaAllSubHtmlSummary
     $AllowedFiles = $null
     if ($null -ne $ReportFiles)
     {
-        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), (Get-RdaPathComparer))
+        $AllowedFiles = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFiles) | Where-Object { $_ } | ForEach-Object { [string]$_ }), (Get-RdaPathComparer -Path $RunOutputDirectory))
     }
     # Only the folders -ReportFolders names, when given.
     if ($null -ne $ReportFolders)
     {
-        $Listed = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ }), (Get-RdaPathComparer))
+        $Listed = [System.Collections.Generic.HashSet[string]]::new([string[]]@(@($ReportFolders) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ }), (Get-RdaPathComparer -Path $RunOutputDirectory))
         $Folders = @($Folders | Where-Object { $Listed.Contains($_.Name) })
     }
     $SubReports = @()
@@ -559,7 +587,7 @@ function New-RdaAllSubHtmlSummaryFromZip
     if ($PackageZip)
     {
         $PlannedPackage = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/') + '.zip'
-        if ((Get-RdaPathComparer).Equals($PlannedPackage, $ZipItem.FullName))
+        if ((Get-RdaPathComparer -Path $ZipItem.FullName).Equals($PlannedPackage, $ZipItem.FullName))
         {
             throw ("New-RdaAllSubHtmlSummaryFromZip: -PackageZip would write {0}, which is -InputZip. Choose another -OutputDirectory." -f $PlannedPackage)
         }
@@ -592,11 +620,11 @@ function New-RdaAllSubHtmlSummaryFromZip
         $ReconstructedDirs = New-Object System.Collections.Generic.List[string]
         # Case aside: on Windows and macOS two names that differ only in case
         # are one folder.
-        $DestSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer))
+        $DestSeen = [System.Collections.Generic.HashSet[string]]::new((Get-RdaPathComparer -Path $OutputDirectory))
         # The files this call writes in each of those folders. A folder of the
         # same name may already hold other files (an earlier bundle's report, a
         # revealed copy); -PackageZip bundles only these files, never the rest.
-        $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer))
+        $WrittenFiles = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer -Path $OutputDirectory))
         foreach ($InnerZip in $InnerZips)
         {
             # Folder named after the inner zip base (ResourcesReport_<stamp>), which

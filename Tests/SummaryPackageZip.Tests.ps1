@@ -425,3 +425,29 @@ Describe 'Build-MainSummaryFromZip -PackageZip when the bundle cannot be written
         @(Get-ChildItem -LiteralPath $script:TmpRoot -File | Where-Object { $_.Name -like 'pkg_fail.zip.rda-*.partial' }) | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Get-RdaPathComparer: the case behaviour of the file system where a path is' {
+    BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
+
+    It 'compares exactly where the file system keeps case apart (a twin name finds nothing)' {
+        $Dir = Join-Path $TestDrive 'CaseProbe'
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        Mock Test-Path { $LiteralPath -ceq $Dir -or $LiteralPath -ceq (Split-Path $Dir -Parent) }
+        (Get-RdaPathComparer -Path $Dir).Equals('A', 'a') | Should -BeFalse
+    }
+
+    It 'compares case aside where the file system ignores case (the twin name finds the same folder, which is listed once)' {
+        $Dir = Join-Path $TestDrive 'CaseProbe2'
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        # What a case-insensitive mount answers for the flipped name.
+        Mock Test-Path { $true }
+        (Get-RdaPathComparer -Path $Dir).Equals('A', 'a') | Should -BeTrue
+    }
+
+    It 'compares exactly where two items differ only in case (the twin is a second item)' {
+        $Dir = Join-Path $TestDrive 'Twin'
+        New-Item -ItemType Directory -Path $Dir, (Join-Path $TestDrive 'tWIN') -Force | Out-Null
+        if (@(Get-ChildItem -LiteralPath $TestDrive -Directory | Where-Object { $_.Name -ieq 'twin' }).Count -lt 2) { Set-ItResult -Skipped -Because 'this file system ignores case' }
+        (Get-RdaPathComparer -Path $Dir).Equals('A', 'a') | Should -BeFalse
+    }
+}

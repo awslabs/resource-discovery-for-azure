@@ -646,13 +646,15 @@ if ($Task -eq 'Processing')
                                 catch
                                 {
                                     $LastError = $_.Exception.Message
-                                    if ($LastError -match '429|throttl|TooManyRequests|rate limit')
-                                    {
-                                        $Throttled = $true
-                                    }
-                                    elseif ($StopOnBadRequest)
+                                    # Check BadRequest first: a 400 message can hold '429'
+                                    # inside an id and must not be retried as throttled.
+                                    if ($StopOnBadRequest)
                                     {
                                         $BadRequest = Test-MetricBadRequest -Exception $_.Exception
+                                    }
+                                    if (-not $BadRequest -and $LastError -match '429|throttl|TooManyRequests|rate limit')
+                                    {
+                                        $Throttled = $true
                                     }
                                 }
                                 finally

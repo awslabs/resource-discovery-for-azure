@@ -9,7 +9,8 @@
 #   - a metric requested with the 'Count' aggregation is read from each data
 #     point's Count, not from the number of data points;
 #   - a group that Azure rejects with BadRequest is not retried and falls back to
-#     one call per metric, so only the invalid metric is marked as an error;
+#     one call per metric, so only the invalid metric is marked as an error,
+#     also when its message holds '429' inside an id;
 #   - a group that fails for another reason (throttling, server error) is retried
 #     and does not fall back to one call per metric;
 #   - one call never asks for more than 20 metric names;
@@ -96,6 +97,7 @@ function Get-AzMetric
     {
         'BadRequest' { throw "Operation returned an invalid status code 'BadRequest'" }
         'Status400' { throw [System.Net.Http.HttpRequestException]::new('The request was rejected.', $null, [System.Net.HttpStatusCode]::BadRequest) }
+        'Status400With429' { throw [System.Net.Http.HttpRequestException]::new('Metric is not supported for resource 7f3a4290-1c2d-4e5f-8a9b-0c1d2e3f4a5b.', $null, [System.Net.HttpStatusCode]::BadRequest) }
         'Status500Wrapping400' { throw [System.Net.Http.HttpRequestException]::new('The server failed.', [System.Net.Http.HttpRequestException]::new('The request was rejected.', $null, [System.Net.HttpStatusCode]::BadRequest), [System.Net.HttpStatusCode]::InternalServerError) }
         'Status500Wrapping503' { throw [System.Net.Http.HttpRequestException]::new('The server failed.', [System.Net.Http.HttpRequestException]::new('The service is unavailable.', $null, [System.Net.HttpStatusCode]::ServiceUnavailable), [System.Net.HttpStatusCode]::InternalServerError) }
         'ServerError' { throw "Operation returned an invalid status code 'InternalServerError'" }
@@ -462,6 +464,21 @@ Describe 'Metrics.ps1 fallback when Azure rejects a grouped request' {
 
     It 'recognises BadRequest from the status code when the message does not name it' {
         $Run = Invoke-MetricsRun -Resources @($script:Disk) -RunName 'fallback-status400' -MultiError 'Status400'
+
+        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 4 }).Count | Should -Be 1
+        @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 1 }).Count | Should -Be 4
+        $CleanMap = ConvertTo-RecordMap -Records $script:Clean.Records
+        $RunMap = ConvertTo-RecordMap -Records $Run.Records
+        @($RunMap.Keys | Sort-Object) | Should -Be @($CleanMap.Keys | Sort-Object)
+        foreach ($Key in $CleanMap.Keys)
+        {
+            $RunMap[$Key] | Should -Be $CleanMap[$Key]
+        }
+    }
+
+    It 'falls back per metric when a grouped BadRequest message holds 429 inside an id' {
+        # The 400 names no throttling; '429' is only part of a GUID in its message.
+        $Run = Invoke-MetricsRun -Resources @($script:Disk) -RunName 'fallback-status400-429' -MultiError 'Status400With429'
 
         @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 4 }).Count | Should -Be 1
         @($Run.Calls | Where-Object { @($_.MetricName).Count -eq 1 }).Count | Should -Be 4

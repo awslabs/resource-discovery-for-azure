@@ -1588,6 +1588,21 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at o
         @(Get-ZipEntryNames -ZipPath ($Out + '.zip') | Where-Object { $_ -like '*rda-rebuild*' }) | Should -BeNullOrEmpty
     }
 
+    It 'removes the lock file of a folder it made while it still holds the lock (Linux and macOS)' -Skip:($IsWindows) {
+        $Out = Join-Path $script:TmpRoot 'held-while-removed'
+        $script:HeldAtRemoval = $null
+        Mock Move-RdaFile { throw 'disk full' }
+        Mock Clear-RdaLeftover -ParameterFilter { $Path -like '*.rda-rebuild.lock' } -MockWith {
+            # Another caller tries to take the lock now: it must still be held.
+            try { $Probe = [System.IO.File]::Open($Path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None); $Probe.Dispose(); $script:HeldAtRemoval = $false }
+            catch { $script:HeldAtRemoval = $true }
+            Remove-Item -LiteralPath $Path -Force
+        }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*disk full*'
+        $script:HeldAtRemoval | Should -BeTrue
+        Test-Path -LiteralPath $Out | Should -BeFalse
+    }
+
     It 'removes a folder it made, lock file included, when the rebuild fails' {
         $Out = Join-Path $script:TmpRoot 'made-then-failed'
         Mock Move-RdaFile { throw 'disk full' }

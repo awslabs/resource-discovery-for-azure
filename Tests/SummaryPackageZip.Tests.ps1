@@ -1563,6 +1563,40 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at o
         @(Get-ChildItem -LiteralPath $Out -Recurse -Force | Where-Object { $_.Name -like '*.rda-*' }) | Should -BeNullOrEmpty
     }
 
+    It 'is refused while another caller holds the lock file in the folder itself, whatever its user or temp folder' {
+        $Out = Join-Path $script:TmpRoot 'held-in-folder'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Out 'kept.txt') -Value 'mine' -NoNewline
+        $Held = [System.IO.File]::Open((Join-Path $Out '.rda-rebuild.lock'), [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try
+        {
+            { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*another rebuild is writing into*'
+        }
+        finally { $Held.Dispose() }
+        @(Get-ChildItem -LiteralPath $Out -Force | Where-Object { $_.Name -ne '.rda-rebuild.lock' } | ForEach-Object { $_.Name }) | Should -Be @('kept.txt')
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Not -Throw
+    }
+
+    It 'leaves no lock file in the folder after a rebuild' {
+        $Out = Join-Path $script:TmpRoot 'no-lock-left'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null
+        Test-Path -LiteralPath (Join-Path $Out '.rda-rebuild.lock') | Should -BeFalse
+    }
+
+    It 'names the real cause, not another rebuild, when the lock cannot be taken for another reason' -Skip:($IsWindows -or [Environment]::UserName -eq 'root') {
+        $Out = Join-Path $script:TmpRoot 'not-writable'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        & chmod 555 $Out
+        try
+        {
+            $Message = $null
+            try { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null } catch { $Message = $_.Exception.Message }
+            $Message | Should -BeLike '*could not take the rebuild lock*'
+            $Message | Should -Not -BeLike '*another rebuild*'
+        }
+        finally { & chmod 755 $Out }
+    }
+
     It 'lets the next rebuild in after one that failed part-way' {
         $Out = Join-Path $script:TmpRoot 'after-a-failure'
         Mock Move-RdaFile { throw 'disk full' }

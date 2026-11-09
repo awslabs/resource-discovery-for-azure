@@ -25,7 +25,10 @@
     the new file of its name. A run killed outright (power loss, a killed
     process) can leave such files with no message. Nothing reads them: delete a
     .partial file, and use a .bak file in place of the file of its name
-    without the .rda-<id>.bak end.
+    without the .rda-<id>.bak end. A report whose zip holds no html gets one
+    rendered as <folder>.html; a file of that name already in the folder is
+    replaced only when the render works, so running the rebuild again keeps
+    one html per report.
 
 .PARAMETER InputZip
     Path to the consolidated AllSubscriptions_ResourcesReport_*.zip.

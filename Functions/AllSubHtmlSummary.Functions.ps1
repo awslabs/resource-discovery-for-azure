@@ -255,6 +255,8 @@ function Get-RdaOnDiskName
 # as PowerShell and .NET fold it for every write this module makes.
 # PowerShell 7.0/7.1 (.NET before 6) cannot read a link's target: there a
 # path with a link in it stops (throws) instead, since it cannot be compared.
+# shortcut: on 7.0/7.1 on macOS that refuses -PackageZip under /tmp and /var
+# (links to /private/...); fine while 7.0/7.1 are out of support.
 $script:RdaCanResolveLinks = [bool]([System.IO.FileSystemInfo].GetMethod('ResolveLinkTarget'))
 function Get-RdaPhysicalPath
 {
@@ -1062,35 +1064,50 @@ function New-RdaAllSubHtmlSummaryFromZip
                 $Mine = @($WrittenFiles[$SubDir.FullName] | Where-Object { $_ } | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } | Where-Object { $_ })
                 $InvJson = $Mine | Where-Object { $_.Name -like 'Inventory_*.json' } | Select-Object -First 1
                 if ($null -eq $InvJson) { continue }
-                # Overwrite the html this call wrote in place (single html per
-                # folder keeps the summary's link stable). With none, a new
-                # name: one free in the folder, so a file already there (not
-                # from -InputZip) is never overwritten, linked or bundled.
+                # Replace the html this call wrote (single html per folder keeps
+                # the summary's link stable); with none, <folder>.html. A file
+                # of that name already there is replaced only by a good render
+                # (moved aside, and put back if the move in fails), and is
+                # listed for the summary and the bundle only once replaced.
                 $ExistingHtml = $Mine | Where-Object { $_.Name -like '*.html' -and $_.Name -notlike '*_revealed*' } | Select-Object -First 1
-                if ($null -ne $ExistingHtml) { $TargetHtml = $ExistingHtml.FullName }
-                else
-                {
-                    $TargetHtml = Join-Path $SubDir.FullName ($SubDir.Name + '.html')
-                    for ($N = 1; Test-Path -LiteralPath $TargetHtml; $N++) { $TargetHtml = Join-Path $SubDir.FullName ('{0}-{1}.html' -f $SubDir.Name, $N) }
-                }
-                # Rendered to a private name beside it and moved over the html
-                # only when it worked, so a failed render keeps the original.
+                $TargetHtml = if ($null -ne $ExistingHtml) { $ExistingHtml.FullName } else { Join-Path $SubDir.FullName ($SubDir.Name + '.html') }
+                # Rendered to a private name beside it and moved in only when
+                # it worked, so a failed render keeps the original.
                 $RenderPartial = '{0}.rda-{1}.partial' -f $TargetHtml, [guid]::NewGuid().ToString('N')
+                $RenderBackup = $null
                 try
                 {
                     & $SummaryScript -JsonFile $InvJson.FullName -HtmlFile $RenderPartial -Title 'Azure Resource Inventory' -Version $Version -PlatOS $PlatOS *> $null
-                    [System.IO.File]::Move($RenderPartial, $TargetHtml, $true)
+                    if (Test-Path -LiteralPath $TargetHtml)
+                    {
+                        $RenderBackup = '{0}.rda-{1}.bak' -f $TargetHtml, [guid]::NewGuid().ToString('N')
+                        Move-RdaFile -Path $TargetHtml -Destination $RenderBackup
+                    }
+                    try { Move-RdaFile -Path $RenderPartial -Destination $TargetHtml }
+                    catch
+                    {
+                        if ($RenderBackup)
+                        {
+                            # Put back; one that cannot be is kept and named, never removed.
+                            try { Move-RdaFile -Path $RenderBackup -Destination $TargetHtml -Overwrite }
+                            catch { Write-Warning ('{0} is the earlier html; it could not be put back as {1}: rename it.' -f $RenderBackup, $TargetHtml) }
+                            $RenderBackup = $null
+                        }
+                        throw
+                    }
                     # Listed only once it is written.
                     if (-not $WrittenFiles[$SubDir.FullName].Contains($TargetHtml)) { $WrittenFiles[$SubDir.FullName].Add($TargetHtml) }
                     $ReRendered++
                 }
                 catch
                 {
-                    Write-Host ("  Re-render skipped for {0} (kept original): {1}" -f $SubDir.Name, $_.Exception.Message) -ForegroundColor Yellow
+                    $Kept = if ($null -ne $ExistingHtml) { 'kept original' } else { 'no html for this report' }
+                    Write-Host ("  Re-render skipped for {0} ({1}): {2}" -f $SubDir.Name, $Kept, $_.Exception.Message) -ForegroundColor Yellow
                 }
                 finally
                 {
                     Clear-RdaLeftover -Path $RenderPartial
+                    if ($RenderBackup) { Clear-RdaLeftover -Path $RenderBackup }
                 }
             }
             Write-Host ("Re-rendered {0} per-subscription report(s) with the current renderer." -f $ReRendered) -ForegroundColor Green

@@ -544,6 +544,31 @@ Describe 'Retry limit on the parallel path' {
         @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty
     }
 
+    It 'keeps the per-stream files of a parallel run when the resume state does not hold their records afterwards' {
+        $Global:RdaRlFailIds = @('sub-x')
+        Mock Save-CompletedSubscriptionIds { }
+        $R = script:Invoke-Run -Subs @($script:A, $script:B, $script:X) -Streams 2
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't').Count | Should -BeGreaterThan 0
+        @(script:Get-Lines -Run $R -Like "WARNING: The resume state file * does not hold every record of this run's per-stream files*").Count | Should -Be 1
+    }
+
+    It 'with a per-stream file it cannot read, -ResumeFailedOnly names it and ends with exit 2, not a clean exit 0' {
+        $Global:RdaRlFailIds = @()
+        $null = script:Invoke-Run -Subs @($script:A, $script:B)
+        New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
+        $Bad = Join-Path $script:Root '.resume-state-t-stream-0.json'
+        Set-Content -LiteralPath $Bad -Value '{ not json' -NoNewline
+        $R = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
+        @(script:Get-Lines -Run $R -Like ('WARNING: Could not read the per-stream resume state file {0}*' -f $Bad)).Count | Should -Be 1
+        $R.ExitCode | Should -Be 2
+        Test-Path -LiteralPath $Bad | Should -BeTrue
+        # A run without either switch removes it, and the next -ResumeFailedOnly is clean.
+        $null = script:Invoke-Run -Subs @($script:A, $script:B)
+        Test-Path -LiteralPath $Bad | Should -BeFalse
+        $R3 = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
+        $R3.ExitCode | Should -Be 0
+    }
+
     It 'counts a run whose streams failed it before the session ended once, not twice' {
         $Global:RdaRlFailIds = @('sub-x')
         $Subs = @($script:A, $script:B, $script:X)

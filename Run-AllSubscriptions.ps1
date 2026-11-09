@@ -741,6 +741,12 @@ $NotReadableIds = @(Get-NotReadableSubscriptionIds -Path $ResumeStateFile -Tenan
 $IdsWithoutReports = if (Test-ResumeStateWithoutReports -Path $ResumeStateFile -Tenant $TenantID) { @($CompletedIds) } else { @() }
 
 # Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
+# Per-stream resume state files that could not be read, at the start or in the
+# end-of-run merge. Their records are not used, so the run is not clean while
+# one is there: it keeps the state and ends with exit 2, and it names each file
+# with what to do (fix or delete it; a run without -Resume or -ResumeFailedOnly
+# removes it).
+$UnreadableStreamFiles = @()
 # A parallel run persists each stream's Completed/FailedAttempts to its own
 # .resume-state-<tenant>-stream-<N>.json and only merges them into the unified
 # file at end-of-run. If that run was killed before the merge (Ctrl+C, SIGKILL,
@@ -779,7 +785,8 @@ if ($Resume -or $ResumeFailedOnly)
             }
             catch
             {
-                Write-Verbose ("Could not read stranded stream resume file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message)
+                $UnreadableStreamFiles += $StreamFile.FullName
+                Write-Host ("WARNING: Could not read the per-stream resume state file {0} of an interrupted run: {1} Its records are not used, so this run keeps the resume state and ends with exit 2. Fix or delete the file; a run without -Resume or -ResumeFailedOnly removes it." -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Yellow
             }
         }
         if ($StrandedCompleted.Count -gt 0)
@@ -942,7 +949,7 @@ if ($ResumeFailedOnly)
         # The drop above emptied the retry list and no subscription is left that
         # no run has completed: nothing is owed, so the state is removed as at the
         # end of a clean run. Otherwise it would stay behind on every repeat.
-        if ($DroppedGoneEntries -and $NotReachedIds.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
+        if ($DroppedGoneEntries -and $NotReachedIds.Count -eq 0 -and $UnreadableStreamFiles.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
         {
             try
             {
@@ -956,7 +963,9 @@ if ($ResumeFailedOnly)
                 Write-Host ("WARNING: Could not remove resume state file {0}: {1}" -f $ResumeStateFile, $_.Exception.Message) -ForegroundColor Yellow
             }
         }
-        Exit-Wrapper -Code $(if ($NotReachedIds.Count -gt 0) { 2 } else { 0 })
+        # A per-stream state file that could not be read may hold failures
+        # (named above): the run is not clean while it is there.
+        Exit-Wrapper -Code $(if ($NotReachedIds.Count -gt 0 -or $UnreadableStreamFiles.Count -gt 0) { 2 } else { 0 })
     }
     $FailedIds = @($FailedAttempts | ForEach-Object { $_.Id })
     $BeforeCount = $Subscriptions.Count
@@ -1847,12 +1856,15 @@ else
             $AllCompletedFromStreams = @()
             $AllFailedFromStreams = @()
             $AllReportsFromStreams = @()
+            # The files read: only these are removed, once their records are saved.
+            $MergedStreamFiles = @()
             foreach ($StreamFile in $AllStreamFiles)
             {
                 $PerStreamFile = $StreamFile.FullName
                 try
                 {
-                    $Obj = Get-Content -Path $PerStreamFile -Raw | ConvertFrom-Json
+                    $Obj = Get-Content -LiteralPath $PerStreamFile -Raw | ConvertFrom-Json
+                    $MergedStreamFiles += $StreamFile
                     if ($null -ne $Obj.Completed)
                     {
                         $AllCompletedFromStreams += @($Obj.Completed)
@@ -1875,7 +1887,8 @@ else
                 }
                 catch
                 {
-                    Write-Verbose ("Could not read stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message)
+                    $UnreadableStreamFiles += $PerStreamFile
+                    Write-Host ("WARNING: Could not read the per-stream resume state file {0}: {1} Its records are not used, so this run keeps the resume state and ends with exit 2. Fix or delete the file; a run without -Resume or -ResumeFailedOnly removes it." -f $PerStreamFile, $_.Exception.Message) -ForegroundColor Yellow
                 }
             }
             if ($AllCompletedFromStreams.Count -gt 0)
@@ -1906,16 +1919,28 @@ else
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
             }
-            # Also delete per-stream resume files now that the unified file holds
-            # the truth - this prevents drift if a future run uses a different
-            # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
-            # as the merge loop above, so every file that was just merged is also
-            # the one that gets cleaned up here - regardless of this run's
-            # -ParallelStreams value.
-            foreach ($StreamFile in $AllStreamFiles)
+            # Also delete the per-stream resume files that were read, once the
+            # unified file on disk holds their records (read back: a completed id
+            # is completed, on the retry list or not completed this run; a failure
+            # is on the retry list, completed, or dropped as gone). This prevents
+            # drift if a future run uses a different stream count. A file that
+            # could not be read, or whose records are not all saved, is kept and
+            # named, so a later run can fold it in.
+            $SavedCompleted = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            $SavedFailed = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
+            $Accounted = @($SavedCompleted + $SavedFailed + @($NotCompletedThisRun | ForEach-Object { [string]$_ }) + @(Get-Variable -Name GoneIds -ValueOnly -ErrorAction SilentlyContinue | ForEach-Object { [string]$_ }))
+            $NotSaved = @(@($AllCompletedFromStreams | Where-Object { $_ -and $Accounted -notcontains [string]$_ }) + @($AllFailedFromStreams | Where-Object { $null -ne $_ -and $Accounted -notcontains [string]$_.Id }))
+            if ($NotSaved.Count -eq 0)
             {
-                $PerStreamFile = $StreamFile.FullName
-                try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+                foreach ($StreamFile in $MergedStreamFiles)
+                {
+                    $PerStreamFile = $StreamFile.FullName
+                    try { Remove-Item -LiteralPath $PerStreamFile -Force -ErrorAction Stop } catch { Write-Host ("WARNING: Could not remove the per-stream resume state file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) -ForegroundColor Yellow }
+                }
+            }
+            else
+            {
+                Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($MergedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow
             }
         }
         finally
@@ -2181,7 +2206,7 @@ $RetryLimitedOwed = @($RetryLimited | Where-Object { $RetryLimitedNotInRunIds -c
 # or when they are no longer visible. ResourceInventory.ps1 run on its own does
 # not read or write the state.
 $RetryOwedCount = @($FailedAttempts | Where-Object { $null -ne $_ }).Count
-if ($FailedSubscriptions.Count -eq 0 -and $RetryOwedCount -eq 0 -and $NotCollected.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $RetryOwedCount -eq 0 -and $NotCollected.Count -eq 0 -and $UnreadableStreamFiles.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
     {
@@ -2626,7 +2651,7 @@ if ($WrapperTranscriptStarted)
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing ((@($UncarriedSkipped).Count -gt 0) -or (@($RetryLimitedOwed).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing ((@($UncarriedSkipped).Count -gt 0) -or (@($RetryLimitedOwed).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
 if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode

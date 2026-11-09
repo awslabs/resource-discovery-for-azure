@@ -203,10 +203,10 @@ Describe 'Get-WrapperExitCode' {
         if ($null -eq $Also) { $Lines.Count | Should -Be 1 } else { $Lines.Count | Should -Be 2; $Lines[1] | Should -BeExactly $Also }
     }
 
-    It 'Is 2 when the wrapper lists a failed subscription' {
-        $Text = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
-        $Text | Should -Match '\$WrapperExitCode = Get-WrapperExitCode [^\r\n]*-SubscriptionsFailed \(@\(\$FailedSubscriptions'
-    }
+    # That the wrapper passes its failed subscriptions in is tested by running
+    # it, in Tests/ExitCodeCarryOver.Tests.ps1: sequential, one subscription
+    # with -ParallelStreams, a failed subscription in a stream, and a stream
+    # summary the wrapper cannot read.
 }
 
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {

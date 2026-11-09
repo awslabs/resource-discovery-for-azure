@@ -214,9 +214,21 @@ Function RunInventorySetup()
 
     function CheckCliRequirements()
     {
+        # An earlier run in this session loaded the modules. Skip the checks
+        # only when the lowest loaded Az.Accounts is still the supported
+        # version: an older build of the tool may have loaded an older one.
+        # Get-Module without -ListAvailable reads the session only, so this
+        # stays cheap. Otherwise the full check below runs and stops the run.
         if ($Global:AzPowerShellLoaded)
         {
-            return
+            $LoadedAzAccounts = @(Get-Module -Name Az.Accounts -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -and $_.Version } |
+                    ForEach-Object { [version]$_.Version } |
+                    Sort-Object) | Select-Object -First 1
+            if ($LoadedAzAccounts -and $LoadedAzAccounts -ge (Get-RdaAzAccountsMinimumVersion))
+            {
+                return
+            }
         }
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'

@@ -191,6 +191,8 @@ $Global:PlatformOS = 'PowerShell Unix'
 $Global:AzvCallLog = $CallLog
 $Global:AzvInstalled = @($Installed -split ',' | Where-Object { $_ })
 $Global:AzvLoaded = $Loaded
+# AZV_PRELOADED: an earlier run in this session already loaded the Az modules.
+if ($env:AZV_PRELOADED) { $Global:AzPowerShellLoaded = $true }
 
 function global:Get-Module
 {
@@ -265,7 +267,7 @@ exit $LASTEXITCODE
 
         function Invoke-AzvRun
         {
-            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails', [string]$ImportLoads = '', [string]$ImportMin = '')
+            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails', [string]$ImportLoads = '', [string]$ImportMin = '', [switch]$Preloaded)
             $Name = [guid]::NewGuid().ToString('N')
             $Out = Join-Path $script:WorkDir ('out_' + $Name)
             New-Item -ItemType Directory -Path $Out -Force | Out-Null
@@ -276,6 +278,7 @@ exit $LASTEXITCODE
             $env:AZV_INSTALL = $Install
             $env:AZV_IMPORT_LOADS = $ImportLoads
             $env:AZV_IMPORT_MIN = $ImportMin
+            $env:AZV_PRELOADED = if ($Preloaded) { '1' } else { '' }
             $Pwsh = Join-Path $PSHOME 'pwsh'
             try
             {
@@ -299,6 +302,7 @@ exit $LASTEXITCODE
                 Remove-Item Env:AZV_INSTALL -ErrorAction SilentlyContinue
                 Remove-Item Env:AZV_IMPORT_LOADS -ErrorAction SilentlyContinue
                 Remove-Item Env:AZV_IMPORT_MIN -ErrorAction SilentlyContinue
+                Remove-Item Env:AZV_PRELOADED -ErrorAction SilentlyContinue
             }
             $Calls = if (Test-Path -LiteralPath $CallLog) { @(Get-Content -LiteralPath $CallLog) } else { @() }
             [pscustomobject]@{
@@ -345,6 +349,24 @@ exit $LASTEXITCODE
         $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.4' -Loaded '5.5.3'
 
         $Run.ExitCode | Should -Be 1
+        $Run.AzureCalls | Should -BeNullOrEmpty
+        $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+        $Run.Output | Should -Match 'new PowerShell session'
+    }
+
+    It 'direct run, Az modules already loaded by an earlier run in the session: goes on without loading them again when the loaded Az.Accounts is 5.5.4' {
+        $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.4' -Loaded '5.5.4' -Preloaded
+
+        $Run.ExitCode | Should -Be 7 -Because 'the run goes on to the sign-in'
+        $Run.Imports | Should -BeNullOrEmpty -Because 'the modules are already loaded'
+    }
+
+    It 'direct run, Az modules already loaded by an earlier run in the session: stops with exit 1 when the loaded Az.Accounts is older' {
+        # An older build of the tool loaded Az.Accounts 5.5.3 earlier in the
+        # same session, then the checkout was updated and run again.
+        $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.4' -Loaded '5.5.3' -Preloaded
+
+        $Run.ExitCode | Should -Be 1 -Because $Run.Output
         $Run.AzureCalls | Should -BeNullOrEmpty
         $Run.Output | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
         $Run.Output | Should -Match 'new PowerShell session'

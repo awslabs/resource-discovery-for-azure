@@ -417,6 +417,8 @@ $FailedSubscriptionDetail = @()
 # The checked Failed rows of the stream summaries ({ Id; Name; Reason }), for
 # the resume state when a stream could not write its own.
 $StreamSummaryFailed = @()
+# The ids of their checked success rows (ResourceCounts), for the same reason.
+$StreamSummaryCompletedIds = @()
 # Streams whose summary file is missing or could not be read: { StreamId;
 # SubCount; Reason = 'Missing' or 'Unreadable' }. Their subscriptions are not
 # confirmed (exit 2), but they are not counted or named as failed
@@ -1445,6 +1447,7 @@ else
                     # All of the stream's values are added together, after
                     # they are all read.
                     $SubResourceCounts += @($Read.ResourceCounts)
+                    $StreamSummaryCompletedIds += @($Read.ResourceCounts | ForEach-Object { [string]$_.Id })
                     foreach ($f in @($Read.Failed))
                     {
                         $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $f.Name, $S.StreamId, $f.Reason)
@@ -1577,6 +1580,16 @@ else
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
             }
+            # The same stream still names a subscription that worked in its
+            # summary's success rows. Its id goes in the completed set too, so
+            # its old failure entry is cleared and -ResumeFailedOnly does not
+            # run it again. A success row is this run's outcome for that id,
+            # so it also wins over a failure an older stream state still holds.
+            $SummaryCompletedIds = @($StreamSummaryCompletedIds | Where-Object { $_ -and $AllCompletedFromStreams -notcontains $_ })
+            if ($SummaryCompletedIds.Count -gt 0)
+            {
+                $CompletedIds = @($CompletedIds + $SummaryCompletedIds | Sort-Object -Unique)
+            }
             # A stream whose state file could not be written (Write-StreamState
             # warns) still names the subscription in its summary's Failed rows.
             # Its failure goes in the merge too, so -ResumeFailedOnly retries
@@ -1592,7 +1605,7 @@ else
             # See Merge-FailedAttempts for the recency/completion rules.
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             $UnifiedStateSaved = $true
-            if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
+            if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $SummaryCompletedIds.Count -gt 0)
             {
                 $UnifiedStateSaved = Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -PassThru
             }

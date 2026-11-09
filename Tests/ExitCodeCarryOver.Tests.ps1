@@ -139,6 +139,9 @@ function Connect-AzAccount { [CmdletBinding()] param($Tenant, [switch]$UseDevice
 function Get-AzAccessToken
 {
     [CmdletBinding()] param($TenantId, $ResourceUrl, [switch]$AsSecureString, $ResourceTypeName)
+    # With ConsumptionTokenFail, the token check before the consumption phase
+    # gets no token, so that phase is skipped for sign-in (the '(auth)' row).
+    if ((Get-RdaStandInScenario).ConsumptionTokenFail -and @(Get-PSCallStack | Where-Object { $_.FunctionName -eq 'Test-DataPlaneAuthReady' }).Count -gt 0) { throw 'stand-in: no token for the consumption phase' }
     $Claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"oid":"stand-in-caller"}')).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     $Tenant = if ($TenantId) { [string]$TenantId } else { (Get-RdaStandInScenario).Tenant }
     [pscustomobject]@{ Token = ('e30.{0}.c2ln' -f $Claims); Type = 'Bearer'; ExpiresOn = (Get-Date).AddHours(1); TenantId = $Tenant }
@@ -209,7 +212,10 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
 '@ | Set-Content -LiteralPath (Join-Path $script:Tool 'Services/Networking/StandInCollector.ps1') -Encoding utf8
 
         $script:Modules = Join-Path $script:WorkDir 'modules'
-        foreach ($Module in @(@{ Name = 'Az.Accounts'; Body = $Accounts }, @{ Name = 'Az.Compute'; Body = $Compute }, @{ Name = 'Az.Monitor'; Body = '' }, @{ Name = 'Az.Billing'; Body = '' }))
+        # Az.Billing answers the wrapper's up-front consumption access check
+        # (runs without -SkipConsumption only): access is confirmed.
+        $Billing = 'function Get-UsageAggregates { [CmdletBinding()] param($ReportedStartTime, $ReportedEndTime, $AggregationGranularity, $ShowDetails, $ContinuationToken) }'
+        foreach ($Module in @(@{ Name = 'Az.Accounts'; Body = $Accounts }, @{ Name = 'Az.Compute'; Body = $Compute }, @{ Name = 'Az.Monitor'; Body = '' }, @{ Name = 'Az.Billing'; Body = $Billing }))
         {
             $Dir = Join-Path $script:Modules (Join-Path $Module.Name '99.0.0')
             New-Item -ItemType Directory -Path $Dir -Force | Out-Null
@@ -361,17 +367,20 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
 
         # One pwsh session (`pwsh -Command -`, its lines on stdin, as typed at a
         # prompt) with a fresh home. {Run} in a line becomes the wrapper call
-        # with -ParallelStreams $Streams. Returns the session's exit code and
-        # the lines it printed.
+        # with -ParallelStreams $Streams; {RunConsumption} is the same call
+        # without -SkipConsumption. With -ConsumptionTokenFail the consumption
+        # phase gets no token (see Get-AzAccessToken in the stand-in). Returns
+        # the session's exit code and the lines it printed.
         function script:Invoke-SessionRun
         {
-            param([object[]]$Subs, [string[]]$Lines, [int]$Streams = 2)
+            param([object[]]$Subs, [string[]]$Lines, [int]$Streams = 2, [switch]$ConsumptionTokenFail)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = '' } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = ''; ConsumptionTokenFail = [bool]$ConsumptionTokenFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
             $Call = "& '{0}' -TenantID '{1}' -SkipMetrics -SkipConsumption -ParallelStreams {2}" -f ($script:Wrapper -replace "'", "''"), $script:Tenant, $Streams
+            $ConsumptionCall = "& '{0}' -TenantID '{1}' -SkipMetrics -ParallelStreams {2}" -f ($script:Wrapper -replace "'", "''"), $script:Tenant, $Streams
 
             $Info = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh'))
             foreach ($Arg in @('-NoLogo', '-NoProfile', '-Command', '-')) { $Info.ArgumentList.Add($Arg) }
@@ -386,7 +395,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
             $Info.Environment['NO_COLOR'] = '1'
             $Info.Environment['POWERSHELL_TELEMETRY_OPTOUT'] = '1'
             $Proc = [System.Diagnostics.Process]::Start($Info)
-            foreach ($Line in $Lines) { $Proc.StandardInput.WriteLine($Line.Replace('{Run}', $Call)) }
+            foreach ($Line in $Lines) { $Proc.StandardInput.WriteLine($Line.Replace('{RunConsumption}', $ConsumptionCall).Replace('{Run}', $Call)) }
             $Proc.StandardInput.Close()
             $Out = $Proc.StandardOutput.ReadToEndAsync()
             $Err = $Proc.StandardError.ReadToEndAsync()
@@ -752,6 +761,32 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         )
         $Session.Console | Should -Match 'Required Az submodule\(s\) not found'
         $Session.After | Should -Be @('after1: 1', 'after2: 0') -Because $Session.Console
+        $Session.Open | Should -BeTrue
+    }
+
+    It 'inside a PowerShell session: after a run whose consumption was skipped for sign-in, the next clean run reads 0 and names no consumption failure or count' {
+        # The first run's consumption phase gets no token, so it records the
+        # '(auth)' row and ends with exit 3. The record count it leaves is set
+        # by hand to 7, as a run that collected 7 records leaves it (the
+        # stand-in returns no usage rows). The second run skips consumption.
+        $Session = Invoke-SessionRun -Subs @($script:SubA) -Streams 1 -ConsumptionTokenFail -Lines @(
+            '{RunConsumption}'
+            '"after1: $LASTEXITCODE"'
+            '$Global:ConsumptionRecordCount = 7'
+            '"=== second run ==="'
+            '{Run}'
+            '"after2: $LASTEXITCODE"'
+            '"session still open"'
+            'exit 0'
+        )
+        $First, $Second = $Session.Console -split '=== second run ===', 2
+        $First | Should -Match 'Consumption: SKIPPED' -Because $Session.Console
+        $First | Should -Match 'Consumption Failures:' -Because $Session.Console
+        $Second | Should -Match 'Completed subscription: Sub A' -Because $Session.Console
+        $Second | Should -Not -Match 'Consumption Failures:' -Because 'the first run''s consumption failure is not this run''s'
+        $Second | Should -Not -Match 'Consumption Records:' -Because 'the first run''s record count is not this run''s'
+        $Second | Should -Not -Match 'FAILED \(auth\)' -Because $Second
+        $Session.After | Should -Be @('after1: 3', 'after2: 0') -Because $Session.Console
         $Session.Open | Should -BeTrue
     }
 

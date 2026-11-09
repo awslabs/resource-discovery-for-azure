@@ -494,3 +494,56 @@ Describe 'Every Az.Accounts import asks for the supported version' {
         @($Bad) | Should -BeNullOrEmpty
     }
 }
+
+Describe 'The stream worker stops without the Az.Accounts version file' {
+
+    # Without Functions/AzModules.Functions.ps1 the worker does not know the
+    # supported version. It must stop as for its other required file, not
+    # load any Az.Accounts and import the sign-in.
+    BeforeAll {
+        $script:StreamDir = Join-Path ([System.IO.Path]::GetTempPath()) ('AzAccountsVersionStream_' + [guid]::NewGuid().ToString('N'))
+        $script:StreamTree = Join-Path $script:StreamDir 'tree'
+        New-Item -ItemType Directory -Path $script:StreamTree -Force | Out-Null
+        foreach ($Item in @('Run-AllSubscriptions.Stream.ps1', 'ResourceInventory.ps1', 'Version.json', 'Functions', 'Extension', 'Services'))
+        {
+            Copy-Item -Path (Join-Path $script:RepoRoot $Item) -Destination $script:StreamTree -Recurse -Force
+        }
+        Remove-Item -LiteralPath (Join-Path $script:StreamTree 'Functions/AzModules.Functions.ps1') -Force
+
+        $script:StreamHarness = Join-Path $script:StreamDir 'stream.ps1'
+        @'
+param([string]$Tree, [string]$CallLog)
+$PSStyle.OutputRendering = 'PlainText'
+$Global:AzvCallLog = $CallLog
+function global:Import-Module
+{
+    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking, [switch]$Force, [version]$MinimumVersion)
+    if (@($Name).Count -eq 1 -and $Name[0] -like 'Az.*') { Add-Content -LiteralPath $Global:AzvCallLog -Value ('import ' + $Name[0]); return }
+    Microsoft.PowerShell.Core\Import-Module @PSBoundParameters
+}
+function global:Disable-AzContextAutosave { param($Scope) Add-Content -LiteralPath $Global:AzvCallLog -Value 'azure Disable-AzContextAutosave' }
+function global:Import-AzContext { param($Path) Add-Content -LiteralPath $Global:AzvCallLog -Value 'azure Import-AzContext'; exit 7 }
+$Root = Join-Path $Tree 'out'
+New-Item -ItemType Directory -Path $Root -Force | Out-Null
+$global:LASTEXITCODE = 0
+& (Join-Path $Tree 'Run-AllSubscriptions.Stream.ps1') -TenantID '00000000-0000-0000-0000-000000000001' -StreamId '0' -InventoryRoot $Root -ScriptRoot $Tree -AzContextPath (Join-Path $Root 'ctx.json') -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.json') -SubscriptionIds @('12345678-1234-1234-1234-123456789012') -SubscriptionNames @('Sub demo') -SkipMetrics -SkipConsumption
+exit $LASTEXITCODE
+'@ | Set-Content -Path $script:StreamHarness -Encoding utf8
+    }
+
+    AfterAll {
+        if ($script:StreamDir -and (Test-Path -LiteralPath $script:StreamDir)) { Remove-Item -LiteralPath $script:StreamDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'stops with exit 1 and the missing file named, before loading Az.Accounts or the sign-in' {
+        $CallLog = Join-Path $script:StreamDir 'calls.log'
+        $Output = '' | & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $script:StreamHarness -Tree $script:StreamTree -CallLog $CallLog *>&1 | Out-String
+        $Code = $LASTEXITCODE
+        $Calls = if (Test-Path -LiteralPath $CallLog) { @(Get-Content -LiteralPath $CallLog) } else { @() }
+
+        $Code | Should -Be 1 -Because $Output
+        $Output | Should -Match ([regex]::Escape('Required functions file not found:'))
+        $Output | Should -Match 'AzModules\.Functions\.ps1'
+        $Calls | Should -BeNullOrEmpty -Because 'no Az module is loaded and no Azure call is made'
+    }
+}

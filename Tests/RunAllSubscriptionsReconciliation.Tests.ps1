@@ -359,6 +359,29 @@ Describe 'Resume state messages whose error text holds braces' {
     }
 }
 
+Describe 'A resume state warning that cannot be written' {
+    # Both state writes run inside a subscription's try, after its success
+    # row is added. When the inventory folder is gone the console or
+    # transcript can be gone too, so the warning itself can fail to write;
+    # that must not reach the subscription's catch and list it as failed.
+    It 'Save-CompletedSubscriptionIds does not throw when its warning cannot be written' {
+        Mock Write-Host -MockWith { throw 'stand-in: the console cannot be written' }
+        $Path = Join-Path $script:TestRoot 'gone-sequential/state.json'
+        { Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('a') } | Should -Not -Throw
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like 'WARNING: Failed to persist resume state to *' }
+        Test-Path -LiteralPath "$Path.tmp" | Should -BeFalse
+    }
+
+    It 'Write-StreamState does not throw when its warning cannot be written' {
+        $Tag = '[stream-0]'
+        Mock Set-Content -MockWith { throw 'stand-in: the folder is gone' }
+        Mock Write-Host -MockWith { throw 'stand-in: the console cannot be written' }
+        $Path = Join-Path $script:TestRoot 'gone-stream/state.json'
+        { Write-StreamState -Path $Path -Completed @('a') -FailedAttempts @() } | Should -Not -Throw
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: failed to persist stream state to *' }
+    }
+}
+
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
     # Regression: -Existing was typed [System.Collections.IEnumerable], but when
     # the list holds exactly one prior failure PowerShell collapses it to a lone

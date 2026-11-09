@@ -545,7 +545,11 @@ function Save-CompletedSubscriptionIds
     }
     catch
     {
-        Write-Host ('WARNING: Failed to persist resume state to {0}: {1}' -f $Path, $_) -ForegroundColor Yellow
+        # Its own guard: this runs inside a subscription's try after its
+        # success, and the console can be gone with the folder.
+        $StateError = $_
+        try { Write-Host ('WARNING: Failed to persist resume state to {0}: {1}' -f $Path, $StateError) -ForegroundColor Yellow }
+        catch { $null = $_ }
         Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
     }
 }
@@ -829,7 +833,10 @@ function Write-StreamState
     }
     catch
     {
-        Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
+        # Its own guard, as in Save-CompletedSubscriptionIds.
+        $StateError = $_.Exception.Message
+        try { Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $StateError) 'Yellow' }
+        catch { $null = $_ }
     }
 }
 

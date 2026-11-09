@@ -727,6 +727,23 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
+    It 'two streams: a stream summary whose success row has <Case> is not confirmed' -ForEach @(
+        @{ Case = 'a Zip that is not a path'; Row = '"Count":1,"Zip":"{Reports}/bad\u0000name.zip"' }
+        @{ Case = 'a Count below 0'; Row = '"Count":-1' }
+        @{ Case = 'a Count that is not a whole number'; Row = '"Count":1.5' }
+        @{ Case = 'a Count that is text'; Row = '"Count":"many"' }
+    ) {
+        # Stream 0 runs Sub A, and its summary names Sub A with this row.
+        $Json = ('{{"StreamId":"0","Status":"ok","ResourceCounts":[{{"Name":"Sub A","Id":"{0}",{1}}}],"Failed":[]}}' -f $script:SubA.Id, $Row)
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamSummaryJson $Json
+        $Run.Console | Should -Match '\[stream-0\] ERROR: summary file .+ is not this run''s summary of stream 0: 1 of its success row\(s\) have a Count that is not a whole number of 0 or more, or a Zip that is not a path' -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Exit code 2: the summary of stream 0 could not be read; its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.StateKept | Should -BeTrue -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
     It 'two streams with -Resume: a summary that names another stream is not confirmed, though the stream had nothing left to run' {
         # Stream 0 holds Sub A and Sub C, both done in an earlier run.
         $Wrong = '{"StreamId":"1","Status":"ok","ResourceCounts":[],"Failed":[]}'

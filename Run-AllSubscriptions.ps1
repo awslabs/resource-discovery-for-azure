@@ -1390,6 +1390,20 @@ else
                     $RowIds = @(@($StreamSummary.ResourceCounts) + @($StreamSummary.Failed) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
                     $NoRow = @($S.ExpectedIds | Where-Object { $RowIds -notcontains $_ })
                     if ($NoRow.Count -gt 0) { $NotThisRun = ('it has no row for {0} of the {1} subscription(s) the stream ran' -f $NoRow.Count, $S.SubCount) }
+                    else
+                    {
+                        # Each success row must hold what the aggregation and
+                        # the output verification read: Count a whole number
+                        # of 0 or more, and Zip empty or a path. The values
+                        # are not printed (they can hold real names).
+                        $BadRows = @(@($StreamSummary.ResourceCounts) | Where-Object { $null -ne $_ } | Where-Object {
+                                $Row = $_
+                                $CountOk = ($Row.Count -is [int] -or $Row.Count -is [long]) -and $Row.Count -ge 0 -and $Row.Count -le [int]::MaxValue
+                                $ZipOk = $null -eq $Row.Zip -or ($Row.Zip -is [string] -and ($Row.Zip -eq '' -or $(try { $null = [System.IO.Path]::GetFullPath($Row.Zip); $true } catch { $false })))
+                                -not ($CountOk -and $ZipOk)
+                            })
+                        if ($BadRows.Count -gt 0) { $NotThisRun = ('{0} of its success row(s) have a Count that is not a whole number of 0 or more, or a Zip that is not a path' -f $BadRows.Count) }
+                    }
                 }
                 if ($null -ne $NotThisRun)
                 {

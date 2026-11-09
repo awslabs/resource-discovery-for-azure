@@ -885,7 +885,8 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip puts files back when the swap fails, i
         $Bak = @(Get-ChildItem -LiteralPath $C.Dir -Filter '*.json.rda-*.bak')
         $Bak.Count | Should -Be 1
         Get-Content -LiteralPath $Bak[0].FullName -Raw | Should -Be 'an earlier inventory'
-        $Err | Should -BeLike ('*kept under this name*' + $Bak[0].FullName + '*')
+        $Err | Should -BeLike ('*' + $Bak[0].FullName + ' is the earlier file; ' + $C.Inv + ' now holds the new one: replace it with the earlier file*')
+        Test-Path -LiteralPath $C.Inv | Should -BeTrue
         Get-Content -LiteralPath $C.Html -Raw | Should -Be 'an earlier html'
     }
 
@@ -937,5 +938,125 @@ Describe 'Get-RdaPhysicalPath and the root check' {
 
     It 'refuses a share root given with its separator' -Skip:(-not $IsWindows) {
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory '\\localhost\C$\' 6>$null } | Should -Throw '*cannot be the root*'
+    }
+}
+
+Describe 'New-RdaAllSubHtmlSummaryFromZip and links, rooted entries, and files it cannot remove' {
+    BeforeAll {
+        . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1')
+        # A zip whose entries are the given names and texts, in order.
+        function script:New-EntryZip
+        {
+            param([string]$Path, [object[]]$Pairs)
+            $Zip = [System.IO.Compression.ZipFile]::Open($Path, 'Create')
+            try { foreach ($Pair in $Pairs) { $E = $Zip.CreateEntry($Pair[0]); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write($Pair[1]) } finally { $W.Dispose() } } }
+            finally { $Zip.Dispose() }
+            $Path
+        }
+        # A consolidated zip holding one report zip of the given entries.
+        function script:New-OneReportZip
+        {
+            param([string]$Root, [string]$Stamp, [object[]]$Pairs)
+            $Stage = Join-Path $Root 'outer'
+            New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+            $null = New-EntryZip -Path (Join-Path $Stage ('ResourcesReport_' + $Stamp + '.zip')) -Pairs $Pairs
+            $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-50.zip'
+            Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+            $Zip
+        }
+        $script:LinkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+    }
+
+    It 'stops -PackageZip on a path with a link where this PowerShell cannot follow links, and leaves the input zip as it was' {
+        $Real = Join-Path $script:TmpRoot 'nolinkapi-real'
+        New-Item -ItemType Directory -Path $Real -Force | Out-Null
+        $InZip = Join-Path $Real 'bundle.zip'
+        Copy-Item -LiteralPath $script:InputZip -Destination $InZip
+        $Before = (Get-FileHash -LiteralPath $InZip).Hash
+        $Alias = Join-Path $script:TmpRoot 'nolinkapi-alias'
+        New-Item -ItemType $script:LinkType -Path $Alias -Target $Real | Out-Null
+        $Saved = $script:RdaCanResolveLinks
+        $script:RdaCanResolveLinks = $false
+        try { { New-RdaAllSubHtmlSummaryFromZip -InputZip $InZip -OutputDirectory (Join-Path $Alias 'bundle') -PackageZip 6>$null } | Should -Throw '*cannot follow*' }
+        finally { $script:RdaCanResolveLinks = $Saved }
+        (Get-FileHash -LiteralPath $InZip).Hash | Should -Be $Before
+    }
+
+    It 'stops before writing when a report folder in -OutputDirectory is a link (<Kind>)' -ForEach @(@{ Kind = 'report zip' }, @{ Kind = 'extracted folder' }) {
+        $Root = Join-Path $script:TmpRoot ('report-link-' + ($Kind -replace ' ', '-'))
+        $Stamp = '20260102030405131'
+        $Pairs = @(@(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3"}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>new</html>'))
+        if ($Kind -eq 'report zip') { $Zip = New-OneReportZip -Root $Root -Stamp $Stamp -Pairs $Pairs }
+        else
+        {
+            $Src = Join-Path $Root ('outer/ResourcesReport_' + $Stamp)
+            New-Item -ItemType Directory -Path $Src -Force | Out-Null
+            foreach ($Pair in $Pairs) { Set-Content -LiteralPath (Join-Path $Src $Pair[0]) -Value $Pair[1] }
+            $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-51.zip'
+            [System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $Root 'outer'), $Zip)
+        }
+        $Outside = Join-Path $Root 'outside'
+        New-Item -ItemType Directory -Path $Outside -Force | Out-Null
+        $OutsideInv = Join-Path $Outside ('Inventory_ResourcesReport_' + $Stamp + '.json')
+        Set-Content -LiteralPath $OutsideInv -Value 'not in the output folder' -NoNewline
+        $Out = Join-Path $Root 'out'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        New-Item -ItemType $script:LinkType -Path (Join-Path $Out ('ResourcesReport_' + $Stamp)) -Target $Outside | Out-Null
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*is a link or junction*'
+        Get-Content -LiteralPath $OutsideInv -Raw | Should -Be 'not in the output folder'
+        @(Get-ChildItem -LiteralPath $Outside -Force).Count | Should -Be 1
+    }
+
+    It 'refuses a zip entry rooted on any system (<Name>)' -ForEach @(@{ Name = '\evil.txt' }, @{ Name = '\\server\share\evil.txt' }, @{ Name = '/evil.txt' }, @{ Name = 'C:evil.txt' }) {
+        $Path = New-EntryZip -Path (Join-Path $script:TmpRoot ('rooted-' + [guid]::NewGuid().ToString('N') + '.zip')) -Pairs @(, @($Name, 'x'))
+        { Assert-RdaZipWithinLimit -Path $Path } | Should -Throw '*rooted or .. path*'
+    }
+
+    It 'names a new file it could not remove when putting files back' {
+        $Root = Join-Path $script:TmpRoot 'undo-remove-fail'
+        $Stamp = '20260102030405132'
+        $Zip = New-OneReportZip -Root $Root -Stamp $Stamp -Pairs @(@(('Inventory_ResourcesReport_' + $Stamp + '.json'), '{"Version":"3.2.3"}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>new</html>'))
+        $Out = Join-Path $Root 'out'
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        # No earlier inventory, and a folder where the html goes.
+        New-Item -ItemType Directory -Path (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')) -Force | Out-Null
+        $Inv = Join-Path $Dir ('Inventory_ResourcesReport_' + $Stamp + '.json')
+        Mock Remove-Item { throw 'inventory is locked' } -ParameterFilter { $LiteralPath -eq $Inv }
+        $Err = $null
+        try { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } catch { $Err = $_.Exception.Message }
+        $Err | Should -BeLike ('*' + $Inv + ' is a new file that could not be removed: delete it*')
+    }
+
+    It 'names only the earlier file when a target written twice cannot be put back' {
+        $Root = Join-Path $script:TmpRoot 'undo-twice'
+        $Stamp = '20260102030405133'
+        $InvName = 'Inventory_ResourcesReport_' + $Stamp + '.json'
+        $Zip = New-OneReportZip -Root $Root -Stamp $Stamp -Pairs @(@(('a/' + $InvName), '{"Version":"3.2.3"}'), @(('b/' + $InvName), '{"Version":"3.2.3"}'), @(('ResourcesReport_' + $Stamp + '.html'), '<html>new</html>'))
+        $Out = Join-Path $Root 'out'
+        $Dir = Join-Path $Out ('ResourcesReport_' + $Stamp)
+        New-Item -ItemType Directory -Path (Join-Path $Dir ('ResourcesReport_' + $Stamp + '.html')) -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Dir $InvName) -Value 'an earlier inventory' -NoNewline
+        Mock Move-RdaFile {
+            if ($Path -like '*.bak') { throw 'locked' }
+            [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
+        }
+        $Err = $null
+        try { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } catch { $Err = $_.Exception.Message }
+        $Bak = @(Get-ChildItem -LiteralPath $Dir -Filter '*.bak')
+        $Bak.Count | Should -Be 1
+        Get-Content -LiteralPath $Bak[0].FullName -Raw | Should -Be 'an earlier inventory'
+        ([regex]::Matches($Err, 'is the earlier file')).Count | Should -Be 1
+        $Err | Should -BeLike ('*' + $Bak[0].FullName + ' is the earlier file*')
+    }
+
+    It 'warns, naming it, when the staging folder cannot be removed' {
+        Mock Remove-Item { throw 'staging is busy' } -ParameterFilter { $LiteralPath -like '*RdaFromZip_*' }
+        $Out = Join-Path $script:TmpRoot 'staging-warn'
+        $null = New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -WarningVariable Warn -WarningAction SilentlyContinue 6>$null
+        $Line = @($Warn | Where-Object { "$_" -like 'Could not remove*RdaFromZip_*staging is busy*' })
+        $Line.Count | Should -Be 1
+        # Tidy the folder the mock kept.
+        $Kept = [regex]::Match("$($Line[0])", 'Could not remove (.+?): ').Groups[1].Value
+        if ($Kept -and (Test-Path -LiteralPath $Kept)) { [System.IO.Directory]::Delete($Kept, $true) }
     }
 }

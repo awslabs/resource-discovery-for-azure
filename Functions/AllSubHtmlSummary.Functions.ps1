@@ -760,7 +760,12 @@ function New-RdaAllSubHtmlSummaryFromZip
     $OutputDirectory = [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory))
     # A drive or file system root is never the output folder: the reports
     # would sit at the root and the bundle would be named after no folder.
-    if ($OutputDirectory.TrimEnd([IO.Path]::DirectorySeparatorChar, '/') -eq ([string][System.IO.Path]::GetPathRoot($OutputDirectory)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/'))
+    # Also not through a link or junction to a root (the path as followed).
+    # shortcut: on PowerShell 7.0/7.1 links cannot be followed, so only the
+    # path as written is checked there; fine while 7.0/7.1 are out of support.
+    $OutputPhysical = try { Get-RdaPhysicalPath -Path $OutputDirectory } catch { $OutputDirectory }
+    $IsRoot = { param($P) $P.TrimEnd([IO.Path]::DirectorySeparatorChar, '/') -eq ([string][System.IO.Path]::GetPathRoot($P)).TrimEnd([IO.Path]::DirectorySeparatorChar, '/') }
+    if ((& $IsRoot $OutputDirectory) -or (& $IsRoot $OutputPhysical))
     {
         throw ("New-RdaAllSubHtmlSummaryFromZip: -OutputDirectory cannot be the root {0}. Choose a folder." -f $OutputDirectory)
     }

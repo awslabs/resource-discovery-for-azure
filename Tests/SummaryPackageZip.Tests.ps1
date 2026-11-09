@@ -824,6 +824,15 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip swaps the rebuilt files in as a set, a
         Test-Path -LiteralPath (Join-Path $Real 'bundle') | Should -BeFalse
     }
 
+    It 'refuses an -OutputDirectory that is a link or junction to a file system root, writing nothing there' {
+        $Root = [System.IO.Path]::GetPathRoot($script:TmpRoot)
+        $Alias = Join-Path $script:TmpRoot ('root-alias-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType $(if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }) -Path $Alias -Target $Root | Out-Null
+        try { { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Alias 6>$null } | Should -Throw '*cannot be the root*' }
+        finally { [System.IO.Directory]::Delete($Alias) }
+        Test-Path -LiteralPath (Join-Path $Root 'MainSummary.html') | Should -BeFalse
+    }
+
     It 'refuses a file system root as -OutputDirectory' {
         $Root = [System.IO.Path]::GetPathRoot($script:TmpRoot)
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Root 6>$null } | Should -Throw '*cannot be the root*'

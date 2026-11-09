@@ -108,6 +108,18 @@ Describe 'Invoke-AzGraphQuerySafe result shape' {
         { $ErrorActionPreference = 'SilentlyContinue'; Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, null) that is not a whole number of 0 or more.'
     }
 
+    It 'stops on a null row parsed from the Resource Graph answer, instead of reading it as 0' {
+        Mock -CommandName Invoke-AzRestMethod -MockWith { New-GraphResponse -Content '{"count":1,"data":[null],"resultTruncated":"false"}' }
+
+        $Result = Invoke-AzGraphQuerySafe -Query 'resources | summarize count()' -SubscriptionId $script:Sub
+        { $ErrorActionPreference = 'SilentlyContinue'; Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count row that is null.'
+    }
+
+    It 'stops on a null row after a valid batch row, instead of counting too few' {
+        $Result = [pscustomobject]@{ data = @([pscustomobject]@{ count_ = 7 }, $null) }
+        { Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count row that is null.'
+    }
+
     It 'stops on a row that has no count_ property, instead of reading it as 0' {
         $Result = [pscustomobject]@{ data = @([pscustomobject]@{ other = 7 }) }
         { Get-AzGraphCount -Result $Result } | Should -Throw -ExpectedMessage 'Resource Graph returned a count (count_, missing) that is not a whole number of 0 or more.'

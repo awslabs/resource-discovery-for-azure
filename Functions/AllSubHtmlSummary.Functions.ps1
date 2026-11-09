@@ -436,7 +436,10 @@ function New-RdaAllSubHtmlSummary
     }
     $SubReports = @()
     $ServiceAgg = [ordered]@{}
-    $LinkByFolder = [System.Collections.Generic.Dictionary[string, object]]::new((Get-RdaPathComparer -Path $RunOutputDirectory))
+    # Keyed by the folder name as each row holds it (the same string), so no
+    # file system comparer is needed. Filled after the loop, not in the catch:
+    # the catch's row line is edited by the summary-wording change.
+    $LinkByFolder = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
 
     foreach ($Folder in $Folders)
     {

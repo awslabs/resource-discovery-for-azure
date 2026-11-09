@@ -214,26 +214,29 @@ Function RunInventorySetup()
 
     function CheckCliRequirements()
     {
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
+
         # An earlier run in this session loaded the modules. Skip the checks
-        # only when the lowest loaded Az.Accounts is still the supported
-        # version: an older build of the tool may have loaded an older one.
-        # Get-Module without -ListAvailable reads the session only, so this
-        # stays cheap. Otherwise the full check below runs and stops the run.
+        # only when all four are still loaded (one can have been removed
+        # since, with Remove-Module) and the lowest loaded Az.Accounts is
+        # still the supported version: an older build of the tool may have
+        # loaded an older one. Get-Module without -ListAvailable reads the
+        # session only, so this stays cheap. Otherwise the full check below
+        # runs: it loads what is missing, or stops the run.
         if ($Global:AzPowerShellLoaded)
         {
+            $NotLoaded = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ErrorAction SilentlyContinue | Select-Object -First 1) })
             $LoadedAzAccounts = @(Get-Module -Name Az.Accounts -ErrorAction SilentlyContinue |
                     Where-Object { $_ -and $_.Version } |
                     ForEach-Object { [version]$_.Version } |
                     Sort-Object) | Select-Object -First 1
-            if ($LoadedAzAccounts -and $LoadedAzAccounts -ge (Get-RdaAzAccountsMinimumVersion))
+            if ($NotLoaded.Count -eq 0 -and $LoadedAzAccounts -and $LoadedAzAccounts -ge (Get-RdaAzAccountsMinimumVersion))
             {
                 return
             }
         }
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
-
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
 
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 

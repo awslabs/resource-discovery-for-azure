@@ -1029,6 +1029,22 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Session.Open | Should -BeTrue
     }
 
+    It 'inside a PowerShell session: a run after Remove-Module of a required Az module loads it again' {
+        # The first run loads the Az modules; then one is removed from the
+        # session. The next run must not take the "already loaded" shortcut.
+        $Session = Invoke-SessionRun -Subs @($script:SubA) -Streams 1 -Lines @(
+            '{Run}'
+            '"after1: $([bool](Get-Module -Name Az.Compute))"'
+            'Remove-Module -Name Az.Compute'
+            '{Run}'
+            '"after2: $([bool](Get-Module -Name Az.Compute))"'
+            '"session still open"'
+            'exit 0'
+        )
+        $Session.After | Should -Be @('after1: True', 'after2: True') -Because $Session.Console
+        $Session.Open | Should -BeTrue
+    }
+
     It 'pwsh -File: a clean run with 2 streams exits 0' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2
         $Run.Console | Should -Match '\[stream-1\] done: Sub B'

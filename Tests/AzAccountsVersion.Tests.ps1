@@ -435,6 +435,10 @@ function global:Get-Module
             Set-Content -LiteralPath (Join-Path $SubBase 'Az.Compute.psd1') -Value ("@{{ ModuleVersion = '9.9.9'; RequiredModules = @(@{{ ModuleName = 'Az.Accounts'; RequiredVersion = '{0}' }}) }}" -f $env:AZV_SUB_LOADS)
             return [pscustomobject]@{ Name = 'Az.Compute'; Version = [version]'9.9.9'; ModuleBase = $SubBase; RequiredModules = @([pscustomobject]@{ Name = 'Az.Accounts'; Version = [version]$env:AZV_SUB_LOADS }) }
         }
+        # AZV_PRELOADED: the earlier run loaded the other Az modules too,
+        # except one removed since with Remove-Module (AZV_REMOVED); an
+        # import in this run loads that one again.
+        if ($env:AZV_PRELOADED -and ($Name[0] -ne $env:AZV_REMOVED -or $Global:AzvReloaded -contains $Name[0])) { return [pscustomobject]@{ Name = $Name[0]; Version = [version]'9.9.9' } }
         return
     }
     Microsoft.PowerShell.Core\Get-Module @PSBoundParameters
@@ -453,6 +457,7 @@ function global:Import-Module
         # Az.Accounts (RequiredVersion), which PowerShell then loads next to
         # the new one; the lowest loaded copy is that older one.
         if ($Name[0] -eq 'Az.Compute' -and $env:AZV_SUB_LOADS) { $Global:AzvLoaded = $env:AZV_SUB_LOADS; $Global:AzvSubLoaded = $true }
+        $Global:AzvReloaded = @($Global:AzvReloaded) + $Name[0]
         if ($Name[0] -eq 'Az.Accounts' -and $env:AZV_IMPORT_LOADS)
         {
             if ($MinimumVersion -and $env:AZV_IMPORT_MIN -ne 'ignore-min' -and [version]$env:AZV_IMPORT_LOADS -lt $MinimumVersion)
@@ -500,7 +505,7 @@ exit $LASTEXITCODE
 
         function Invoke-AzvRun
         {
-            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails', [string]$ImportLoads = '', [string]$ImportMin = '', [switch]$Preloaded, [string]$SubLoads = '')
+            param([string]$Entry, [string]$Installed, [string]$Loaded, [switch]$Interactive, [string]$Install = 'fails', [string]$ImportLoads = '', [string]$ImportMin = '', [switch]$Preloaded, [string]$SubLoads = '', [string]$Removed = '')
             $Name = [guid]::NewGuid().ToString('N')
             $Out = Join-Path $script:WorkDir ('out_' + $Name)
             New-Item -ItemType Directory -Path $Out -Force | Out-Null
@@ -513,6 +518,7 @@ exit $LASTEXITCODE
             $env:AZV_IMPORT_MIN = $ImportMin
             $env:AZV_PRELOADED = if ($Preloaded) { '1' } else { '' }
             $env:AZV_SUB_LOADS = $SubLoads
+            $env:AZV_REMOVED = $Removed
             $Pwsh = Join-Path $PSHOME 'pwsh'
             try
             {
@@ -538,6 +544,7 @@ exit $LASTEXITCODE
                 Remove-Item Env:AZV_IMPORT_MIN -ErrorAction SilentlyContinue
                 Remove-Item Env:AZV_PRELOADED -ErrorAction SilentlyContinue
                 Remove-Item Env:AZV_SUB_LOADS -ErrorAction SilentlyContinue
+                Remove-Item Env:AZV_REMOVED -ErrorAction SilentlyContinue
             }
             $Calls = if (Test-Path -LiteralPath $CallLog) { @(Get-Content -LiteralPath $CallLog) } else { @() }
             [pscustomobject]@{
@@ -594,6 +601,13 @@ exit $LASTEXITCODE
 
         $Run.ExitCode | Should -Be 7 -Because 'the run goes on to the sign-in'
         $Run.Imports | Should -BeNullOrEmpty -Because 'the modules are already loaded'
+    }
+
+    It 'direct run, Az modules loaded by an earlier run in the session but Az.Compute removed since: loads them again and goes on' {
+        $Run = Invoke-AzvRun -Entry 'direct' -Installed '5.5.4' -Loaded '5.5.4' -Preloaded -Removed 'Az.Compute'
+
+        $Run.Imports | Should -Contain 'import Az.Compute' -Because 'a required module that is not loaded is loaded again'
+        $Run.ExitCode | Should -Be 7 -Because 'the run goes on to the sign-in'
     }
 
     It 'direct run, Az modules already loaded by an earlier run in the session: stops with exit 1 when the loaded Az.Accounts is older' {

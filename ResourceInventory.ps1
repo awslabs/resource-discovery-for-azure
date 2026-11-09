@@ -1472,10 +1472,14 @@ function ExecuteInventoryProcessing()
 
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
+            # SubscriptionId: the one subscription a wrapper run is for (empty
+            # in a direct run of all), so the wrapper counts each skip once.
+            # Only counted, never printed.
             $Global:ConsumptionFailedSubs += [pscustomobject]@{
-                Name    = '(all subscriptions)'
-                Id      = '(auth)'
-                Message = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Name           = '(all subscriptions)'
+                Id             = '(auth)'
+                Message        = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                SubscriptionId = [string]$SubscriptionID
             }
             return
         }

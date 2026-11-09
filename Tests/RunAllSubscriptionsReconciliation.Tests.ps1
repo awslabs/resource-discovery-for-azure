@@ -789,3 +789,55 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
                 -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
     }
 }
+
+Describe 'Consumption failures: one rule for the count, the list and the sign-in skips' {
+
+    BeforeAll {
+        # Contoso-Billing twice (two of its pages failed), a twin with the same
+        # name, and the '(auth)' sign-in rows of two subscriptions (one twice,
+        # as an older stream left it) and of a direct run with no
+        # SubscriptionId.
+        $script:ConsumptionRows = @(
+            [pscustomobject]@{ Name = 'Contoso-Billing'; Id = '44444444-4444-4444-4444-444444444444'; Message = 'page 2 failed' }
+            [pscustomobject]@{ Name = 'Contoso-Billing'; Id = '44444444-4444-4444-4444-444444444444'; Message = 'page 3 failed' }
+            [pscustomobject]@{ Name = 'Contoso-Billing'; Id = '55555555-5555-5555-5555-555555555555'; Message = 'page 2 failed' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '66666666-6666-6666-6666-666666666666' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '66666666-6666-6666-6666-666666666666' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '77777777-7777-7777-7777-777777777777' }
+        )
+    }
+
+    It 'Get-ConsumptionFailureView names each real subscription once by name and id and counts the sign-in skips per subscription' {
+        $View = Get-ConsumptionFailureView -ConsumptionFailedSubs $script:ConsumptionRows
+        @($View.Subscriptions | ForEach-Object { $_.Id }) | Should -Be @('44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555')
+        $View.SignInSkipped | Should -Be 2
+    }
+
+    It 'Get-ConsumptionFailureView counts a sign-in row with no SubscriptionId once, and an empty list as none' {
+        $Direct = @([pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped' })
+        $View = Get-ConsumptionFailureView -ConsumptionFailedSubs $Direct
+        @($View.Subscriptions).Count | Should -Be 0
+        $View.SignInSkipped | Should -Be 1
+        (Get-ConsumptionFailureView -ConsumptionFailedSubs $null).SignInSkipped | Should -Be 0
+    }
+
+    It 'RunSummary.log counts by the same rule, and <Case>' -ForEach @(
+        @{ Case = 'without -Obfuscated lists each real subscription once and no sign-in row'; Obfuscated = $false }
+        @{ Case = 'with -Obfuscated names none'; Obfuscated = $true }
+    ) {
+        $Lines = Get-RunSummaryLogContent -Visible 4 -Eligible 4 -Processed 4 -ConsumptionFailedSubs $script:ConsumptionRows -Obfuscated:$Obfuscated
+        $Text = $Lines -join "`n"
+        $Text | Should -Match 'Consumption failed subs\s+: 2(\r?\n|$)'
+        $Text | Should -Match 'Consumption sign-in skipped\s+: 2 subscription\(s\)'
+        $Text | Should -Not -Match '66666666|77777777' -Because 'the sign-in rows are counted, not named'
+        if ($Obfuscated)
+        {
+            $Text | Should -Not -Match 'Contoso|44444444|55555555'
+        }
+        else
+        {
+            @($Lines | Where-Object { $_ -like '  - Contoso-Billing (*' }).Count | Should -Be 2
+            $Text | Should -Not -Match '\(auth\)'
+        }
+    }
+}

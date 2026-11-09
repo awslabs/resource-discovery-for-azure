@@ -327,7 +327,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '')
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -403,14 +403,15 @@ function Get-UsageAggregates
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             # ConsumptionPageFail runs the consumption phase (see
             # Get-UsageAggregates in the stand-in), MetricsTokenFail the
-            # metrics phase (see Get-AzAccessToken).
+            # metrics phase (see Get-AzAccessToken). ConsumptionTokenFail runs
+            # the consumption phase with no token for it (the '(auth)' row).
             $WrapperArgs = @('-TenantID', $script:Tenant)
             if (-not $MetricsTokenFail) { $WrapperArgs += '-SkipMetrics' }
-            if (-not $ConsumptionPageFail) { $WrapperArgs += '-SkipConsumption' }
+            if (-not $ConsumptionPageFail -and -not $ConsumptionTokenFail) { $WrapperArgs += '-SkipConsumption' }
             $WrapperArgs += @('-ParallelStreams', [string]$Streams)
             if ($Resume) { $WrapperArgs += '-Resume' }
             if ($ResumeFailedOnly) { $WrapperArgs += '-ResumeFailedOnly' }
@@ -1128,6 +1129,22 @@ function Get-UsageAggregates
         {
             $Run.Console | Should -Match ('(?m)^\s*- {0} \({1}\)' -f [regex]::Escape($Sub.Name), [regex]::Escape($Sub.Id)) -Because $Run.Console
         }
+    }
+
+    It '<Case>: consumption skipped for sign-in on every subscription is counted once per subscription, the same on the console, in RunSummary.log and in MainSummary.html' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
+        # Three subscriptions; stream 0 runs Sub A then Sub C. Each inner run
+        # gets no token for the consumption phase and adds its '(auth)' row.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams $Streams -ConsumptionTokenFail
+        $Run.ExitCode | Should -Be 3 -Because $Run.Console
+        $Run.Console | Should -Match 'Consumption Failures:\s+0 subscription\(s\)' -Because 'no subscription had a consumption failure of its own'
+        $Run.Console | Should -Match 'Consumption skipped for sign-in on 3 subscription\(s\)\.' -Because $Run.Console
+        $Run.RunSummary | Should -Match 'Consumption failed subs\s+: 0' -Because $Run.RunSummary
+        $Run.RunSummary | Should -Match 'Consumption sign-in skipped\s+: 3 subscription\(s\)' -Because $Run.RunSummary
+        $Run.MainSummary | Should -Match 'Consumption skipped for sign-in on 3 subscription\(s\)\.'
+        $Run.MainSummary | Should -Not -Match 'had consumption \(billing\) issues'
     }
 
     It 'inside a PowerShell session: after a run whose consumption was skipped for sign-in, the next clean run reads 0 and names no consumption failure or count' {

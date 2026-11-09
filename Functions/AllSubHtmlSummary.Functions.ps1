@@ -325,7 +325,12 @@ function New-RdaAllSubHtmlSummary
     # Health banners built from the passed-through wrapper collections. Each is
     # read-only; a null/empty collection renders nothing.
     $FailedList = @(@($FailedSubscriptions) | Where-Object { $_ })
-    $ConsumpList = @(@($ConsumptionFailedSubs) | Where-Object { $_ -and $_.Id -ne '(auth)' })
+    # Consumption by the wrapper's rule (Get-ConsumptionFailureView, not
+    # loaded with this file): each real subscription once by Name and Id, and
+    # the '(auth)' sign-in rows counted once per SubscriptionId.
+    $ConsumpRows = @(@($ConsumptionFailedSubs) | Where-Object { $_ })
+    $ConsumpList = @(@($ConsumpRows | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object -Property Name, Id -Unique)
+    $ConsumpSignInCount = @(@($ConsumpRows | Where-Object { $_.Id -eq '(auth)' }) | ForEach-Object { [string]$_.SubscriptionId } | Sort-Object -Unique).Count
     $MetricsList = @(@($MetricsFailedSubs) | Where-Object { $_ })
     $CollectorList = @(@($CollectorFailures) | Where-Object { $_ })
 
@@ -362,6 +367,11 @@ function New-RdaAllSubHtmlSummary
         {
             [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had consumption (billing) issues.</b> Cost data may be incomplete for: {1}</div>', $ConsumpList.Count, (ConvertTo-HtmlSafe (($ConsumpList | ForEach-Object { [string]$_.Name }) -join ', ')))
         }
+    }
+    # A count only, so it is the same under -Obfuscated.
+    if ($ConsumpSignInCount -gt 0)
+    {
+        [void]$Banners.AppendFormat('<div class="banner warn"><b>Consumption skipped for sign-in on {0} subscription(s).</b> Cost data is missing for those subscriptions.</div>', $ConsumpSignInCount)
     }
     if ($MetricsList.Count -gt 0)
     {

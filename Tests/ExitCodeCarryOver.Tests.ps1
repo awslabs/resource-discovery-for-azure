@@ -172,7 +172,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary)
+            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '')
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
@@ -184,6 +184,15 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
                 $Summary = Join-Path $Reports.FullName '.rda-stream-0-summary.json'
                 Set-Content -LiteralPath $Summary -Value 'not json' -Encoding utf8
+                [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
+            }
+            elseif ($StreamSummaryJson)
+            {
+                # The same, with a summary the wrapper can read: stream 0 then
+                # reports what this text says, not what it did.
+                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
+                $Summary = Join-Path $Reports.FullName '.rda-stream-0-summary.json'
+                Set-Content -LiteralPath $Summary -Value $StreamSummaryJson -Encoding utf8
                 [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
             }
             $Scenario = Join-Path $CaseDir 'scenario.json'
@@ -369,6 +378,28 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # and its resume state is kept.
         $Run.StateKept | Should -BeTrue -Because $Run.Console
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
+    }
+
+    It 'two streams: the verification-gap stop prints the Exit code lines, naming the sign-in skip and collector failures it hides' {
+        # Stream 0 reports two subscriptions that worked, with a collector
+        # failure and a Metrics sign-in skip; only two reports are on disk
+        # (Sub A and Sub B), so one report is missing.
+        $SubX = [guid]::new(('0' * 31) + 'e').ToString()
+        $SubY = [guid]::new(('0' * 31) + 'f').ToString()
+        $Forged = [pscustomobject]@{
+            Status            = 'ok'
+            ResourceCounts    = @([pscustomobject]@{ Name = 'Sub X'; Id = $SubX; Count = 1 }, [pscustomobject]@{ Name = 'Sub Y'; Id = $SubY; Count = 1 })
+            Failed            = @()
+            CollectorFailures = @([pscustomobject]@{ Id = $SubX; Name = 'Sub X'; Module = 'StandIn'; Message = 'stand-in: this collector failed' })
+            MetricsFailedSubs = @([pscustomobject]@{ Id = $SubX; Name = 'Sub X'; Message = 'stand-in: no token' })
+        } | ConvertTo-Json -Depth 5
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamSummaryJson $Forged
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        $Gap = 'Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.'
+        $Hidden = 'Exit code 2 takes priority over exit code 5, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem and one or more collectors failed.'
+        $Run.Console | Should -Match ('(?s)Per-subscription output verification failed\..*' + [regex]::Escape($Gap) + '\s+' + [regex]::Escape($Hidden)) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'subscriptions failed' -Because $Run.Console
     }
 
     It 'sequential: RunSummary.log lists the failed subscription by its name and id' {

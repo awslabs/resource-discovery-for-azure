@@ -679,16 +679,24 @@ function Merge-FailedAttempts
 #     returns 2, after consolidation, so the zip holds the reports of the
 #     subscriptions that worked, or no zip is made when none worked;
 #   - a stream summary that could not be read (parallel streams): the
-#     wrapper passes it as -UnreadableStreams, not as a failed subscription,
-#     so its subscriptions are named as not confirmed and are not counted as
+#     wrapper also asks this function with -SubscriptionsFailed for it, but
+#     names it to Get-WrapperExitCodeSummary as -UnreadableStreams, so its
+#     subscriptions are named as not confirmed and are not counted as
 #     failed; the zip is made and may hold their reports;
 #   - a per-subscription output verification gap (a subscription reported
 #     success but its zip is missing): the wrapper stops with 2 before
 #     consolidation, so no zip is made.
-# The console and RunSummary.log say which (Get-WrapperExitCodeSummary). 2
-# takes precedence over 3-5, so those lines also name the sign-in skip and
-# collector failures that 2 hides; the FAILED (auth) and FAILED (collectors)
-# banners still print as well.
+# 2 takes precedence over 3-5. What each case prints:
+#   - failed subscription or unreadable stream summary: the Summary block
+#     (Subscriptions Failed / Stream Summary Unreadable), the FAILED (auth)
+#     and FAILED (collectors) banners, and the Exit code lines
+#     (Get-WrapperExitCodeSummary) at the end of the console and in
+#     RunSummary.log when a zip is made; those lines also name the sign-in
+#     skip and collector failures that 2 hides;
+#   - verification gap: the "Per-subscription output verification failed"
+#     block, the failed-subscription count if any, and the Exit code lines
+#     (with -VerificationGap, also naming the 3-5 condition it hides). No
+#     Summary block, no FAILED banners and no RunSummary.log (no zip).
 # Nothing inside this repo consumes the WRAPPER's exit code (it is the
 # top-level entrypoint); the inner ResourceInventory.ps1 exit code is left
 # UNCHANGED because the wrapper treats inner non-zero as "this whole
@@ -729,19 +737,27 @@ function Get-WrapperExitCodeSummary
         # Their subscriptions are not confirmed, so the code is 2, but they are
         # not failed subscriptions.
         [object[]]$UnreadableStreams = @(),
+        # The wrapper stopped at the per-subscription output verification gap
+        # (a subscription reported success but its zip is missing): 2, before
+        # consolidation.
+        [bool]$VerificationGap = $false,
         # A consolidated zip was made this run.
         [bool]$ReportMade = $true
     )
     $AuthText = 'Metrics and/or Consumption were skipped for a sign-in problem'
     $CollectorText = 'one or more collectors failed'
     $Unreadable = @(@($UnreadableStreams) | Where-Object { $null -ne $_ })
-    $Code = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed ($SubscriptionsFailed -or $Unreadable.Count -gt 0)
+    $Code = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -SubscriptionsFailed ($SubscriptionsFailed -or $Unreadable.Count -gt 0 -or $VerificationGap)
     $Lines = [System.Collections.Generic.List[string]]::new()
     switch ($Code)
     {
         0 { $Lines.Add('Exit code 0: clean run, no failures of any kind.') }
         2
         {
+            if ($VerificationGap)
+            {
+                $Lines.Add('Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.')
+            }
             if ($SubscriptionsFailed)
             {
                 $ZipText = if ($ReportMade) { 'the consolidated zip holds the reports of the subscriptions that worked' } else { 'no consolidated zip was made' }

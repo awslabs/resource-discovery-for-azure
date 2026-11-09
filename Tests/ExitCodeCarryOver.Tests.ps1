@@ -172,10 +172,20 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '')
+            param([object[]]$Subs, [string]$FailSub = '', [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             $CaseHome = Join-Path $CaseDir 'home'
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
+            if ($CorruptStreamSummary)
+            {
+                # Stream 0's summary file is left as text that is not JSON and
+                # cannot be written, so the stream cannot replace it and the
+                # wrapper finds it but cannot read it.
+                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
+                $Summary = Join-Path $Reports.FullName '.rda-stream-0-summary.json'
+                Set-Content -LiteralPath $Summary -Value 'not json' -Encoding utf8
+                [System.IO.File]::SetUnixFileMode($Summary, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead')
+            }
             $Scenario = Join-Path $CaseDir 'scenario.json'
             [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = $FailSub; CollectorFailSub = $CollectorFailSub } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
@@ -340,6 +350,14 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
         $Run.ZipCount | Should -Be 0
         $Run.Console | Should -Match ([regex]::Escape('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.'))
+    }
+
+    It 'two streams: a stream summary the wrapper cannot read lists the stream as failed and exits 2' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -CorruptStreamSummary
+        $Run.Console | Should -Match '\[stream-0\] ERROR: could not parse summary file' -Because $Run.Console
+        $Run.Console | Should -Match 'Subscriptions Failed:\s+1 \(stream-0 \(corrupt summary\)\)'
+        $Run.Console | Should -Not -Match 'ERROR processing' -Because 'no inventory run failed; only the stream summary is lost'
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
     }
 
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {

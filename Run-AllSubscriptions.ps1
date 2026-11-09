@@ -1657,6 +1657,7 @@ if ($null -ne $OuterZipFile)
             -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
             -MetricsFailedSubs $Global:MetricsFailedSubs `
             -CollectorFailures $Global:CollectorFailures `
+            -UnreadableStreams $UnreadableStreamSummaries `
             -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
             -Detailed:$Detailed -Obfuscated:$Obfuscate
     }

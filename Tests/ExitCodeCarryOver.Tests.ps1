@@ -241,6 +241,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
             # RunSummary.log from the consolidated zip, when one was made.
             $OuterZip = @(Get-ChildItem -Path (Join-Path $CaseHome 'InventoryReports') -Filter 'AllSubscriptions_ResourcesReport_*.zip' -File -ErrorAction SilentlyContinue)
             $RunSummary = $null
+            $MainSummary = $null
             if ($OuterZip.Count -eq 1)
             {
                 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -253,6 +254,12 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                         $Reader = [System.IO.StreamReader]::new($Entry.Open())
                         try { $RunSummary = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
                     }
+                    $Entry = $Zip.GetEntry('MainSummary.html')
+                    if ($null -ne $Entry)
+                    {
+                        $Reader = [System.IO.StreamReader]::new($Entry.Open())
+                        try { $MainSummary = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+                    }
                 }
                 finally { $Zip.Dispose() }
             }
@@ -263,6 +270,7 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
                 StateKept  = $null -ne $State
                 ZipCount   = $OuterZip.Count
                 RunSummary = $RunSummary
+                MainSummary = $MainSummary
             }
         }
 
@@ -424,6 +432,14 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
         $Run.RunSummary | Should -Not -Match 'subscriptions failed' -Because $Run.RunSummary
         $Run.RunSummary | Should -Match ([regex]::Escape('  Exit code 2: the summary of stream 0 could not be read; its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because $Run.RunSummary
         $Run.RunSummary | Should -Not -Match '(?m)^  -  \(\)' -Because $Run.RunSummary
+    }
+
+    It 'two streams: MainSummary.html names a stream whose summary could not be read, not as a failed subscription' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -CorruptStreamSummary
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        $Run.MainSummary | Should -Not -BeNullOrEmpty -Because $Run.Console
+        $Run.MainSummary | Should -Match ([regex]::Escape('The summary of stream 0 could not be read.</b> Its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because 'MainSummary.html must show the same signal as the console and RunSummary.log'
+        $Run.MainSummary | Should -Not -Match 'failed to process' -Because 'no subscription failed'
     }
 
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {

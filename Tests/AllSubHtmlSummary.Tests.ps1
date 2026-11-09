@@ -141,6 +141,28 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         $Html | Should -Match 'returned 0 resources'
     }
 
+    It 'names each stream whose summary could not be read, with its count, and does not count it as failed' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Sub A' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        $Streams = @(
+            [pscustomobject]@{ StreamId = 0; SubCount = 3 }
+            [pscustomobject]@{ StreamId = 2; SubCount = 1 }
+        )
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -UnreadableStreams $Streams | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 0 could not be read.</b> Its 3 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 2 could not be read.</b> Its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        (Get-Card $Html 'Failed') | Should -Be '0' -Because 'an unreadable stream summary is not a failed subscription'
+        $Html | Should -Not -Match 'failed to process'
+
+        # Same fixed text under -Obfuscated: it holds stream numbers and counts only.
+        $ObfOut = Join-Path $Run 'main-obf.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $ObfOut -Obfuscated -UnreadableStreams $Streams | Out-Null
+        (Get-Content -Path $ObfOut -Raw) | Should -Match ([regex]::Escape('The summary of stream 0 could not be read.</b> Its 3 subscription(s) are not confirmed'))
+    }
+
     It 'detects obfuscated posture from prod_/nonprod_ tokens' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 3; StorageAcc = 2 } -Obfuscated | Out-Null

@@ -61,7 +61,8 @@ function global:Get-StandInHosts
 {
     # In a -ResourceGroup run the run's session host keeps the portal casing of
     # its group, as tables other than resources may: the run must still read it.
-    $RunGroup = if ($Global:StandInScope -eq 'ResourceGroupA') { 'RG-Avd' } else { 'rg-avd' }
+    # The Turkish-culture run's group is named in capitals, with an I.
+    $RunGroup = if ($Global:StandInScope -eq 'ResourceGroupA') { 'RG-Avd' } elseif ($Global:StandInScope -eq 'ResourceGroupTurkish') { 'INVENTORY' } else { 'rg-avd' }
     foreach ($P in @(@{ Sub = $SubA; Pool = 'hp-a'; Host = 'sh-a.demo.local'; Group = $RunGroup }, @{ Sub = $SubB; Pool = 'hp-b'; Host = 'sh-b.demo.local'; Group = 'rg-avd' }))
     {
         @{ id = ('{0}/sessionhosts/{1}' -f (Get-StandInPoolId $P.Sub $P.Pool), $P.Host); name = ('{0}/{1}' -f $P.Pool, $P.Host); type = 'microsoft.desktopvirtualization/hostpools/sessionhosts'; location = 'eastus'; subscriptionId = $P.Sub; resourceGroup = $P.Group; properties = @{ agentVersion = '1.0.0'; allowNewSession = $true; status = 'Available'; updateState = 'Succeeded' } }
@@ -130,6 +131,14 @@ function global:Invoke-AzRestMethod
 $Params = @{ SkipMetrics = $true; SkipConsumption = $true; OutputDirectory = $Out; Service = @('AVD'); Obfuscate = $true }
 if ($Scope -eq 'SubscriptionA') { $Params.SubscriptionID = $SubA }
 if ($Scope -eq 'ResourceGroupA') { $Params.SubscriptionID = $SubA; $Params.ResourceGroup = 'rg-avd' }
+# The same, on a Turkish-culture host, where lower-casing with the current
+# culture turns I into a dotless i (U+0131).
+if ($Scope -eq 'ResourceGroupTurkish')
+{
+    $Params.SubscriptionID = $SubA
+    $Params.ResourceGroup = 'INVENTORY'
+    [System.Globalization.CultureInfo]::CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('tr-TR')
+}
 # A run over every subscription checks their roles side by side in other
 # runspaces, where these stand-ins do not exist; -RunAllSubs leaves that check
 # to the wrapper, so the control runs with it.
@@ -205,6 +214,15 @@ Describe 'AVD session hosts follow the run''s subscription scope' {
         $Run.DictCount | Should -Be 1
         @($Run.RealIds | Where-Object { $_ -match '/resourcegroups/rg-other/' }) | Should -BeNullOrEmpty -Because 'a session host of another resource group is out of the run''s scope'
         @($Run.RealIds | Where-Object { $_ -match '/sessionhosts/sh-a\.demo\.local$' }).Count | Should -Be 1
+    }
+
+    It 'a -ResourceGroup run on a Turkish-culture host still reads the session host of an INVENTORY group' {
+        $Run = Invoke-AvdScopeRun -Scope 'ResourceGroupTurkish'
+        # Both AVD queries, the count and the page, name the group in plain
+        # ASCII; a dotless i would match no group.
+        @($Run.Calls | Where-Object { $_ -like 'avdgroup *' }).Count | Should -Be 2 -Because ($Run.Calls -join '; ')
+        @($Run.Calls | Where-Object { $_ -like 'avdgroup *' -and $_ -cne 'avdgroup inventory' }) | Should -BeNullOrEmpty -Because ($Run.Calls -join '; ')
+        $Run.Console | Should -Match 'AVD Resources Output: 1 AVD Resources Identified' -Because $Run.Console
     }
 
     It 'a run over every subscription still asks the AVD table for all of them (control)' {

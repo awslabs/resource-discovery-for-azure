@@ -858,7 +858,9 @@ Function RunInventorySetup()
         # A -ResourceGroup run reads that group only, for the same reason. =~
         # matches without regard to case: only the resources table is known to
         # keep resourceGroup in lower case, other tables may keep the portal's.
-        $AVDGroupFilter = if (![string]::IsNullOrEmpty($ResourceGroup)) { " | where resourceGroup =~ '{0}'" -f $ResourceGroup.ToLower() } else { '' }
+        # Lower-cased without the host's culture: on a Turkish host ToLower()
+        # turns I into a dotless i, which matches no group.
+        $AVDGroupFilter = if (![string]::IsNullOrEmpty($ResourceGroup)) { " | where resourceGroup =~ '{0}'" -f $ResourceGroup.ToLowerInvariant() } else { '' }
         $AVDSize = Invoke-AzGraphQuerySafe -Query ("desktopvirtualizationresources{0} | summarize count()" -f $AVDGroupFilter) -SubscriptionId $RunSubscriptionIds -HideRawOutput:$Obfuscate.IsPresent
         $AVDSizeCount = Get-AzGraphCount -Result $AVDSize
 

@@ -1111,6 +1111,22 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
+    It 'two streams: a retried subscription that works where its stream cannot write its state is cleared from the retry list, and the run after has nothing to retry' {
+        # An earlier run left Sub A and Sub B failed. Stream 0 retries Sub A,
+        # which works, but cannot write its state file; its summary still
+        # names Sub A as done.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -SeedState ([pscustomobject]@{ Completed = @(); Failed = @($script:SubA.Id, $script:SubB.Id) }) -StreamStateBlocked
+        $Run.Console | Should -Match 'ResumeFailedOnly: filtered to 2 previously-failed subscription' -Because $Run.Console
+        $Run.Console | Should -Match '\[stream-0\] WARNING: failed to persist stream state to ' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Run.FailedIds.Count | Should -Be 0 -Because 'both retried subscriptions worked'
+
+        # The next run has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
     It 'two streams: when the resume state cannot be written, the old one is left as it was and every stream state file is kept; once it can be written, -ResumeFailedOnly retries the new failure only, and the run after has nothing to retry' {
         # An earlier run left Sub B failed. This run: Sub A fails, Sub B
         # works, and the resume state cannot be written.

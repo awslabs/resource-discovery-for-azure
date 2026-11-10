@@ -1201,12 +1201,12 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
-    It 'sequential: a clean run leaves a stream state file it did not read, so the next -ResumeFailedOnly retries the failure that file holds, and the run after has nothing to retry' {
+    It 'sequential: a plain run without a subscription leaves the stream state file that holds its failure, so the next -ResumeFailedOnly retries that failure, and the run after has nothing to retry' {
         # An earlier parallel run's failure of Sub A is held only in a kept
         # stream state file. This plain run sees only Sub B, which works.
         $Run = Invoke-CarryOverRun -Subs @($script:SubB) -Stream1Failed $script:SubA.Id
         $Run.ExitCode | Should -Be 0 -Because $Run.Console
-        Test-Path -LiteralPath (Join-Path $Run.Root ('.resume-state-{0}-stream-1.json' -f $script:Tenant)) -PathType Leaf | Should -BeTrue -Because 'a run that did not read the stream state file leaves it'
+        Test-Path -LiteralPath (Join-Path $Run.Root ('.resume-state-{0}-stream-1.json' -f $script:Tenant)) -PathType Leaf | Should -BeTrue -Because 'a run that still holds the failure of Sub A leaves the stream state file'
 
         # The next run retries Sub A, which works.
         $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -ResumeFailedOnly -ReuseHome $Run.Home
@@ -1220,6 +1220,60 @@ function Get-UsageAggregates
         $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -ResumeFailedOnly -ReuseHome $Run.Home
         $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
         $After.ExitCode | Should -Be 0
+    }
+
+    It 'sequential: a plain run in which a subscription works clears its failure held in a kept stream state file, so the next -ResumeFailedOnly and the run after have nothing to retry' {
+        # An earlier parallel run's failure of Sub A is held only in a kept
+        # stream state file. This plain run runs Sub A, which works.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Stream1Failed $script:SubA.Id
+        $Run.Console | Should -Match 'Processing subscription: Sub A' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Run.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'this run read the stream state file and its failure is cleared by the success'
+
+        foreach ($Next in 1..2)
+        {
+            $Again = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -ResumeFailedOnly -ReuseHome $Run.Home
+            $Again.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $Again.Console
+            $Again.Console | Should -Not -Match 'Processing subscription:' -Because $Again.Console
+            $Again.ExitCode | Should -Be 0
+        }
+    }
+
+    It 'two streams: a plain run without a subscription keeps its failure held in a kept stream state file, so the next -ResumeFailedOnly retries it, and the run after has nothing to retry' {
+        # An earlier parallel run's failure of Sub A is held only in stream
+        # 1's kept state file. This plain two-stream run does not see Sub A;
+        # stream 1 runs Sub C, which works, and writes its own state file.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams 2 -Stream1Failed $script:SubA.Id
+        $Run.Console | Should -Match '\[stream-1\] done: Sub C' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Run.FailedIds | Should -Be @($script:SubA.Id) -Because 'the failure of Sub A is kept in the resume state'
+
+        # The next run retries Sub A only, and it works.
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
+        $Retry.Console | Should -Match 'Processing subscription: Sub A' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match 'Processing subscription: Sub B' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match 'Processing subscription: Sub C' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+        $Retry.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'a clean run clears the stream state files it read'
+
+        # The run after that has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
+    It '<Case>: a plain run skips no subscription that a kept stream state file lists as completed' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1; Ran = 'Processing subscription: Sub A' }
+        @{ Case = 'two streams'; Streams = 2; Ran = '\[stream-0\] done: Sub A' }
+    ) {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams $Streams -Stream0Completed @($script:SubA.Id)
+        $Run.Console | Should -Match $Ran -Because $Run.Console
+        $Run.Console | Should -Not -Match '(?i)skipping \(already completed\)' -Because $Run.Console
+        $Run.Console | Should -Not -Match '(?m)^Subscriptions Skipped:' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
     }
 
     # With two streams the session runs no inventory itself, so only the

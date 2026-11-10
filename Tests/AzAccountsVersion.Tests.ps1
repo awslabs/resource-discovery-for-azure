@@ -202,13 +202,16 @@ Import-Module Az.Compute -ErrorAction Stop | Out-Null
 Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
 '@ | Set-Content -LiteralPath $script:PinSession -Encoding utf8
         # The check alone, before any Az module is loaded, as the wrapper and
-        # ResourceInventory.ps1 run it first.
+        # ResourceInventory.ps1 run it first. A -PreloadCompute that is a full
+        # path loads the Az.Compute copy in that folder, as a profile that
+        # imports it by path does.
         $script:CheckSession = Join-Path $script:PinDir 'check.ps1'
         @'
 param([string]$Functions, [string]$Preload = '', [string]$PreloadCompute = '')
 . $Functions
 if ($Preload) { Import-Module Az.Accounts -RequiredVersion $Preload -ErrorAction Stop | Out-Null }
-if ($PreloadCompute) { Import-Module Az.Compute -RequiredVersion $PreloadCompute -ErrorAction Stop | Out-Null }
+if ($PreloadCompute -and [System.IO.Path]::IsPathRooted($PreloadCompute)) { Import-Module $PreloadCompute -ErrorAction Stop | Out-Null }
+elseif ($PreloadCompute) { Import-Module Az.Compute -RequiredVersion $PreloadCompute -ErrorAction Stop | Out-Null }
 Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
 '@ | Set-Content -LiteralPath $script:CheckSession -Encoding utf8
         function script:Invoke-PinSession
@@ -447,6 +450,26 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
             $Again.Status | Should -Be 'Ok' -Because $Again.Text
         }
         (Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder)).Status | Should -Be 'Ok'
+    }
+
+    It 'the same pinning submodule version in two folders is named once in each line of the advice' {
+        # Az.Compute 1.0.0, which asks for exactly 5.5.3, is in the user's
+        # folder and in a later one. The session loaded Az.Accounts 5.5.3 and
+        # the later folder's Az.Compute by path; a new session takes the
+        # user's copy, so the check finds two copies of the same version.
+        $Root = Join-Path $script:PinDir 'same-pin-two-folders'
+        $UserFolder = Join-Path $Root 'user'
+        $SystemFolder = Join-Path $Root 'system'
+        New-PinModule -Root $UserFolder -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+        New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version '5.5.3'
+        New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $SystemFolder -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -Preload '5.5.3' -PreloadCompute (Join-Path $SystemFolder 'Az.Compute/1.0.0/Az.Compute.psd1') -CheckOnly
+        $Stop.Status | Should -Be 'LoadedTooOld' -Because $Stop.Text
+        @([regex]::Matches($Stop.Text, [regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3'))).Count | Should -Be 1 -Because $Stop.Text
+        @([regex]::Matches($Stop.Text, [regex]::Escape('If this stops again with the same Az.Compute 1.0.0'))).Count | Should -Be 1 -Because $Stop.Text
+        @([regex]::Matches($Stop.Text, [regex]::Escape('Install-Module -Name Az.Compute -Repository'))).Count | Should -Be 1 -Because $Stop.Text
     }
 
     It 'names a submodule whose manifest caps Az.Accounts below the minimum (MaximumVersion)' {

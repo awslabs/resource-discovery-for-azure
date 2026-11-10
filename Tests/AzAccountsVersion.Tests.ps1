@@ -356,6 +356,47 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         $Stop.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3'))
     }
 
+    It 'before anything is loaded: with one module folder inside another, the copy checked is the one PowerShell loads from the first folder (<Case>)' -ForEach @(
+        @{ Case = 'the pinning copy in the outer folder stops'; OuterRequires = "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"; InnerRequires = "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"; Status = 'SubModulePinned' }
+        @{ Case = 'a pinning copy only in the inner folder passes'; OuterRequires = "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"; InnerRequires = "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"; Status = 'Ok' }
+    ) {
+        # PSModulePath <root>/mods:<root>/mods/x. PowerShell finds a module
+        # only right under a folder (<folder>/<Name>/<version>), so it loads
+        # Az.Compute 1.0.0 from mods, not 2.0.0 from mods/x, though that
+        # copy's path also starts with mods.
+        $Root = Join-Path $script:PinDir ('unloaded-nested-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $Outer = Join-Path $Root 'mods'
+        $Inner = Join-Path $Outer 'x'
+        New-PinModule -Root $Outer -Name 'Az.Accounts' -Version '5.5.3'
+        New-PinModule -Root $Outer -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $Outer -Name 'Az.Compute' -Version '1.0.0' -Requires $OuterRequires
+        New-PinModule -Root $Inner -Name 'Az.Compute' -Version '2.0.0' -Requires $InnerRequires
+
+        # What PowerShell itself loads there, in a new session.
+        $Old = $env:PSModulePath
+        $OldHome = $env:HOME
+        $OldData = $env:XDG_DATA_HOME
+        try
+        {
+            $env:PSModulePath = @($Outer, $Inner) -join [System.IO.Path]::PathSeparator
+            $env:HOME = Join-Path $script:PinDir 'home'
+            $env:XDG_DATA_HOME = Join-Path $env:HOME '.local/share'
+            $Loaded = (& (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -Command '(Import-Module Az.Compute -PassThru -ErrorAction Stop | Where-Object Name -eq ''Az.Compute'').Version.ToString()' | Out-String).Trim()
+        }
+        finally
+        {
+            $env:PSModulePath = $Old
+            $env:HOME = $OldHome
+            $env:XDG_DATA_HOME = $OldData
+        }
+        $Loaded | Should -Be '1.0.0' -Because 'PowerShell loads the copy right under the first folder'
+
+        $Check = Invoke-PinSession -ModulePath @($Outer, $Inner) -CheckOnly
+        $Check.Status | Should -Be $Status -Because $Check.Text
+        if ($Status -eq 'SubModulePinned') { $Check.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3')) }
+        else { $Check.Text | Should -Not -Match 'Az\.Compute 2\.0\.0 asks for' -Because 'that copy is never loaded while the outer folder holds one' }
+    }
+
     It 'an older Az.Accounts loaded first: also names an unloaded submodule copy that would load and pins it, so one stop gives all the advice' {
         # Az.Accounts 5.5.3 is loaded (a profile or an older tool), 5.5.4 is
         # installed, and the Az.Compute that would load (not loaded yet) asks

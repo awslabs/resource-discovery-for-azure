@@ -458,6 +458,8 @@ Disable-ConsoleQuickEdit
 
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
+# Set by Save-CompletedSubscriptionIds when a save of the resume state fails.
+$ResumeStateSaveFailed = $false
 
 # Per-subscription metrics-phase auth health, aggregated across the whole run.
 # This is the metrics counterpart to $Global:ConsumptionFailedSubs and works the
@@ -2832,6 +2834,19 @@ if (@($UncarriedSkipped).Count -gt 0)
         Write-Host ("  ./ResourceInventory.ps1 -TenantID {0} -SubscriptionID {1}" -f $TenantID, $U.Id) -ForegroundColor Red
     }
     Write-Host "=================================================================" -ForegroundColor Red
+}
+
+# A save of the resume state that failed this run (Save-CompletedSubscriptionIds
+# warned) can leave the file listing a subscription this run failed as
+# completed, so a -Resume run would skip it and carry its old report: say so,
+# and how to run instead. A failed subscription already sets exit 2.
+if ($ResumeStateSaveFailed)
+{
+    Write-Host ""
+    Write-Host "============== FAILED (resume state not saved) ==============" -ForegroundColor Red
+    Write-Host ("The resume state file {0} could not be written at least once this run (see the WARNING above), so it may still list a subscription this run failed as completed: a -Resume or -ResumeFailedOnly run would skip it and carry its old report." -f $ResumeStateFile) -ForegroundColor Red
+    Write-Host "Fix the cause (for example, free up disk space), then run again without -Resume or -ResumeFailedOnly: it collects every subscription." -ForegroundColor Red
+    Write-Host "=============================================================" -ForegroundColor Red
 }
 
 # Stop the wrapper transcript on the normal-completion path. Error paths take

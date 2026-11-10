@@ -2208,13 +2208,14 @@ if ($null -ne $OuterZipFile)
     }
 }
 
-# Clean up resume state on a fully successful run (all subs processed, no failures
-# this run AND no pending retries from a prior run). Otherwise leave it so a
-# future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
 # Retry-list entries this run did not collect because their subscription,
 # still listed, was not in its set (see $RetryNotInRunIds): their reports are
 # missing, so the run ends with exit 2 and says how to end that.
 $RetryOwedNotInRun = @($FailedAttempts | Where-Object { $null -ne $_ -and $RetryNotInRunIds -contains [string]$_.Id })
+
+# Clean up resume state on a fully successful run (all subs processed, no failures
+# this run AND no pending retries from a prior run). Otherwise leave it so a
+# future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
 if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
@@ -2469,12 +2470,12 @@ elseif (($FailedAttempts.Count - $RetryOwedNotInRun.Count) -gt 0)
     Write-Host ("Pending Retries:         {0} subscription(s) in the retry list (FailedAttempts)" -f ($FailedAttempts.Count - $RetryOwedNotInRun.Count)) -ForegroundColor Yellow
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
+Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($RetryOwedNotInRun.Count -gt 0)
 {
     Write-Host ("Not In This Run:         {0} ({1}) - on the retry list, but not in this run's subscription set (disabled without -IncludeDisabled, or not readable)" -f $RetryOwedNotInRun.Count, (@($RetryOwedNotInRun | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', ')) -ForegroundColor Yellow
     Write-Host ("  Fix that and run again, or delete the resume state files .resume-state-{0}.json and .resume-state-{0}-stream-*.json in the inventory folder to start over with an empty retry list." -f $TenantID) -ForegroundColor Yellow
 }
-Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile)
 {
     Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green

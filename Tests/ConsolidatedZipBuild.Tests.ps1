@@ -189,14 +189,14 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         $R = Invoke-BundleBlock -Root $Root
         $R.BundleBuildError | Should -BeLike ('*1 report zip(s) found by the output check are gone now: {0}*' -f $Gone)
         # A -Resume run skips the subscriptions this run completed, so it would not collect them.
-        $R.BundleBuildError | Should -BeLike '*Run again without -Resume*'
+        $R.BundleBuildError | Should -BeLike '*Run again without -Resume or -ResumeFailedOnly*'
         $R.OuterZipFile | Should -BeNullOrEmpty
         @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*' -or $_.Name -like 'rda-build-*' }) | Should -BeNullOrEmpty
         # Every zip gone: no consolidated zip, and the run says so with exit 2 too.
         Remove-Item -LiteralPath $Kept -Force
         $R2 = Invoke-BundleBlock -Root $Root
         $R2.BundleBuildError | Should -BeLike '*report zip(s) found by the output check are all gone now*'
-        $R2.BundleBuildError | Should -BeLike '*Run again without -Resume*'
+        $R2.BundleBuildError | Should -BeLike '*Run again without -Resume or -ResumeFailedOnly*'
     }
 
     It 'the list of zips the output check found is set before that check, so the build can read it when the check does not run' {
@@ -517,11 +517,17 @@ Describe 'Run-AllSubscriptions.ps1: the end of a run without a consolidated zip'
         $InventoryRoot = Join-Path $TestDrive 'inv-some-gone'
         New-Item -ItemType Directory -Path $InventoryRoot -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $InventoryRoot 'kept.zip') -Value 'x'
-        $ActualSubZips = @([pscustomobject]@{ FullName = (Join-Path $InventoryRoot 'kept.zip') }, [pscustomobject]@{ FullName = (Join-Path $InventoryRoot 'gone.zip') })
-        $BundleBuildError = 'x'
+        # Set-Variable: these are read only by the lifted block.
+        Set-Variable -Name ActualSubZips -Value @([pscustomobject]@{ FullName = (Join-Path $InventoryRoot 'kept.zip') }, [pscustomobject]@{ FullName = (Join-Path $InventoryRoot 'gone.zip') })
+        Set-Variable -Name BundleBuildError -Value 'x'
         $Printed = @(. $script:BannerBlock 6>&1 | ConvertTo-Lines)
         $Printed | Should -Not -Contain ('The per-subscription report zips of this run are still on disk under {0}.' -f $InventoryRoot)
         $Printed | Should -Contain ('1 per-subscription report zip(s) of this run are gone; the others are still on disk under {0}.' -f $InventoryRoot)
+        # Every one gone: no line says others are left.
+        Remove-Item -LiteralPath (Join-Path $InventoryRoot 'kept.zip') -Force
+        $Printed = @(. $script:BannerBlock 6>&1 | ConvertTo-Lines)
+        @($Printed | Where-Object { $_ -like '*still on disk*' }) | Should -BeNullOrEmpty
+        $Printed | Should -Contain ('All 2 per-subscription report zip(s) of this run are gone from {0}.' -f $InventoryRoot)
     }
 
     It 'the banner says the reports went with the folder when the inventory folder is gone by then' {

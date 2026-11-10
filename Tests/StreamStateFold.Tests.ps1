@@ -330,6 +330,11 @@ Describe 'Retry-list entries this run leaves out' {
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
         $Top = @($Ast.EndBlock.Statements)
         $script:NotInRunSet = @($Top | Where-Object { $_.Extent.Text -like '$RetryNotInRunIds = *' })
+        # sync/pr-61 also limits them to subscriptions the tenant still lists.
+        $script:TopStatements = $Top
+        $script:ListedSet = @($Top | Where-Object { $_.Extent.Text -like '$ListedSubscriptionIds = *' })
+        $script:TimeAt = [array]::IndexOf($Top, @($Top | Where-Object { $_.Extent.Text.StartsWith('Write-Host ("Execution Time:') })[0])
+        $script:StopAt = [array]::IndexOf($Top, @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Extent.Text.Contains('Stop-Transcript') })[-1])
         $script:OwedSet = @($Top | Where-Object { $_.Extent.Text -like '$RetryOwedNotInRun = *' })
         $script:OwedIf = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RetryOwedNotInRun.Count -gt 0' })
         $script:WrapperSource = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
@@ -344,7 +349,9 @@ Describe 'Retry-list entries this run leaves out' {
         $FailedAttempts = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; Attempts = 1; Reason = 'r' }, [pscustomobject]@{ Id = 'sub-off'; Name = 'Sub Off'; Attempts = 1; Reason = 'r' })
         $RetryLimitedOwed = @()
         $TenantID = 't'
-        $null = $Subscriptions, $RunSubscriptionIds, $FailedAttempts, $RetryLimitedOwed, $TenantID
+        $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' }, [pscustomobject]@{ Id = 'sub-off'; Name = 'Sub Off' })
+        $null = $Subscriptions, $RunSubscriptionIds, $FailedAttempts, $RetryLimitedOwed, $TenantID, $AllSubscriptions
+        foreach ($Listed in $script:ListedSet) { . ([scriptblock]::Create($Listed.Extent.Text)) }
         . ([scriptblock]::Create($script:NotInRunSet[0].Extent.Text))
         . ([scriptblock]::Create($script:OwedSet[0].Extent.Text))
         @($RetryOwedNotInRun | ForEach-Object Id) | Should -Be @('sub-off')
@@ -352,6 +359,52 @@ Describe 'Retry-list entries this run leaves out' {
         @($Out | Where-Object { $_ -like 'Not In This Run:*Sub Off (sub-off)*' }).Count | Should -Be 1
         @($Out | Where-Object { $_ -like '*delete the resume state files .resume-state-t.json*' }).Count | Should -Be 1
         $script:WrapperSource | Should -Match ([regex]::Escape('-or (@($RetryOwedNotInRun).Count -gt 0)') + '[^\n]*\) -SubscriptionsFailed')
+    }
+
+    It 'are named in the run summary, before the wrapper transcript stops, so the transcript says why the run ends with exit 2' {
+        $OwedIfAt = [array]::IndexOf($script:TopStatements, $script:OwedIf[0])
+        $OwedIfAt | Should -BeLessThan $script:TimeAt
+        $OwedIfAt | Should -BeLessThan $script:StopAt
+    }
+
+    It 'leave out a subscription the tenant no longer lists, which no run could collect (sync/pr-61)' -Skip:($script:ListedSet.Count -eq 0) {
+        $Subscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        $RunSubscriptionIds = @('sub-a')
+        $FailedAttempts = @([pscustomobject]@{ Id = 'sub-gone'; Name = 'Sub Gone'; Attempts = 1; Reason = 'r' })
+        $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        $null = $Subscriptions, $RunSubscriptionIds, $FailedAttempts, $AllSubscriptions
+        foreach ($Listed in $script:ListedSet) { . ([scriptblock]::Create($Listed.Extent.Text)) }
+        . ([scriptblock]::Create($script:NotInRunSet[0].Extent.Text))
+        @($RetryNotInRunIds) | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'A per-stream file an earlier run put aside as unreadable' {
+    It 'is named, and keeps the state with exit 2, on every -Resume until it is fixed or deleted' {
+        $Root = Join-Path $script:TestBase ('aside-' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        $Aside = Join-Path $Root '.resume-state-t-stream-3.json.unreadable-20261109000000000'
+        Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
+        foreach ($Run in 1..2)
+        {
+            $R = script:Invoke-Fold -Root $Root -Resume $true
+            $R.Unreadable | Should -Be @($Aside)
+            @($R.Lines | Where-Object { $_ -like ('WARNING: The per-stream resume state file {0}, put aside by an earlier run*rename it back to *.resume-state-t-stream-3.json for the next -Resume*' -f $Aside) }).Count | Should -Be 1
+        }
+        Remove-Item -LiteralPath $Aside -Force
+        (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'The stream worker and the Az context snapshot use literal paths' {
+    It 'writes its summary, and the parent removes the snapshot, by literal path' {
+        $RepoRoot = Split-Path $PSScriptRoot -Parent
+        $Worker = Get-Content -LiteralPath (Join-Path $RepoRoot 'Run-AllSubscriptions.Stream.ps1') -Raw
+        $Wrapper = Get-Content -LiteralPath (Join-Path $RepoRoot 'Run-AllSubscriptions.ps1') -Raw
+        $Worker | Should -Not -Match ([regex]::Escape('Set-Content -Path $StreamSummaryPath'))
+        ([regex]::Matches($Worker, [regex]::Escape('Set-Content -LiteralPath $StreamSummaryPath'))).Count | Should -Be 3
+        $Wrapper | Should -Not -Match ([regex]::Escape('Test-Path -Path $AzContextSnapshot'))
+        $Wrapper | Should -Not -Match ([regex]::Escape('Remove-Item -Path $AzContextSnapshot'))
     }
 }
 

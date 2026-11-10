@@ -651,7 +651,10 @@ if ($StrandedStreamFiles.Count -gt 0)
     {
         try
         {
-            $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
+            # -ErrorAction Stop: a file that cannot be opened (locked, no
+            # access) is a non-terminating error, which would leave it
+            # counted as read with nothing taken from it.
+            $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
             if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
             $ReadStreamStateFiles += $StreamFile.FullName
@@ -1565,7 +1568,9 @@ else
                 $PerStreamFile = $StreamFile.FullName
                 try
                 {
-                    $Obj = Get-Content -Path $PerStreamFile -Raw | ConvertFrom-Json
+                    # -ErrorAction Stop, as at the start: a file that cannot
+                    # be opened is not counted as read.
+                    $Obj = Get-Content -LiteralPath $PerStreamFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                     if ($null -ne $Obj.Completed)
                     {
                         $AllCompletedFromStreams += @($Obj.Completed)
@@ -1629,9 +1634,13 @@ else
             # When the unified file could not be written, they are this run's
             # only record of its completions and failures: they are kept, and
             # the next run reads them at its start.
+            # Only the files this run read are removed, as in the clean-run
+            # clean-up: a file it could not read (truncated, locked) may hold
+            # a failure the unified file does not, so it is left for the next
+            # run's start to read.
             if ($UnifiedStateSaved)
             {
-                foreach ($StreamFile in $AllStreamFiles)
+                foreach ($StreamFile in @($AllStreamFiles | Where-Object { $ReadStreamStateFiles -contains $_.FullName }))
                 {
                     $PerStreamFile = $StreamFile.FullName
                     try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }

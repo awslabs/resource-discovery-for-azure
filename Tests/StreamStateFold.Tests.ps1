@@ -162,13 +162,22 @@ Describe 'The per-stream resume state files at the start of a run' {
         Test-ResumeStateSaved -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = $Entry.LastFailedAt; Reason = 'same'; Attempts = 2 }) -Reports @() | Should -BeFalse
     }
 
-    It 'put an empty file aside on -Resume, not read it as a file with no record and remove it' {
-        $Empty = Join-Path $script:Root '.resume-state-t-stream-6.json'
-        New-Item -ItemType File -Path $Empty -Force | Out-Null
+    It 'put a file that is <Kind> aside on -Resume, not read it as a file with no record and remove it' -ForEach @(@{ Kind = 'empty'; Text = '' }, @{ Kind = 'an empty object'; Text = '{}' }, @{ Kind = 'a number'; Text = '0' }, @{ Kind = 'a string'; Text = '"text"' }) {
+        $Odd = Join-Path $script:Root '.resume-state-t-stream-6.json'
+        Set-Content -LiteralPath $Odd -Value $Text -NoNewline
         $R = script:Invoke-Fold -Root $script:Root -Resume $true
-        Test-Path -LiteralPath $Empty | Should -BeFalse
+        Test-Path -LiteralPath $Odd | Should -BeFalse
         @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-6.json.unreadable-*').Count | Should -Be 1
         @($R.Unreadable).Count | Should -Be 1
+    }
+
+    It 'put a file that is not a stream state aside in a run without -Resume, not remove it' {
+        $Odd = Join-Path $script:Root '.resume-state-t-stream-7.json'
+        Set-Content -LiteralPath $Odd -Value '{}' -NoNewline
+        $R = script:Invoke-Fold -Root $script:Root -Resume $false
+        Test-Path -LiteralPath $Odd | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-7.json.unreadable-*').Count | Should -Be 1
+        @($R.StaleAside).Count | Should -Be 1
     }
 
     It 'end, in a run without -Resume, the older completion of a subscription they list as failed before they are removed' {
@@ -203,7 +212,7 @@ Describe 'The per-stream resume state files at the start of a run' {
         $R = script:Invoke-Fold -Root $script:Root -Resume $false
         Test-Path -LiteralPath $Bad | Should -BeFalse
         @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-4.json.unreadable-*').Count | Should -Be 1
-        @($R.Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0} of an earlier run:*removed once this run has collected*' -f $Bad) }).Count | Should -Be 1
+        @($R.Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0} of an earlier run:*removed once this run has collected, unless the resume state still lists as completed a subscription this run did not collect.' -f $Bad) }).Count | Should -Be 1
     }
 
     It 'are removed as stale by a run without -Resume or -ResumeFailedOnly' {
@@ -502,12 +511,16 @@ Describe 'A per-stream file an earlier run put aside as unreadable' {
         Test-Path -LiteralPath $Aside | Should -BeFalse
         Test-Path -LiteralPath $OwnAside | Should -BeTrue -Because 'the file this run put aside in its own merge is named with exit 2, to be fixed and renamed back'
         Remove-Item -LiteralPath $OwnAside -Force
-        # A run that left out a listed subscription keeps the file: it may hold that one's failure.
+        # While the state lists as completed a subscription the run did not
+        # collect (left out, or missing from the listing), the file is kept: it
+        # may hold a newer failure of it.
         Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
-        $Out = @(& { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = @($Aside); $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a' }, [pscustomobject]@{ Id = 'sub-off' }); $RunSubscriptionIds = @('sub-a'); $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles, $AllSubscriptions, $RunSubscriptionIds; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>&1 | ForEach-Object { [string]$_ })
+        $Out = @(& { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = @($Aside); $CompletedIds = @('sub-a', 'sub-unlisted'); $RunSubscriptionIds = @('sub-a'); $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles, $CompletedIds, $RunSubscriptionIds; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>&1 | ForEach-Object { [string]$_ })
         Test-Path -LiteralPath $Aside | Should -BeTrue
-        @($Out | Where-Object { $_ -like ('Kept: {0}, *left out 1 listed subscription(s)*' -f $Aside) }).Count | Should -Be 1
-        Remove-Item -LiteralPath $Aside -Force
+        @($Out | Where-Object { $_ -like ('Kept: {0}, *still lists 1 subscription(s) this run did not collect as completed*' -f $Aside) }).Count | Should -Be 1
+        # A left-out subscription with no completion (a disabled one) does not keep it.
+        $null = & { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = @($Aside); $CompletedIds = @('sub-a'); $RunSubscriptionIds = @('sub-a'); $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a' }, [pscustomobject]@{ Id = 'sub-off' }); $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles, $CompletedIds, $RunSubscriptionIds, $AllSubscriptions; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>$null
+        Test-Path -LiteralPath $Aside | Should -BeFalse
         (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
     }
 }

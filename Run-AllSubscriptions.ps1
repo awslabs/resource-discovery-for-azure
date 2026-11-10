@@ -770,7 +770,7 @@ if ($Resume -or $ResumeFailedOnly)
     foreach ($Aside in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue))
     {
         $AsideOf = $Aside.FullName -replace '\.unreadable-[0-9]+$', ''
-        Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
+        Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it (a run without -Resume or -ResumeFailedOnly also removes it, as stale)." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
         $UnreadableStreamFiles += $Aside.FullName
     }
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -873,6 +873,15 @@ else
             Write-Host ("ERROR: Could not remove the per-stream resume state file {0} of an earlier run: {1}. Remove it, then run again. Nothing was collected (exit 1)." -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Red
             Exit-Wrapper -Code 1
         }
+    }
+    # A file an earlier run put aside as unreadable is stale too: this run
+    # collects every subscription, so its records cannot be newer than this
+    # run's, and folding it in later would undo this run's completions. One
+    # that cannot be removed is named; no -Resume reads it as owed then either.
+    foreach ($Aside in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue))
+    {
+        try { Remove-Item -LiteralPath $Aside.FullName -Force -ErrorAction Stop }
+        catch { Write-Host ("WARNING: Could not remove {0}, a per-stream resume state file an earlier run put aside as unreadable and this run makes stale: {1}. Delete it." -f $Aside.FullName, $_.Exception.Message) -ForegroundColor Yellow }
     }
 }
 
@@ -2212,6 +2221,9 @@ if ($null -ne $OuterZipFile)
 # still listed, was not in its set (see $RetryNotInRunIds): their reports are
 # missing, so the run ends with exit 2 and says how to end that.
 $RetryOwedNotInRun = @($FailedAttempts | Where-Object { $null -ne $_ -and $RetryNotInRunIds -contains [string]$_.Id })
+# Retry-list entries of subscriptions the tenant no longer lists: no run can
+# collect them, so they are named apart, not as owed and not as pending.
+$RetryNotListed = @($FailedAttempts | Where-Object { $null -ne $_ -and $ListedSubscriptionIds -notcontains [string]$_.Id })
 
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
@@ -2444,6 +2456,10 @@ if ($CollectorFailuresList.Count -gt 0)
     Write-Host ""
 }
 
+if ($RetryNotListed.Count -gt 0)
+{
+    Write-Host ("Not Listed:              {0} ({1}) - on the retry list, but the tenant no longer lists them, so no run can collect them; delete the resume state files .resume-state-{2}.json and .resume-state-{2}-stream-*.json in the inventory folder to drop them" -f $RetryNotListed.Count, (@($RetryNotListed | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', '), $TenantID) -ForegroundColor Yellow
+}
 if ($RetryOwedNotInRun.Count -gt 0)
 {
     Write-Host ("Not In This Run:         {0} ({1}) - on the retry list, but not in this run's subscription set (disabled without -IncludeDisabled, or not readable)" -f $RetryOwedNotInRun.Count, (@($RetryOwedNotInRun | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', ')) -ForegroundColor Yellow
@@ -2464,7 +2480,7 @@ if ($FailedSubscriptions.Count -gt 0)
         Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
     }
 }
-elseif (($FailedAttempts.Count - $RetryOwedNotInRun.Count) -gt 0)
+elseif (($FailedAttempts.Count - $RetryOwedNotInRun.Count - $RetryNotListed.Count) -gt 0)
 {
     # No subscription failed this run, but the retry list is not empty: entries
     # from a prior run that were not retried, or subscriptions whose metrics or
@@ -2472,7 +2488,7 @@ elseif (($FailedAttempts.Count - $RetryOwedNotInRun.Count) -gt 0)
     # not lose track of them simply because no subscription failed outright.
     # Those not in this run's subscription set are named under Not In This Run
     # instead: -ResumeFailedOnly cannot collect them either.
-    Write-Host ("Pending Retries:         {0} subscription(s) in the retry list (FailedAttempts)" -f ($FailedAttempts.Count - $RetryOwedNotInRun.Count)) -ForegroundColor Yellow
+    Write-Host ("Pending Retries:         {0} subscription(s) in the retry list (FailedAttempts)" -f ($FailedAttempts.Count - $RetryOwedNotInRun.Count - $RetryNotListed.Count)) -ForegroundColor Yellow
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green

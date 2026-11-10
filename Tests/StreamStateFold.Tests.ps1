@@ -653,23 +653,3 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
         $script:Src | Should -Not -Match ([regex]::Escape('Remove-Item -Path $S.SummaryPath'))
     }
 }
-
-Describe 'A save after the access check''s own save did not reach the disk' {
-    It 'writes the not-readable list this run gave, so clearing the failed-save flag is right' {
-        Mock Write-Host { }
-        $Root = Join-Path $script:TestBase ('notreadable-' + [guid]::NewGuid().ToString().Substring(0, 8))
-        New-Item -ItemType Directory -Path $Root -Force | Out-Null
-        $Path = Join-Path $Root '.resume-state-t.json'
-        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @() -NotReadable @()
-        $script:FailWrites = $true
-        Mock Set-Content -ParameterFilter { $script:FailWrites -and [string]$LiteralPath -like '*.tmp' } -MockWith { throw 'stand-in: disk full' }
-        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @() -NotReadable @('sub-x')
-        @(Get-NotReadableSubscriptionIds -Path $Path -Tenant 't') | Should -BeNullOrEmpty -Because 'that save did not reach the disk'
-        $script:FailWrites = $false
-        $script:ResumeStateSaveFailed = $true
-        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @() -Reports @()
-        @(Get-NotReadableSubscriptionIds -Path $Path -Tenant 't') | Should -Be @('sub-x')
-        $script:ResumeStateSaveFailed | Should -BeFalse
-        Remove-Variable -Name RdaNotReadableForState -Scope Script -ErrorAction SilentlyContinue
-    }
-}

@@ -669,7 +669,7 @@ if ($StrandedStreamFiles.Count -gt 0)
             if ($UnreadStreamStateFiles -notcontains $StreamFile.FullName)
             {
                 $UnreadStreamStateFiles += $StreamFile.FullName
-                Write-Host ('WARNING: Could not read the stream resume state file {0}, so its records were not read in this run. It is kept for a later run.' -f $StreamFile.FullName) -ForegroundColor Yellow
+                Write-Host ('WARNING: Could not read the stream resume state file {0}, so its records were not read in this run.' -f $StreamFile.FullName) -ForegroundColor Yellow
             }
         }
     }
@@ -1603,7 +1603,7 @@ else
                     if ($UnreadStreamStateFiles -notcontains $PerStreamFile)
                     {
                         $UnreadStreamStateFiles += $PerStreamFile
-                        Write-Host ('WARNING: Could not read the stream resume state file {0}, so its records were not read in this run. It is kept for a later run.' -f $PerStreamFile) -ForegroundColor Yellow
+                        Write-Host ('WARNING: Could not read the stream resume state file {0}, so its records were not read in this run.' -f $PerStreamFile) -ForegroundColor Yellow
                     }
                 }
             }

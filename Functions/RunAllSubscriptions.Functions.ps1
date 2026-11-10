@@ -470,10 +470,10 @@ function Get-CompletedSubscriptionIds
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant)
         {
             Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $State.TenantID) -ForegroundColor Yellow
@@ -499,10 +499,10 @@ function Get-FailedAttempts
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.FailedAttempts) { return @() }
         return @($State.FailedAttempts)
@@ -521,10 +521,10 @@ function Get-CompletedReports
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.CompletedReports) { return @() }
         return @($State.CompletedReports)
@@ -543,10 +543,10 @@ function Get-NotReadableSubscriptionIds
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.NotReadableSubscriptionIds) { return @() }
         return @($State.NotReadableSubscriptionIds)
@@ -566,10 +566,10 @@ function Test-ResumeStateWithoutReports
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return $false }
         return ($null -eq $State.PSObject.Properties['CompletedReports'])
     }
@@ -618,7 +618,7 @@ function Save-CompletedSubscriptionIds
         # a large tenant / Cloud Shell run that gets killed). The temp file shares
         # the target directory so the move stays on the same volume.
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8
+        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch
@@ -641,7 +641,7 @@ function Test-ResumeStateSaved
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return ($WantIds.Count -eq 0 -and $WantFailed.Count -eq 0) }
     $SavedIds = @(Get-CompletedSubscriptionIds -Path $Path -Tenant $Tenant | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
     if (($SavedIds -join "`n") -ne ($WantIds -join "`n")) { return $false }
-    $FailedKey = { param($Entry) '{0}|{1}|{2}' -f [string]$Entry.Id, $(if ($Entry.PSObject.Properties['Attempts']) { [string]$Entry.Attempts } else { '' }), [string]$Entry.Reason }
+    $FailedKey = { param($Entry) '{0}|{1}|{2}' -f [string]$Entry.Id, $(if ($Entry.PSObject.Properties['Attempts']) { [string]$Entry.Attempts } else { '' }), $(if ($Entry.PSObject.Properties['Reason']) { [string]$Entry.Reason } else { '' }) }
     $SavedFailed = @(Get-FailedAttempts -Path $Path -Tenant $Tenant | Where-Object { $null -ne $_ } | ForEach-Object { & $FailedKey $_ } | Sort-Object)
     if (($SavedFailed -join "`n") -ne (@($WantFailed | ForEach-Object { & $FailedKey $_ } | Sort-Object) -join "`n")) { return $false }
     $WantReports = Get-LatestCompletedReports -Reports $Reports
@@ -657,17 +657,22 @@ function Test-ResumeStateSaved
 # A per-stream resume state file that could not be read is renamed aside (to
 # <name>.unreadable-<time>), so no stream of a later run writes over it and no
 # later run folds it in again, and it is named in a warning with what to do.
-# Returns the path it is now at (the old path when it cannot be renamed).
+# Returns the path it is now at: the old path when it cannot be renamed, which
+# the warning then says.
 function Move-UnreadableStreamFile
 {
     param([Parameter(Mandatory = $true)][string]$Path, [string]$Reason, [switch]$Interrupted)
     $Aside = '{0}.unreadable-{1}' -f $Path, (Get-Date -Format 'yyyyMMddHHmmssfff')
-    $Now = $Path
-    try { Move-Item -LiteralPath $Path -Destination $Aside -ErrorAction Stop; $Now = $Aside }
-    catch { Write-Verbose ('Could not rename {0} aside: {1}' -f $Path, $_.Exception.Message) }
     $Of = if ($Interrupted) { ' of an interrupted run' } else { '' }
-    Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {3}: fix it and rename it back to {0} for the next -Resume to fold it in, or delete it." -f $Path, $Of, $Reason, $Now) -ForegroundColor Yellow
-    return $Now
+    try { Move-Item -LiteralPath $Path -Destination $Aside -ErrorAction Stop }
+    catch
+    {
+        # Left under its own name: the caller stops, or keeps the state.
+        Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} It could not be renamed aside either: {3}" -f $Path, $Of, $Reason, $_.Exception.Message) -ForegroundColor Yellow
+        return $Path
+    }
+    Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {3}: fix it and rename it back to {0} for the next -Resume to fold it in, or delete it." -f $Path, $Of, $Reason, $Aside) -ForegroundColor Yellow
+    return $Aside
 }
 
 # Update an in-memory FailedAttempts list to record (or refresh) one sub's

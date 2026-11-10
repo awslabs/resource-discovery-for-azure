@@ -92,7 +92,8 @@ $Global:ResourceCount = 1
     $GateText = $Top[$ScopeAt].Extent.Text + "`n`$AccessDecision = [pscustomobject]@{ InaccessibleIds = @(@(`$Global:RdaRlUnreadableIds) | Where-Object { `$_ -and @(`$ScopeForProbe | ForEach-Object { [string]`$_.Id }) -contains `$_ }) }`n"
     $GateText += "if (`$AllowPartialAccess) { `$Subscriptions = @(`$Subscriptions | Where-Object { `$AccessDecision.InaccessibleIds -notcontains `$_.Id }) }`n"
     $OwedAt = script:Find-TopIndex -After $ScopeAt -What 'the retry-limited ids this run does not collect' -Match { param($s) $s.Extent.Text.StartsWith('$RetryLimitedNotInRunIds = ') }
-    $GateText += (script:Join-Top -From ($OwedAt - 1) -To $OwedAt) + "`n"
+    # The run's subscription ids, every retry entry it leaves out, and those past the limit.
+    $GateText += (script:Join-Top -From ($OwedAt - 2) -To $OwedAt) + "`n"
     $RecordText = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ScopeForProbe.Count -gt 0' -and $_.Extent.Text.Contains('-NotReadable $NotReadableIds') } | ForEach-Object { $_.Extent.Text }) -join "`n"
 
     # The sequential loop: the body of `if ($ParallelStreams -le 1)`.
@@ -145,7 +146,9 @@ $Global:ResourceCount = 1
 
     # The exit code, as the wrapper computes it at the end.
     $ExitAt = script:Find-TopIndex -After $TimeAt -What 'the exit-code computation' -Match { param($s) $s.Extent.Text.StartsWith('$WrapperExitCode = Get-WrapperExitCode') }
-    $ExitText = @($Top[($ExitAt - 2)..$ExitAt] | ForEach-Object { $_.Extent.Text }) -join "`n"
+    # The auth and collector flags, the retry entries the run left out (and their
+    # summary line), then the exit code.
+    $ExitText = @($Top[($ExitAt - 4)..$ExitAt] | ForEach-Object { $_.Extent.Text }) -join "`n"
 
     # Each run starts the way a new wrapper process does: run-wide totals empty.
     $Prologue = "function Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" +

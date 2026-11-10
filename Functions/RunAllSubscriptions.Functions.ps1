@@ -1241,6 +1241,7 @@ function Write-StreamState
     catch
     {
         Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
+        Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
     }
 }
 

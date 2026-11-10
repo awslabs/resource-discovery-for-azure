@@ -635,6 +635,25 @@ Describe 'Run-AllSubscriptions.ps1: the transcript and the main summary of the s
         @(Get-ChildItem -LiteralPath $Root -File) | Should -BeNullOrEmpty
     }
 
+    It 'the version of the main summary and the bundle falls back to the loaded one when Version.json cannot be read, with no error printed' -ForEach @(@{ Var = 'MainVer'; Obj = 'VerObj' }, @{ Var = 'BundleVer'; Obj = 'BundleVerObj' }) {
+        $Try = @($script:WrapperAst.FindAll({ $args[0] -is [System.Management.Automation.Language.TryStatementAst] -and $args[0].Body.Extent.Text -match ('^\{\s*\$' + $Obj + ' = Get-Content') }, $true))
+        $Try.Count | Should -Be 1
+        $Code = $Try[0].Extent.Text.Replace('$PSScriptRoot', '$NoVersionRoot')
+        $NoVersionRoot = Join-Path $TestDrive 'no-version'
+        New-Item -ItemType Directory -Path $NoVersionRoot -Force | Out-Null
+        $Before = $Global:Version
+        try
+        {
+            $Global:Version = '9.9.9'
+            Set-Variable -Name $Var -Value '9.9.9'
+            $Err = @(. ([scriptblock]::Create($Code)) 2>&1)
+            (Get-Variable -Name $Var -ValueOnly) | Should -Be '9.9.9'
+            $Err | Should -BeNullOrEmpty
+            $null = $NoVersionRoot
+        }
+        finally { $Global:Version = $Before }
+    }
+
     It 'a main summary that cannot be built leaves no file under the name it took, empty or partial, and is not added to the zip' {
         $SummaryIf = Find-WrapperIf -Condition '$null -ne $OuterZipFile' -Contains 'New-RdaAllSubHtmlSummary'
         # The block loads the summary functions from the wrapper's folder; here a

@@ -234,7 +234,7 @@ function New-RdaAllSubHtmlSummary
         $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
     }
 
-    $ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $ObfPattern = '^(prod_|nonprod_)(aks_|vmss_|databricks_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     $Samples = New-Object System.Collections.Generic.List[string]
     $SubReports = @()
     $ServiceAgg = [ordered]@{}

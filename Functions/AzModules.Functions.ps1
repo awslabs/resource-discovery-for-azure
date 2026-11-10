@@ -242,7 +242,11 @@ function Get-RdaAzAccountsPinMessage
         [string]$Effect = 'so PowerShell loads that older copy for it in every new session'
     )
 
-    $Pinning = @($Pinning | Where-Object { $null -ne $_ })
+    # One entry per Name and Version, in the order given: the same version in
+    # two folders (the user's and all users') is the same advice, so it is
+    # printed once.
+    $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $Pinning = @($Pinning | Where-Object { $null -ne $_ -and $Seen.Add(('{0}|{1}' -f $_.Name, $_.Version)) })
     if ($Pinning.Count -eq 0) { return @() }
     $Lines = @()
     foreach ($P in $Pinning)

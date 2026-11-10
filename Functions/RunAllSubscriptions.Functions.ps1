@@ -590,7 +590,8 @@ function Save-CompletedSubscriptionIds
         # a large tenant / Cloud Shell run that gets killed). The temp file shares
         # the target directory so the move stays on the same volume.
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8
+        # -ErrorAction Stop: a write error (a full disk) must not reach the move.
+        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8 -ErrorAction Stop
         [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch
@@ -1141,7 +1142,7 @@ function Write-StreamState
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
             Reports        = @($Reports)
-        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$Path.tmp" -Encoding utf8
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$Path.tmp" -Encoding utf8 -ErrorAction Stop
         # Swapped into place in one rename, as Save-CompletedSubscriptionIds
         # does: a stream stopped during the write (Ctrl+C, a killed process)
         # leaves the file it had, never one cut short, which the next run could

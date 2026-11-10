@@ -36,7 +36,7 @@ BeforeAll {
     if ($AggStart -lt 0) { throw 'expected the stream-summary loop in the wrapper' }
     $script:MergeBlock = [scriptblock]::Create(
         "param(`$StreamSummaries, `$InventoryRoot, `$TenantID, `$ResumeStateFile, `$CompletedIds, `$FailedAttempts, `$CompletedReports)`n" +
-        "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$GoneIds = @()`n" +
+        "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$GoneIds = @(); `$RunStartTime = (Get-Date).AddMinutes(-1)`n" +
         (@($Body[$AggStart..($Body.Count - 1)] | ForEach-Object { $_.Extent.Text }) -join "`n"))
     $TmpBase = if ($env:TMPDIR) { $env:TMPDIR } elseif ($env:TEMP) { $env:TEMP } else { '/tmp' }
     $script:TestBase = Join-Path $TmpBase ('StreamStateFold_' + [guid]::NewGuid().ToString().Substring(0, 8))
@@ -303,7 +303,8 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
     }
 
     It 'counts a failure the stream''s own file recorded once, not again from the summary' {
-        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in failure'; Attempts = 1 }); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        # The stream recorded the failure this run (a time after the run's start).
+        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = (Get-Date).ToUniversalTime().ToString('o'); Reason = 'stand-in failure'; Attempts = 1 }); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
         Set-Variable -Name UnreadableStreamFiles -Value @()
         Set-Variable -Name LeftStreamFiles -Value @()
         $null = & { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @() } 6>$null

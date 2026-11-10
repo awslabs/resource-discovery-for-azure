@@ -531,6 +531,8 @@ Describe 'New-RunOutputFile: a new file, never one that is there' {
         @(Get-ChildItem -LiteralPath $Dir -File).Count | Should -Be 100
     }
 
+    # File.Exists counts such a link as there on every PowerShell 7 runtime: .NET Core
+    # 3.1 and .NET 5 fall back to lstat when stat fails, and .NET 6 and later lstat first.
     It 'takes -2 when a link whose target is gone holds the name, and leaves the link as it was' -Skip:($IsWindows) {
         $Dir = Join-Path $TestDrive 'dangling-new'
         $null = New-Item -ItemType Directory -Path $Dir
@@ -539,24 +541,6 @@ Describe 'New-RunOutputFile: a new file, never one that is there' {
         (New-RunOutputFile -Directory $Dir -Stem 'z' -Extension '.txt') | Should -Be (Join-Path $Dir 'z-2.txt')
         (Get-Item -LiteralPath $Link -Force).LinkType | Should -Be 'SymbolicLink'
         Test-Path -LiteralPath (Join-Path $Dir 'gone') | Should -BeFalse
-    }
-}
-
-Describe 'Test-RunOutputNameTaken' {
-    It 'is true for a file and a folder, false for a free name' {
-        $Dir = Join-Path $TestDrive 'taken-check'
-        $null = New-Item -ItemType Directory -Path (Join-Path $Dir 'd') -Force
-        $null = New-Item -ItemType File -Path (Join-Path $Dir 'f')
-        Test-RunOutputNameTaken -Path (Join-Path $Dir 'f') | Should -BeTrue
-        Test-RunOutputNameTaken -Path (Join-Path $Dir 'd') | Should -BeTrue
-        Test-RunOutputNameTaken -Path (Join-Path $Dir 'free') | Should -BeFalse
-    }
-
-    It 'is true for a link whose target is gone' -Skip:($IsWindows) {
-        $Dir = Join-Path $TestDrive 'taken-link'
-        $null = New-Item -ItemType Directory -Path $Dir
-        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $Dir 'l') -Target (Join-Path $Dir 'gone')
-        Test-RunOutputNameTaken -Path (Join-Path $Dir 'l') | Should -BeTrue
     }
 }
 

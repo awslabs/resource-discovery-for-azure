@@ -1156,16 +1156,6 @@ function Get-ConsolidatedZipProblem
     return $null
 }
 
-# True when Path names a file, a folder or a link (one whose target is gone
-# too): Get-Item looks at the link itself on every PowerShell 7, while
-# File.Exists follows it on the older .NET of PowerShell 7.0 to 7.2.
-function Test-RunOutputNameTaken
-{
-    param([Parameter(Mandatory = $true)][string]$Path)
-    if ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path)) { return $true }
-    return ($null -ne (Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue))
-}
-
 # A new, empty file <Stem><Extension> in Directory, or, when that name is taken,
 # <Stem>-2<Extension> to <Stem>-100<Extension>. It is created here, only if
 # absent, so this run never writes over a file that is there (one of an earlier
@@ -1193,7 +1183,7 @@ function New-RunOutputFile
         {
             # Taken (Windows gives access denied for a folder of that name):
             # try the next name. Any other failure is the caller's.
-            if (-not (Test-RunOutputNameTaken -Path $Path)) { throw }
+            if (-not ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path))) { throw }
         }
     }
     throw ('every name from {0}{1} to {0}-100{1} is taken' -f $Stem, $Extension)
@@ -1215,7 +1205,7 @@ function Move-RunOutputFile
     {
         $Name = if ($N -eq 1) { $Stem + $Extension } else { '{0}-{1}{2}' -f $Stem, $N, $Extension }
         $Path = Join-Path $Directory $Name
-        if (Test-RunOutputNameTaken -Path $Path) { continue }
+        if ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path)) { continue }
         try
         {
             [System.IO.File]::Move($Source, $Path, $false)
@@ -1224,7 +1214,7 @@ function Move-RunOutputFile
         catch [System.IO.IOException]
         {
             # Taken since the look above: try the next name. Any other failure is the caller's.
-            if (-not (Test-RunOutputNameTaken -Path $Path)) { throw }
+            if (-not ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path))) { throw }
         }
     }
     throw ('every name from {0}{1} to {0}-100{1} is taken' -f $Stem, $Extension)

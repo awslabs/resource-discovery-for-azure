@@ -421,7 +421,7 @@ Describe 'Save-CompletedSubscriptionIds keeps the old state when its write fails
         # The write leaves a cut temp file and a non-terminating error, as
         # Set-Content does when the disk fills.
         Mock Set-Content -MockWith {
-            [System.IO.File]::WriteAllText([string]$PesterBoundParameters['Path'], '{"TenantID": "t", "Compl')
+            [System.IO.File]::WriteAllText([string]$(if ($PesterBoundParameters.ContainsKey('LiteralPath')) { $PesterBoundParameters['LiteralPath'] } else { $PesterBoundParameters['Path'] }), '{"TenantID": "t", "Compl')
             Write-Error 'stand-in: no space left on the disk'
         }
         Mock Write-Host -MockWith { }

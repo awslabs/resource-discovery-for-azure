@@ -63,7 +63,7 @@ param (
 # breaking later with a confusing "command not found".
 # ---------------------------------------------------------------------------
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow

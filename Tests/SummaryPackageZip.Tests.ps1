@@ -1039,6 +1039,27 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip and links, rooted entries, and files i
         { Assert-RdaZipWithinLimit -Path $Path } | Should -Throw '*rooted or .. path*'
     }
 
+    It 'refuses a zip whose non-empty entry says it is packed into 0 bytes, and still takes an empty entry' {
+        $Path = Join-Path $script:TmpRoot ('zero-packed-' + [guid]::NewGuid().ToString('N') + '.zip')
+        $Z = [System.IO.Compression.ZipFile]::Open($Path, 'Create')
+        try
+        {
+            $E = $Z.CreateEntry('Inventory_x.json', 'NoCompression'); $W = [System.IO.StreamWriter]::new($E.Open()); try { $W.Write('{"VirtualMachines":[]}') } finally { $W.Dispose() }
+            $null = $Z.CreateEntry('empty.txt', 'NoCompression')
+        }
+        finally { $Z.Dispose() }
+        # Set the packed size of the first entry to 0 in its central-directory record.
+        $Bytes = [System.IO.File]::ReadAllBytes($Path)
+        for ($i = 0; $i -le $Bytes.Length - 4; $i++)
+        {
+            if ($Bytes[$i] -eq 0x50 -and $Bytes[$i + 1] -eq 0x4B -and $Bytes[$i + 2] -eq 0x01 -and $Bytes[$i + 3] -eq 0x02) { foreach ($k in 20..23) { $Bytes[$i + $k] = 0 }; break }
+        }
+        [System.IO.File]::WriteAllBytes($Path, $Bytes)
+        { Assert-RdaZipWithinLimit -Path $Path } | Should -Throw '*packed more than 100 to 1*'
+        $Empty = New-EntryZip -Path (Join-Path $script:TmpRoot ('empty-entry-' + [guid]::NewGuid().ToString('N') + '.zip')) -Pairs @(, @('empty.txt', ''))
+        { Assert-RdaZipWithinLimit -Path $Empty } | Should -Not -Throw
+    }
+
     It 'names a new file it could not remove when putting files back' {
         $Root = Join-Path $script:TmpRoot 'undo-remove-fail'
         $Stamp = '20260102030405132'

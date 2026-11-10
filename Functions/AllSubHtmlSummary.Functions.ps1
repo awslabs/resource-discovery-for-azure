@@ -410,12 +410,13 @@ function Assert-RdaZipWithinLimit
             # Rooted on any system: a leading / or \ (also \\server and \\?\ forms) or a drive letter.
             if ([System.IO.Path]::IsPathRooted($E.FullName) -or $E.FullName -match '^([\\/]|[A-Za-z]:)' -or $Parts -contains '..') { throw ('{0} holds an entry with a rooted or .. path: {1}' -f $Name, $E.FullName) }
             if ($E.Length -gt 16GB) { throw ('{0} holds an entry over 16 GB: {1}' -f $Name, $E.FullName) }
-            if ($E.CompressedLength -gt 0 -and ($E.Length / $E.CompressedLength) -gt 100) { throw ('{0} holds an entry packed more than 100 to 1: {1}' -f $Name, $E.FullName) }
+            # A file of any size that says it is packed into nothing is beyond any ratio.
+            if ($E.Length -gt 0 -and ($E.CompressedLength -le 0 -or ($E.Length / $E.CompressedLength) -gt 100)) { throw ('{0} holds an entry packed more than 100 to 1: {1}' -f $Name, $E.FullName) }
             $Total += $E.Length
             $Packed += $E.CompressedLength
         }
         if ($Total -gt 32GB) { throw ('{0} holds more than 32 GB in all.' -f $Name) }
-        if ($Packed -gt 0 -and ($Total / $Packed) -gt 100) { throw ('{0} is packed more than 100 to 1 in all.' -f $Name) }
+        if ($Total -gt 0 -and ($Packed -le 0 -or ($Total / $Packed) -gt 100)) { throw ('{0} is packed more than 100 to 1 in all.' -f $Name) }
     }
     finally { $Archive.Dispose() }
 }

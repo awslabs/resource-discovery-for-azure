@@ -158,10 +158,11 @@ if ($Samples.Count -gt 0)
 # that EXISTS; the consumption CSV lists VMs that produced a compute-usage
 # record in the billing window. A running VM with no compute-usage record is an
 # anomaly - it usually means consumption data was incomplete for that VM's
-# subscription (auth / billing-scope gap), not that the VM is idle. We compare
-# COUNTS only (not identities): the inventory and consumption files obfuscate
-# resource ids through different dictionaries, so a per-VM join is impossible in
-# an obfuscated report. Counts of distinct tokens are preserved either way.
+# subscription (auth / billing-scope gap), not that the VM is idle.
+# shortcut: COUNTS only, so a running VM with no billing can be missed when
+# another billed VM makes the counts match. Both files carry the same id (the
+# output contract gives a masked resource one token in every file), so a join
+# by ID is possible; upstream-pr/summary-wording replaces this check with it.
 $VmBilling = $null
 if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -LiteralPath $ConsumptionFile -PathType Leaf))
 {

@@ -1584,16 +1584,17 @@ else
             # -ResumeFailedOnly retries those failures too. The file that
             # could not be opened is kept, and the next run's start stops on
             # it until it can be read.
-            $StreamTexts = [hashtable]::new([System.StringComparer]::Ordinal)
+            # The text of each file, by its place in $AllStreamFiles.
+            $StreamTexts = [object[]]::new($AllStreamFiles.Count)
             $UnopenedStreamFiles = @()
-            foreach ($StreamFile in $AllStreamFiles)
+            for ($i = 0; $i -lt $AllStreamFiles.Count; $i++)
             {
-                try { $StreamTexts[$StreamFile.FullName] = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop }
-                catch { $UnopenedStreamFiles += [pscustomobject]@{ Path = $StreamFile.FullName; Reason = $_.Exception.Message } }
+                try { $StreamTexts[$i] = Get-Content -LiteralPath $AllStreamFiles[$i].FullName -Raw -ErrorAction Stop }
+                catch { $UnopenedStreamFiles += [pscustomobject]@{ Path = $AllStreamFiles[$i].FullName; Reason = $_.Exception.Message } }
             }
             if ($UnopenedStreamFiles.Count -gt 0)
             {
-                $SummaryOnly = Select-StreamSummaryOnlyRows -StreamTexts @($StreamTexts.Values) -SummaryCompletedIds $StreamSummaryCompletedIds -SummaryFailed $StreamSummaryFailed
+                $SummaryOnly = Select-StreamSummaryOnlyRows -StreamTexts $StreamTexts -SummaryCompletedIds $StreamSummaryCompletedIds -SummaryFailed $StreamSummaryFailed
                 $SummarySaved = $false
                 if ($SummaryOnly.CompletedIds.Count -gt 0 -or $SummaryOnly.Failed.Count -gt 0)
                 {
@@ -1611,10 +1612,10 @@ else
                 }
                 Stop-StreamResumeStateUnopened -Unopened $UnopenedStreamFiles -InventoryRoot $InventoryRoot -SummarySaved:$SummarySaved
             }
-            foreach ($StreamFile in $AllStreamFiles)
+            for ($i = 0; $i -lt $AllStreamFiles.Count; $i++)
             {
-                $PerStreamFile = $StreamFile.FullName
-                $StreamText = $StreamTexts[$PerStreamFile]
+                $PerStreamFile = $AllStreamFiles[$i].FullName
+                $StreamText = $StreamTexts[$i]
                 try
                 {
                     $Obj = $StreamText | ConvertFrom-Json -ErrorAction Stop

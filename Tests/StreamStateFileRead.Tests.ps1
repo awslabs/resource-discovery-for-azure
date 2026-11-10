@@ -35,9 +35,9 @@ BeforeAll {
     $MergeText = (@($Siblings[$From..($Siblings.Count - 1)] | ForEach-Object { $_.Extent.Text }) -join "`n")
     $script:MergeBlock = [scriptblock]::Create(
         "param(`$InventoryRoot, `$TenantID, `$ResumeStateFile)`n" +
-        "`$CompletedIds = @(); `$FailedAttempts = @(); `$UnreadableStreamFiles = @(); `$StreamStateNotMoved = @()`n" +
+        "`$CompletedIds = @(); `$FailedAttempts = @(); `$UnreadableStreamFiles = @(); `$StreamStateNotMoved = @(); `$LeftStreamFiles = @()`n" +
         $MergeText + "`n" +
-        "[pscustomobject]@{ CompletedIds = @(`$CompletedIds); FailedAttempts = @(`$FailedAttempts); Unreadable = @(`$UnreadableStreamFiles); NotMoved = @(`$StreamStateNotMoved) }")
+        "[pscustomobject]@{ CompletedIds = @(`$CompletedIds); FailedAttempts = @(`$FailedAttempts); Unreadable = @(`$UnreadableStreamFiles); NotMoved = @(`$StreamStateNotMoved); Left = @(`$LeftStreamFiles) }")
 
     # The end-of-run stop and exit rule for a file the merge could not move aside.
     $Stop = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$StreamStateNotMoved.Count -gt 0' })
@@ -129,6 +129,22 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
         $R = & { Set-StrictMode -Version Latest; & $script:MergeBlock $script:Dir 't' $script:State }
         @($R.CompletedIds) | Should -Be @('sub-a')
         Test-Path -LiteralPath $Good | Should -BeFalse
+    }
+
+    It 'keeps a file it read when the resume state on disk does not hold its records, and names it as left' {
+        $Good = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{ "Completed": [ "sub-a" ], "FailedAttempts": [] }'
+        Mock Set-Content -ParameterFilter { [string]$Path -like '*.tmp' -or [string]$LiteralPath -like '*.tmp' } -MockWith { throw 'stand-in: disk full' }
+        $R = & $script:MergeBlock $script:Dir 't' $script:State
+        Test-Path -LiteralPath $Good | Should -BeTrue -Because 'it holds the only copy of its records'
+        @($R.Left) | Should -Be @($Good)
+    }
+
+    It 'keeps the resume state for a file it read but cannot remove' {
+        $Good = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{ "Completed": [ "sub-a" ], "FailedAttempts": [] }'
+        Mock Remove-Item -ParameterFilter { [string]$LiteralPath -eq $Good -or [string]$Path -eq $Good } -MockWith { Write-Error 'stand-in: read-only' }
+        $R = & $script:MergeBlock $script:Dir 't' $script:State
+        @($R.Left) | Should -Be @($Good)
+        @($script:Lines | Where-Object { $_ -like 'WARNING: Could not remove the per-stream resume state file*this run keeps the resume state*' }).Count | Should -Be 1
     }
 
     It 'leaves alone a file it cannot read that cannot be moved aside, and names it for the end of the run' {

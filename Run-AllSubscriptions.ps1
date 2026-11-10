@@ -738,6 +738,10 @@ $UnreadableStreamFiles = @()
 # Per-stream files the end-of-run merge could not read and could not move
 # aside: the run ends with exit 1 in place of 0 and 3-5.
 $StreamStateNotMoved = @()
+# Per-stream files the end-of-run merge read but kept: their records did not
+# reach the resume state on disk, or they could not be removed. They keep the
+# resume state, so the next -Resume folds them in again.
+$LeftStreamFiles = @()
 if ($Resume -or $ResumeFailedOnly)
 {
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -1591,19 +1595,44 @@ else
             # Reconcile failed attempts from all streams against the unified list.
             # See Merge-FailedAttempts for the recency/completion rules.
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
+            $StreamStateSaved = $true
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+                # Read back: Save-CompletedSubscriptionIds only warns when its
+                # write fails, and the per-stream files may then hold the only
+                # copy of their records.
+                $SavedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID)
+                $SavedFailedIds = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
+                $StreamStateSaved = (@($CompletedIds | Where-Object { $SavedIds -notcontains $_ }).Count -eq 0) -and (@($FailedAttempts | Where-Object { $null -ne $_ -and $SavedFailedIds -notcontains [string]$_.Id }).Count -eq 0)
             }
             # Also delete per-stream resume files now that the unified file holds
             # the truth - this prevents drift if a future run uses a different
             # stream count. Only the files the merge loop above read are
-            # deleted, whatever this run's -ParallelStreams value; one it could
-            # not read was moved aside (or, when it could not be, left alone).
-            foreach ($StreamFile in $ReadStreamFiles)
+            # deleted, whatever this run's -ParallelStreams value, and only once
+            # the resume state on disk holds their records; one it could not
+            # read was moved aside (or, when it could not be, left alone). A
+            # file kept, or one that cannot be removed, keeps the resume state.
+            if (-not $StreamStateSaved)
             {
-                $PerStreamFile = $StreamFile.FullName
-                try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+                if ($ReadStreamFiles.Count -gt 0)
+                {
+                    Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($ReadStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow
+                    $LeftStreamFiles += @($ReadStreamFiles | ForEach-Object { $_.FullName })
+                }
+            }
+            else
+            {
+                foreach ($StreamFile in $ReadStreamFiles)
+                {
+                    $PerStreamFile = $StreamFile.FullName
+                    try { Remove-Item -LiteralPath $PerStreamFile -Force -ErrorAction Stop }
+                    catch
+                    {
+                        Write-Host ("WARNING: Could not remove the per-stream resume state file {0}: {1}. Its records are saved; this run keeps the resume state. Remove it before the next run." -f $PerStreamFile, $_.Exception.Message) -ForegroundColor Yellow
+                        $LeftStreamFiles += $PerStreamFile
+                    }
+                }
             }
         }
         finally
@@ -1805,7 +1834,7 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $LeftStreamFiles.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
     {

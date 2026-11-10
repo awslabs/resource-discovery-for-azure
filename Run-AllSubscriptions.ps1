@@ -426,6 +426,16 @@ catch
     exit 1
 }
 
+# A script folder whose path holds [ or ] cannot be used: the collector
+# (ResourceInventory.ps1) finds its own files and its Services/*.ps1 with
+# wildcard paths, so every subscription would fail and land on the retry list.
+# Stopped here, before any resume state is read or written.
+if ($PSScriptRoot.IndexOfAny([char[]]'[]') -ge 0)
+{
+    Write-Host ("ERROR: The script folder {0} has [ or ] in its path, which this tool cannot run from. Move the folder to a path without them and run again." -f $PSScriptRoot) -ForegroundColor Red
+    exit 1
+}
+
 # ---------------------------------------------------------------------------
 # Load shared helper functions. Dot-sourced (NOT invoked via &) so they load
 # into this script's scope. Fail loud if the file is missing rather than

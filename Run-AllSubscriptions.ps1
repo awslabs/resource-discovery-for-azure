@@ -665,7 +665,9 @@ if ($StrandedStreamFiles.Count -gt 0)
         {
             $Obj = $StreamText | ConvertFrom-Json -ErrorAction Stop
             if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
-            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+            # A [null] (an older worker wrote one once its last failure was
+            # cleared) is no failure, so it is not counted as one.
+            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts | Where-Object { $null -ne $_ }) }
             $ReadStreamStateFiles += $StreamFile.FullName
         }
         catch
@@ -1659,9 +1661,10 @@ else
                     # most-recent attempt's Reason/LastFailedAt winning when
                     # the same sub appears in multiple streams (which would
                     # only happen across re-runs with different slicing).
+                    # A [null] is no failure (see the start of the run).
                     if ($null -ne $Obj.FailedAttempts)
                     {
-                        $AllFailedFromStreams += @($Obj.FailedAttempts)
+                        $AllFailedFromStreams += @($Obj.FailedAttempts | Where-Object { $null -ne $_ })
                     }
                     $ReadStreamStateFiles += $PerStreamFile
                 }

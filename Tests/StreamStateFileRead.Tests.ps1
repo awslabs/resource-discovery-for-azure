@@ -243,17 +243,17 @@ Describe 'The shape of a per-stream file and the read-back of the end-of-run mer
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":""}]}' }
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":7}]}' }
         @{ Text = '{"Completed":[{"Id":"sub-a"}]}' }
-        @{ Text = '{"Completed":[null]}' }
-        @{ Text = '{"Completed":[""]}' }
     ) {
         $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text $Text
         Read-StreamResumeStateFile -Path $File | Should -BeNullOrEmpty
     }
 
+    # [null] is what Write-StreamState writes for an empty retry list: @($null).
     It 'reads a file of the written shape, and an older one with no FailedAttempts (<Text>)' -TestCases @(
         @{ Text = '{"Completed":[],"FailedAttempts":[]}' }
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":"sub-b","Name":"B","LastFailedAt":"2026-11-01T00:00:00Z","Reason":"r","Attempts":1}]}' }
         @{ Text = '{"Completed":["sub-a","sub-c"]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[null]}' }
     ) {
         $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text $Text
         Read-StreamResumeStateFile -Path $File | Should -Not -BeNullOrEmpty

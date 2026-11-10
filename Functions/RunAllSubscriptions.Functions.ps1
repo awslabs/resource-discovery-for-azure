@@ -577,7 +577,7 @@ function Move-UnreadableStreamStateFile
         if ($AtRunEnd)
         {
             Write-WrongShapeNotMovedLine -File $NotMoved
-            Write-Host "  This run does not use the file's records and does not write over it. It goes on as usual and ends with exit 1 (exit 2 when a report is missing or a subscription failed), with what to do next at its end." -ForegroundColor Red
+            Write-Host "  This run does not use the file's records and does not write over it. It goes on as usual and ends with exit 1 (exit 2 when a report is missing), with what to do next at its end." -ForegroundColor Red
         }
         return $NotMoved
     }

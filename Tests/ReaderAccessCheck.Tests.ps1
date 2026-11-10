@@ -2451,6 +2451,23 @@ exit 1
         Test-Path -LiteralPath $script:CaseState | Should -BeFalse
     }
 
+    It 'after a parallel run left its per-stream state files, a one-stream -Resume that ends clean deletes them, and the next -Resume starts with no state' {
+        $Subs = @($script:SubA, $script:SubB, $script:SubX)
+        script:Set-WrapperScenario -Subs $Subs -Hang $script:SubX.Id
+        $null = script:Invoke-WrapperRun -Streams 2 -EndWhen { (Test-Path -LiteralPath (Join-Path $script:CaseHome ('waiting-' + $script:SubX.Id))) -and (@(script:Get-StreamCompletedIds) -join ',') -eq 'sub-a,sub-b' }
+        @(script:Get-StreamStateFiles).Count | Should -BeGreaterThan 0
+        script:Set-WrapperScenario -Subs $Subs
+
+        $R1 = script:Invoke-WrapperRun -Arguments '-Resume' -Streams 1
+        $R1.ExitCode | Should -Be 0
+        $R1.Text | Should -Contain 'Resume state cleared (clean run).'
+        @(script:Get-StateFileNames) | Should -BeNullOrEmpty -Because 'the folded per-stream files are in the state the run cleared'
+
+        $R2 = script:Invoke-WrapperRun -Arguments '-Resume' -Streams 1
+        @($R2.Text | Where-Object { $_ -like 'Recovered per-stream state*' }) | Should -BeNullOrEmpty
+        $R2.Text | Should -Contain 'Resume mode: no previous state found; processing all subscriptions.'
+    }
+
     It 'keeps a subscription whose check cannot finish, or whose two answers disagree, on the retry list until it is collected (<Cause>, <Route>)' -TestCases @(
         @{ Cause = 'Unknown'; Route = '-Resume'; Fix = 'The role check could not finish (the reason above says why); run -ResumeFailedOnly.' }
         @{ Cause = 'Unknown'; Route = '-ResumeFailedOnly'; Fix = 'The role check could not finish (the reason above says why); run -ResumeFailedOnly.' }

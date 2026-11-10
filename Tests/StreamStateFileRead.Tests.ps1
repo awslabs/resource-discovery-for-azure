@@ -161,3 +161,28 @@ Describe 'The end of a run whose merge could not move a per-stream file aside' {
         $script:Lines.Count | Should -Be 0
     }
 }
+
+Describe 'The early exit 2 of a run whose merge could not move a per-stream file aside' {
+    It 'names the file with what to do before the per-subscription output check ends the run with exit 2' {
+        $Tokens = $null
+        $ParseErrors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+        $Gap = @($Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.StatementBlockAst] -and $args[0].Extent.Text.Contains('Recover by either:') -and $args[0].Extent.Text.Contains('Exit-Wrapper -Code 2') -and $args[0].Parent -is [System.Management.Automation.Language.IfStatementAst] }, $true) | Sort-Object { $_.Extent.Text.Length } | Select-Object -First 1)
+        $Gap.Count | Should -Be 1
+        $Text = $Gap[0].Extent.Text
+        $Stop = $Text.IndexOf('Stop-WrongShapeStateNotMoved -Files $StreamStateNotMoved -AfterCollection -NoExit')
+        $Stop | Should -BeGreaterThan -1
+        $Stop | Should -BeLessThan $Text.IndexOf('Exit-Wrapper -Code 2')
+    }
+
+    It 'says at the move that the run ends with exit 1, or exit 2 when a report is missing' {
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { $script:Lines.Add([string]$Object) }
+        $Dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        $File = script:New-StreamFile -Dir $Dir -N 3 -Text 'cut'
+        Mock Rename-Item { throw 'denied' }
+        $null = Move-UnreadableStreamStateFile -File (Get-Item -LiteralPath $File -Force) -AtRunEnd
+        $script:Lines[1] | Should -Be "  This run does not use the file's records and does not write over it. It goes on as usual and ends with exit 1 (exit 2 when a report is missing), with what to do next at its end."
+    }
+}

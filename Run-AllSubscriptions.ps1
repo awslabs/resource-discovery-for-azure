@@ -1715,6 +1715,12 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         {
             Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
         }
+        # A per-stream state file the end-of-run merge could not move aside is
+        # named here too, with what to do; exit 2 keeps its code.
+        if ($StreamStateNotMoved.Count -gt 0)
+        {
+            Stop-WrongShapeStateNotMoved -Files $StreamStateNotMoved -AfterCollection -NoExit -ResumeFailedOnly:$ResumeFailedOnly
+        }
         Exit-Wrapper -Code 2
     }
     Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $ActualZipCount) -ForegroundColor Green
@@ -1803,21 +1809,17 @@ if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test
 {
     try
     {
-        # A -Resume run with nothing left to collect uses one stream, so the
-        # parallel merge, which deletes the per-stream state files an
-        # interrupted parallel run left, does not run. Those files were folded
-        # into the state at startup; delete them the same way, or every later
-        # -Resume would recover and skip their subscriptions again. The same
-        # when a per-stream file could not be read, so the state reported as
-        # cleared below is cleared. Only files that were read are deleted; one
-        # that could not be read was moved aside and is kept. Each removal is
-        # checked (Remove-ResumeStateFiles): a run that leaves a file never
-        # says it cleared the state.
-        $StreamFilesToRemove = @()
-        if ($NothingLeftToCollect -or @($UnreadableStreamFiles | Where-Object { $null -ne $_ }).Count -gt 0)
-        {
-            $StreamFilesToRemove = @($FoldedStreamFiles | Where-Object { $null -ne $_ } | ForEach-Object { $_.FullName })
-        }
+        # A run with one stream (a sequential run, or a -Resume run with
+        # nothing left to collect) does not run the parallel merge, which
+        # deletes the per-stream state files an interrupted parallel run left.
+        # Those files were folded into the state at startup; delete them the
+        # same way, or every later -Resume or -ResumeFailedOnly would fold
+        # their records in again. (After a parallel merge they are gone
+        # already.) Only files that were read are deleted; one that could not
+        # be read was moved aside and is kept. Each removal is checked
+        # (Remove-ResumeStateFiles): a run that leaves a file never says it
+        # cleared the state.
+        $StreamFilesToRemove = @($FoldedStreamFiles | Where-Object { $null -ne $_ -and (Test-Path -LiteralPath $_.FullName) } | ForEach-Object { $_.FullName })
         $StateFilesLeft = @(Remove-ResumeStateFiles -StreamFiles $StreamFilesToRemove -StateFile $ResumeStateFile)
         if ($StateFilesLeft.Count -eq 0 -and @($UnreadableStreamFiles | Where-Object { $null -ne $_ }).Count -eq 0)
         {

@@ -1982,9 +1982,14 @@ else
             }
             # Each sub of a stream that ended without a summary goes on the retry
             # list as one more failed run, unless its stream's own file already
-            # recorded this run's failure of it (merged above).
+            # recorded this run's failure of it (merged above). A stream starts
+            # from the parent's entries for its slice and saves them as they are,
+            # so only an entry it failed this run (a time from this run) counts.
             $StreamFileFailedIds = @($AllFailedFromStreams | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
-            foreach ($Lost in @($Unfinished | Where-Object { $StreamFileFailedIds -notcontains [string]$_.Id }))
+            $FailedThisRunIds = @($AllFailedFromStreams | Where-Object {
+                    $null -ne $_ -and $_.PSObject.Properties['LastFailedAt'] -and $(try { ([datetime]$_.LastFailedAt).ToUniversalTime() -ge ([datetime]$RunStartTime).ToUniversalTime() } catch { $false })
+                } | ForEach-Object { [string]$_.Id })
+            foreach ($Lost in @($Unfinished | Where-Object { $FailedThisRunIds -notcontains [string]$_.Id }))
             {
                 $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$Lost.Id) -Name ([string]$Lost.Name) -Reason 'its stream ended without a summary (see the stream lines above)'
             }

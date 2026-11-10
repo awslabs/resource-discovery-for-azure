@@ -127,7 +127,7 @@ $Global:ResourceCount = 1
     $AggText = (@($Body[$AggStart..($Body.Count - 1)] | ForEach-Object { $_.Extent.Text }) -join "`n")
     $script:AggregateBlock = [scriptblock]::Create(
         "param(`$StreamSummaries, `$InventoryRoot, `$TenantID, `$ResumeStateFile, `$CompletedIds, `$FailedAttempts, `$CompletedReports)`n" +
-        "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null`n" +
+        "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$RunStartTime = (Get-Date).AddMinutes(-1)`n" +
         $AggText + "`n[pscustomobject]@{ SkippedSubscriptions = @(`$SkippedSubscriptions); SubResourceCounts = @(`$SubResourceCounts); CompletedIds = @(`$CompletedIds); CompletedReports = @(`$CompletedReports); FailedSubscriptions = @(`$FailedSubscriptions) }")
 
     # Post-processing shared by both paths: from "All subscriptions processed!"
@@ -802,6 +802,19 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $After = script:Read-State -Path $script:State
         $After.Completed | Should -BeNullOrEmpty
         $After.Failed | Should -Be @('sub-a')
+    }
+
+    It 'a stream that ended without a summary counts one more failed run for a subscription its saved file holds only with the parent''s entry' {
+        $S = script:Read-State -Path $script:State
+        # Slice [A, B]; B on the retry list at 2. The stream completed A, saved its
+        # file (with B's entry as the parent gave it), then died during B.
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
+        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = $Prior; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $script:Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2; Subs = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' }, [pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B' }) })
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 3 -Because 'this run failed it too, whatever its place in the slice'
+        @($After | Where-Object Id -eq 'sub-a') | Should -BeNullOrEmpty
     }
 
     It 'a -ResumeFailedOnly run that finds none of the retry list in the subscription set ends with exit 2' {

@@ -38,6 +38,8 @@ function Get-RdaAzAccountsInstallCommand
 #                  version is loaded in this session.
 #   Missing      - Az.Accounts is not installed.
 #   TooOld       - the highest installed version is older than the minimum.
+#                  For both, the messages also name a -SubModule copy that
+#                  pins an older Az.Accounts, so one stop gives every fix.
 #   LoadedTooOld - an older Az.Accounts is already loaded in this session.
 #                  It cannot be replaced in a running session (its assemblies
 #                  stay loaded), so only a new session gets past it.
@@ -100,19 +102,30 @@ function Test-RdaAzAccountsVersion
         # -NoProfile also drops a sign-in the profile makes (Cloud Shell does).
         $Messages += 'In that new session, sign in first (Connect-AzAccount, or Connect-AzAccount -Identity on an Azure VM), then run again.'
     }
-    elseif (-not $Installed)
+    elseif ($Installed -lt $Required -or -not $Installed)
     {
-        $Status = 'Missing'
-        $Messages += ('Az.Accounts is not installed. This tool needs Az.Accounts {0} or newer.' -f $Required)
-        $Messages += 'Install it, then run again:'
+        # A submodule copy that pins an older Az.Accounts would stop the run
+        # after the install too, so this one stop names that fix as well.
+        $Pinning = @(Get-RdaAzAccountsPinning -SubModule $SubModule -Minimum $Required)
+        $Then = if ($Pinning.Count -gt 0) { ':' } else { ', then run again:' }
+        if (-not $Installed)
+        {
+            $Status = 'Missing'
+            $Messages += ('Az.Accounts is not installed. This tool needs Az.Accounts {0} or newer.' -f $Required)
+            $Messages += ('Install it' + $Then)
+        }
+        else
+        {
+            $Status = 'TooOld'
+            $Messages += ('Az.Accounts {0} is installed. This tool needs Az.Accounts {1} or newer.' -f $Installed, $Required)
+            $Messages += ('Update it' + $Then)
+        }
         $Messages += ('  ' + $InstallCommand)
-    }
-    elseif ($Installed -lt $Required)
-    {
-        $Status = 'TooOld'
-        $Messages += ('Az.Accounts {0} is installed. This tool needs Az.Accounts {1} or newer.' -f $Installed, $Required)
-        $Messages += 'Update it, then run again:'
-        $Messages += ('  ' + $InstallCommand)
+        if ($Pinning.Count -gt 0)
+        {
+            $Messages += @(Get-RdaAzAccountsPinMessage -Pinning $Pinning -Effect 'so loading it would load that older copy, or fail when that copy is not installed')
+            $Messages += 'Then run again.'
+        }
     }
     else
     {

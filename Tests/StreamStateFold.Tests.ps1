@@ -606,3 +606,31 @@ Describe 'The end-of-run merge with a stream whose own file is unread (incomplet
         $Entry[0].Reason | Should -Be 'Metrics were left incomplete for Sub C.'
     }
 }
+
+Describe 'The run''s exit code and stream summaries around a resume state that was not saved' {
+    BeforeAll {
+        $script:Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
+        $Tokens = $null
+        $ParseErrors = $null
+        $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
+    }
+
+    It 'ends with exit 2 while a resume state that could not be saved is still on disk' {
+        $script:Src | Should -Match ([regex]::Escape('-ReportsMissing (($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)) -or ('))
+    }
+
+    It 'removes a stream summary an earlier run left before the stream starts, and stops when it cannot' {
+        $Loop = @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text.Contains('.rda-stream-{0}-summary.json') -and $args[0].Body.Extent.Text.Contains('Start-Job') }, $true))
+        $Loop.Count | Should -Be 1
+        $Body = $Loop[0].Body.Extent.Text
+        $Remove = $Body.IndexOf('Remove-Item -LiteralPath $SummaryPath -Force -ErrorAction Stop')
+        $Remove | Should -BeGreaterThan -1
+        $Remove | Should -BeLessThan $Body.IndexOf('Start-Job')
+        $Body | Should -Match ([regex]::Escape('Exit-Wrapper -Code 1'))
+    }
+
+    It 'removes the stream summaries by literal path' {
+        $script:Src | Should -Not -Match ([regex]::Escape('Test-Path -Path $S.SummaryPath'))
+        $script:Src | Should -Not -Match ([regex]::Escape('Remove-Item -Path $S.SummaryPath'))
+    }
+}

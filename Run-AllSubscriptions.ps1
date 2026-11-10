@@ -871,21 +871,27 @@ else
 {
     # Stale: see above. This run collects every subscription, but it can stop
     # before it reaches one (an access or consumption check, Ctrl+C), and it
-    # adds to the unified file rather than starting it again: so a failure a
-    # stale file holds is written into the unified file first (it ends the
-    # completion an older run recorded, as at the start of -Resume), and the
-    # next -Resume still collects that subscription. A stale file that cannot
-    # be read is put aside, like one an earlier run put aside: those are
-    # removed only once this run has collected (see below). A file that cannot
-    # be removed, or a failure that cannot be saved, stops the run.
-    $StaleFailedIds = @()
+    # adds to the unified file rather than starting it again: so each retry
+    # entry a stale file holds is merged into the unified file first, as at the
+    # start of -Resume (the newer entry wins, so its count and reason are kept,
+    # and it ends the completion an older run recorded), and -Resume or
+    # -ResumeFailedOnly still collects that subscription. A stale file that
+    # cannot be read is put aside, like one an earlier run put aside: those
+    # (and only those, not one this run's own merge puts aside) are removed
+    # once this run has collected (see below). A file that cannot be removed,
+    # or a state that cannot be saved, stops the run.
+    # (The rename is written here, not with Move-UnreadableStreamFile: that
+    # one's warning says the file keeps the state with exit 2 and is to be
+    # renamed back, which a run without -Resume does not do.)
+    $StaleFailed = @()
+    $StaleAsideFiles = @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     foreach ($StreamFile in @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID))
     {
         try
         {
             $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if ($null -eq $Obj) { throw 'the file is empty' }
-            if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts) { $StaleFailedIds += @($Obj.FailedAttempts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id }) }
+            if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts) { $StaleFailed += @($Obj.FailedAttempts | Where-Object { $null -ne $_ }) }
         }
         catch
         {
@@ -898,18 +904,21 @@ else
                 Exit-Wrapper -Code 1
             }
             Write-Host ("WARNING: Could not read the per-stream resume state file {0} of an earlier run: {1} It is put aside as {2} and removed once this run has collected every subscription." -f $StreamFile.FullName, $Why, $Aside) -ForegroundColor Yellow
+            $StaleAsideFiles += $Aside
             continue
         }
     }
-    $StaleFailedIds = @($StaleFailedIds | Where-Object { $_ } | Sort-Object -Unique)
-    if (@($CompletedIds | Where-Object { $StaleFailedIds -contains [string]$_ }).Count -gt 0)
+    $StaleFailed = @($StaleFailed | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) })
+    if ($StaleFailed.Count -gt 0)
     {
+        $StaleFailedIds = @($StaleFailed | ForEach-Object { [string]$_.Id } | Sort-Object -Unique)
         $CompletedIds = @($CompletedIds | Where-Object { $StaleFailedIds -notcontains [string]$_ })
         $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and $StaleFailedIds -notcontains [string]$_.Id })
+        $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StaleFailed -CompletedIds $CompletedIds
         Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
         if (-not (Test-ResumeStateSaved -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports))
         {
-            Write-Host ("ERROR: The resume state file {0} could not be written with the failures of the per-stream files of an earlier run, so they are kept. Free disk space or fix the folder, then run again. Nothing was collected (exit 1)." -f $ResumeStateFile) -ForegroundColor Red
+            Write-Host ("ERROR: The resume state file {0} could not be written with the retry entries of the per-stream files of an earlier run, so they are kept. Free disk space or fix the folder, then run again. Nothing was collected (exit 1)." -f $ResumeStateFile) -ForegroundColor Red
             Exit-Wrapper -Code 1
         }
     }
@@ -2110,16 +2119,18 @@ else
 }
 
 # A run without -Resume or -ResumeFailedOnly has now collected every
-# subscription, so a per-stream file put aside as unreadable (by this run or an
-# earlier one) holds nothing newer than this run's own records: it is removed,
-# so no later -Resume names it again or folds it in. One that cannot be removed
-# is named, with the advice to delete it, not to rename it back.
+# subscription, so a per-stream file of an earlier run put aside as unreadable
+# (before this run, or by its start) holds nothing newer than this run's own
+# records: it is removed, so no later -Resume names it again or folds it in.
+# One this run's own merge put aside holds this run's records and is kept (it
+# is named, with exit 2). One that cannot be removed is named, with the advice
+# to delete it, not to rename it back.
 if (-not ($Resume -or $ResumeFailedOnly))
 {
-    foreach ($Aside in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue))
+    foreach ($Aside in @($StaleAsideFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
     {
-        try { Remove-Item -LiteralPath $Aside.FullName -Force -ErrorAction Stop }
-        catch { Write-Host ("WARNING: Could not remove {0}, a per-stream resume state file put aside as unreadable that this run makes stale: {1}. Delete it; do not rename it back." -f $Aside.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+        try { Remove-Item -LiteralPath $Aside -Force -ErrorAction Stop }
+        catch { Write-Host ("WARNING: Could not remove {0}, a per-stream resume state file put aside as unreadable that this run makes stale: {1}. Delete it; do not rename it back." -f $Aside, $_.Exception.Message) -ForegroundColor Yellow }
     }
 }
 Write-Host "All subscriptions processed!" -ForegroundColor Green

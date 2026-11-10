@@ -2392,7 +2392,11 @@ if (-not ($Resume -or $ResumeFailedOnly) -and @($KeptAsideFiles).Count -gt 0 -an
 {
     foreach ($Aside in @($KeptAsideFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
     {
-        try { Remove-Item -LiteralPath $Aside -Force -ErrorAction Stop }
+        try
+        {
+            Remove-Item -LiteralPath $Aside -Force -ErrorAction Stop
+            Write-Host ("Removed: {0}, kept above. The resume state is cleared, so no completion is left for a -Resume to skip." -f $Aside) -ForegroundColor Green
+        }
         catch { Write-Host ("WARNING: Could not remove {0}, a per-stream resume state file put aside as unreadable that this run makes stale: {1}. Delete it; do not rename it back." -f $Aside, $_.Exception.Message) -ForegroundColor Yellow }
     }
 }

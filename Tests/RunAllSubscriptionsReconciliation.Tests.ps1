@@ -1066,3 +1066,58 @@ Describe 'Add-ItemsToZipArchive adds to a zip as Compress-Archive -Update does' 
         @($View | Where-Object { $_ -like 'Empty_1*' }).Count | Should -Be 0
     }
 }
+
+Describe 'The stream worker does not say it is done when its summary cannot be written' {
+    # Set-Content into a folder that is gone fails with a non-terminating
+    # error, which a catch sees only with -ErrorAction Stop. Without it the
+    # worker said "complete" and ended with exit 0 though it wrote no
+    # summary. The REAL Run-AllSubscriptions.Stream.ps1 runs in its own pwsh,
+    # with stand-ins for the Az module import and the context import; no
+    # subscription is run (no name is passed for the one id, so the loop has
+    # no pair), so no Azure call is made.
+    BeforeAll {
+        $script:WorkerDir = Join-Path $script:TestRoot ('worker_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $script:WorkerTree = Join-Path $script:WorkerDir 'tree'
+        New-Item -ItemType Directory -Path $script:WorkerTree -Force | Out-Null
+        $RepoRoot = Split-Path $PSScriptRoot -Parent
+        foreach ($Item in @('Run-AllSubscriptions.Stream.ps1', 'Functions'))
+        {
+            Copy-Item -LiteralPath (Join-Path $RepoRoot $Item) -Destination $script:WorkerTree -Recurse -Force
+        }
+        $script:WorkerHarness = Join-Path $script:WorkerDir 'worker.ps1'
+        @'
+param([string]$Tree, [string]$Case)
+$PSStyle.OutputRendering = 'PlainText'
+function global:Import-Module
+{
+    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking, [switch]$Force, [version]$MinimumVersion)
+    if (@($Name).Count -eq 1 -and $Name[0] -like 'Az.*') { return }
+    Microsoft.PowerShell.Core\Import-Module @PSBoundParameters
+}
+function global:Disable-AzContextAutosave { param($Scope) }
+$Global:WorkerCase = $Case
+function global:Import-AzContext { param($Path) if ($Global:WorkerCase -eq 'import-fails') { throw 'stand-in: the context snapshot cannot be imported' } }
+$Root = Join-Path $Tree 'out'
+New-Item -ItemType Directory -Path $Root -Force | Out-Null
+# The summary goes in a folder that is not there.
+$SummaryPath = Join-Path $Root 'gone/summary.json'
+$Ids = if ($Case -eq 'empty-slice') { @() } else { @('12345678-1234-1234-1234-123456789012') }
+$global:LASTEXITCODE = 0
+& (Join-Path $Tree 'Run-AllSubscriptions.Stream.ps1') -TenantID '00000000-0000-0000-0000-000000000001' -RunId '11111111-2222-3333-4444-555555555555' -StreamId '0' -InventoryRoot $Root -ScriptRoot $Tree -AzContextPath (Join-Path $Root 'ctx.json') -StreamSummaryPath $SummaryPath -StreamFailuresPath (Join-Path $Root 'failures.log') -SubscriptionIds $Ids -SubscriptionNames @() -SkipMetrics -SkipConsumption
+exit $LASTEXITCODE
+'@ | Set-Content -LiteralPath $script:WorkerHarness -Encoding utf8
+    }
+
+    It 'a worker whose <Case> summary cannot be written says so and ends with exit 1' -ForEach @(
+        @{ Case = 'end-of-run' }
+        @{ Case = 'empty-slice' }
+        @{ Case = 'import-fails' }
+    ) {
+        $Output = '' | & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $script:WorkerHarness -Tree $script:WorkerTree -Case $Case *>&1 | Out-String
+        $Code = $LASTEXITCODE
+        $Code | Should -Be 1 -Because $Output
+        $Output | Should -Match ([regex]::Escape('[stream-0] FATAL: could not write stream summary to ')) -Because $Output
+        $Output | Should -Not -Match '\[stream-0\] complete: ' -Because $Output
+        Test-Path -LiteralPath (Join-Path $script:WorkerTree 'out/gone/summary.json') | Should -BeFalse
+    }
+}

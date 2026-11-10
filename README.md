@@ -161,6 +161,8 @@ git clone https://github.com/awslabs/resource-discovery-for-azure.git
 
 **Bottom line: prefer `git clone`** — it "just works" and avoids the execution-policy/unblock dance on every new desktop. See [Troubleshooting](#common-issues) if you must use the ZIP.
 
+Put it in a folder whose path has no `[`, `]`, `*` or `?`: PowerShell reads them as wildcards, so `Run-AllSubscriptions.ps1` stops at once (exit 1) when its folder's path holds one, before it offers or installs anything.
+
 ## Usage
 
 ### Authentication Notes

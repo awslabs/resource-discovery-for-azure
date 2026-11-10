@@ -930,3 +930,27 @@ Describe 'The wrapper keeps a resume state with one entry as a list' {
         @($FailedAttempts).Count | Should -Be 2
     }
 }
+
+Describe 'The resume state in a folder whose path holds [ or ]' {
+    # -Path reads [ ] as a wildcard set, so the file was not found: the run
+    # started fresh and its first save wrote over the saved state.
+    BeforeAll {
+        $script:BracketDir = Join-Path $script:TestRoot ('inv[1]_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path $script:BracketDir -Force | Out-Null
+    }
+
+    It 'saves and reads back the main resume state' {
+        $Path = Join-Path $script:BracketDir 'state.json'
+        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @([pscustomobject]@{ Id = 'sub-c'; Name = 'C'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 })
+        Test-Path -LiteralPath $Path -PathType Leaf | Should -BeTrue
+        @(Get-CompletedSubscriptionIds -Path $Path -Tenant 't') | Should -Be @('sub-a', 'sub-b')
+        @(Get-FailedAttempts -Path $Path -Tenant 't').Id | Should -Be @('sub-c')
+    }
+
+    It 'saves and reads back a stream resume state' {
+        $Path = Join-Path $script:BracketDir 'stream-0.json'
+        Write-StreamState -Path $Path -Completed @('sub-a') -FailedAttempts @()
+        Test-Path -LiteralPath $Path -PathType Leaf | Should -BeTrue
+        @((Read-StreamState -Path $Path).Completed) | Should -Be @('sub-a')
+    }
+}

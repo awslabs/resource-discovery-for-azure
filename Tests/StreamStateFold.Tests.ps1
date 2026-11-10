@@ -292,9 +292,9 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
         $Entry[0].Reason | Should -Be 'stand-in failure'
     }
 
-    It 'puts an empty stream file aside, so the subscription the summary lists as failed is on the retry list' {
+    It 'puts a stream file that is <Kind> aside, so the subscription the summary lists as failed is on the retry list' -ForEach @(@{ Kind = 'empty'; Text = '' }, @{ Kind = 'an empty object'; Text = '{}' }, @{ Kind = 'a number'; Text = '0' }, @{ Kind = 'a string'; Text = '"text"' }) {
         $Empty = Join-Path $script:Root '.resume-state-t-stream-0.json'
-        New-Item -ItemType File -Path $Empty -Force | Out-Null
+        Set-Content -LiteralPath $Empty -Value $Text -NoNewline
         $UnreadableStreamFiles = @()
         $LeftStreamFiles = @()
         $Unread = @(& { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @(); $UnreadableStreamFiles } 6>$null)
@@ -518,6 +518,13 @@ Describe 'A per-stream file an earlier run put aside as unreadable' {
         $Out = @(& { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = @($Aside); $CompletedIds = @('sub-a', 'sub-unlisted'); $RunSubscriptionIds = @('sub-a'); $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles, $CompletedIds, $RunSubscriptionIds; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>&1 | ForEach-Object { [string]$_ })
         Test-Path -LiteralPath $Aside | Should -BeTrue
         @($Out | Where-Object { $_ -like ('Kept: {0}, *still lists 1 subscription(s) this run did not collect as completed*' -f $Aside) }).Count | Should -Be 1
+        # Kept, then the run clears the resume state (a clean run): the file goes too.
+        $Ast2 = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $AfterClear = @($Ast2.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Extent.Text.Contains('$KeptAsideFiles') -and $_.Clauses[0].Item1.Extent.Text.Contains('Test-Path -LiteralPath $ResumeStateFile') })
+        $AfterClear.Count | Should -Be 1
+        $null = & { $Resume = $false; $ResumeFailedOnly = $false; $KeptAsideFiles = @($Aside); $ResumeStateFile = Join-Path $Root '.resume-state-t.json'; $null = $Resume, $ResumeFailedOnly, $KeptAsideFiles, $ResumeStateFile; . ([scriptblock]::Create($AfterClear[0].Extent.Text)) } 6>$null
+        Test-Path -LiteralPath $Aside | Should -BeFalse -Because 'no state is left, so no completion a -Resume would skip'
+        Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
         # A left-out subscription with no completion (a disabled one) does not keep it.
         $null = & { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = @($Aside); $CompletedIds = @('sub-a'); $RunSubscriptionIds = @('sub-a'); $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a' }, [pscustomobject]@{ Id = 'sub-off' }); $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles, $CompletedIds, $RunSubscriptionIds, $AllSubscriptions; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>$null
         Test-Path -LiteralPath $Aside | Should -BeFalse

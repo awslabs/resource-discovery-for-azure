@@ -1328,6 +1328,48 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0 -Because $After.Console
     }
 
+    It 'two streams: a clean run whose resume state cannot be written and that then stops at the zip check names every kept stream resume state file and the summary-only file, which stay; the next run reads them back and clears them' {
+        # As above (Sub A's success is only in stream 0's summary, and the
+        # resume state cannot be written), but stream 1's summary names a
+        # zip for Sub B that is not on disk, so the run stops at the zip
+        # check, before the clean-run clean-up.
+        $RowB = [pscustomobject]@{ Name = $script:SubB.Name; Id = $script:SubB.Id; Count = 1; Zip = '{Reports}/SubB/ResourcesReport_gone.zip' }
+        $Forged = [pscustomobject]@{ RunId = '{RunId}'; StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB); Failed = @() } | ConvertTo-Json -Depth 5
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamStateBlocked -UnifiedStateBlocked -Stream1SummaryJson $Forged
+        $Run.Console | Should -Match 'WARNING: Failed to persist resume state to ' -Because $Run.Console
+        $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+        $StreamFiles = @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force | Where-Object { $_.Name -notlike '*-stream-summary-*' })
+        $Own = @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-summary-*.json' -f $script:Tenant) -File -Force)
+        $StreamFiles.Count | Should -Be 1 -Because 'stream 1 wrote its state file; stream 0 could not'
+        $Own.Count | Should -Be 1 -Because 'Sub A''s success is held only in the stream summaries'
+        @((Get-Content -LiteralPath $Own[0].FullName -Raw | ConvertFrom-Json).Completed) | Should -Be @($script:SubA.Id)
+        $Run.Console | Should -Match ([regex]::Escape(('WARNING: kept {0} stream resume state file(s) in {1}' -f $StreamFiles.Count, $Run.Root))) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape(('were written to the stream resume state file {0}; the next run reads it at its start' -f $Own[0].FullName))) -Because $Run.Console
+
+        # The next run reads both back, runs every subscription and, clean,
+        # clears them.
+        $Next = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ReuseHome $Run.Home
+        $Next.Console | Should -Match 'Read per-stream resume state left by an earlier parallel run' -Because $Next.Console
+        $Next.ExitCode | Should -Be 0 -Because $Next.Console
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because $Next.Console
+    }
+
+    It 'two streams: a clean run whose resume state cannot be written and that leaves a stream resume state file it could not read names only that file once the clean-up has removed the rest' {
+        # As above, with no zip gap, and with stream 7's file from an earlier
+        # run cut short: it opens but is not valid JSON, so this run does not
+        # read it and the clean-up leaves it. Stream 1's file and the
+        # summary-only file are read, so the clean-up removes them.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamStateBlocked -UnifiedStateBlocked -Stream7Unparseable
+        $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
+        $Run.Console | Should -Match 'WARNING: Failed to persist resume state to ' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).FullName | Should -Be @($Stream7) -Because 'only the file the run could not read is left'
+        $Run.Console | Should -Match ([regex]::Escape(('WARNING: kept 1 stream resume state file(s) in {0}' -f $Run.Root))) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'WARNING: kept [02-9]\d* stream resume state file' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'were written to the stream resume state file' -Because 'the clean-up removed the summary-only file'
+    }
+
     It 'two streams: when the resume state cannot be written, the old one is left as it was and every stream state file is kept; once it can be written, -ResumeFailedOnly retries the new failure only, and the run after has nothing to retry' {
         # An earlier run left Sub B failed. This run: Sub A fails, Sub B
         # works, and the resume state cannot be written.

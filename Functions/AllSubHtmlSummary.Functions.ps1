@@ -300,6 +300,32 @@ function Move-RdaFile
     [System.IO.File]::Move($Path, $Destination, [bool]$Overwrite)
 }
 
+# The removed mark: written into a lock file by its holder just before it
+# removes the file (see Lock-RdaOutputDirectory and $RemoveMadeDirs).
+$script:RdaLockRemovedMark = [System.Text.Encoding]::ASCII.GetBytes('removed')
+
+# True when the locked file $Lock holds the removed mark.
+function Test-RdaLockMarkedRemoved
+{
+    param([Parameter(Mandatory = $true)][System.IO.FileStream]$Lock)
+    if ($Lock.Length -ne $script:RdaLockRemovedMark.Length) { return $false }
+    $Lock.Position = 0
+    $Read = New-Object byte[] $script:RdaLockRemovedMark.Length
+    $Count = $Lock.Read($Read, 0, $Read.Length)
+    $Lock.Position = 0
+    return ($Count -eq $Read.Length -and [System.Linq.Enumerable]::SequenceEqual([byte[]]$Read, [byte[]]$script:RdaLockRemovedMark))
+}
+
+# Writes the removed mark into the locked file $Lock, or, with -Clear, empties it.
+function Set-RdaLockMarkedRemoved
+{
+    param([Parameter(Mandatory = $true)][System.IO.FileStream]$Lock, [switch]$Clear)
+    $Lock.SetLength(0)
+    if (-not $Clear) { $Lock.Write($script:RdaLockRemovedMark, 0, $script:RdaLockRemovedMark.Length) }
+    $Lock.Flush($true)
+    $Lock.Position = 0
+}
+
 # Takes the lock that lets one rebuild at a time write into the output folder
 # $Path, and returns it; disposing it lets the next one in. The lock is the file
 # .rda-rebuild.lock in the folder itself, held open with no sharing (an
@@ -309,7 +335,8 @@ function Move-RdaFile
 # just before the removal lock the removed file while another locks a new one.
 # It is removed only after a failed or refused rebuild, together with a
 # -OutputDirectory this call made, while the lock is still held (see
-# $RemoveMadeDirs). The operating system lets go of the lock when the process
+# $RemoveMadeDirs), and its holder first writes the removed mark into it.
+# The operating system lets go of the lock when the process
 # ends, so a stopped run never leaves the folder locked. Only a lock held by
 # another caller is reported as another rebuild; any other failure (a folder
 # that cannot be written, a full disk) is passed on with its own message.
@@ -319,20 +346,42 @@ function Lock-RdaOutputDirectory
     $LockFile = Join-Path $Path '.rda-rebuild.lock'
     try
     {
-        $Lock = [System.IO.File]::Open($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-        # On Linux and macOS the open and the lock are two steps: a caller that
-        # opened the file just before its holder removed it (a failed rebuild
-        # into a folder it made) locks a file no longer in the folder. That is
-        # seen here, and the rebuild is refused as if the lock were held.
-        # shortcut: a third caller that makes a new lock file in the moment
-        # between that removal and this check is not seen; compare the file
-        # ids (inode) if rebuilds into one new folder must be safe in that case.
-        if (-not (Test-Path -LiteralPath $LockFile -PathType Leaf))
+        for ($Try = 1; $Try -le 2; $Try++)
         {
-            $Lock.Dispose()
-            throw [System.IO.IOException]::new('the lock file was removed by the rebuild that held it', 11)
+            $Lock = [System.IO.File]::Open($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            # On Linux and macOS the open and the lock are two steps: a caller
+            # that opened the file just before its holder removed it (a failed
+            # rebuild into a folder it made) locks a file no longer in the
+            # folder, even when a third caller has made a new one there since.
+            # The holder writes the removed mark into the file before it removes
+            # it, so the mark, read here through this caller's own handle, shows
+            # that case, and the rebuild is refused as if the lock were held.
+            if (Test-RdaLockMarkedRemoved -Lock $Lock)
+            {
+                if ($Try -eq 1)
+                {
+                    # Open the path again: the file there now is another one,
+                    # unless the holder could not remove it (Windows, while this
+                    # caller had it open) or stopped first.
+                    $Lock.Dispose()
+                    continue
+                }
+                # Opened after the first lock was taken, so after the holder let
+                # go, which it does only once the file is removed or emptied:
+                # this file is in the folder, with a mark left over. It is
+                # emptied, so no later rebuild is refused because of it.
+                # shortcut: a second failed rebuild that made the folder again
+                # and removes its own lock file between this open and this lock
+                # is not seen; compare file ids (inode) if that must be safe.
+                Set-RdaLockMarkedRemoved -Lock $Lock -Clear
+            }
+            if (-not (Test-Path -LiteralPath $LockFile -PathType Leaf))
+            {
+                $Lock.Dispose()
+                throw [System.IO.IOException]::new('the lock file was removed by the rebuild that held it', 11)
+            }
+            return $Lock
         }
-        return $Lock
     }
     catch
     {
@@ -893,15 +942,23 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
         if ($MadeDirs.Count -gt 0)
         {
             $LockFile = Join-Path $OutputDirectory '.rda-rebuild.lock'
+            # The removed mark goes in first, while the lock is held, so a
+            # caller that opened the file before it is removed and locks it
+            # after sees the mark and refuses (Lock-RdaOutputDirectory).
+            foreach ($Held in $HeldLocks) { if ($Held -is [System.IO.FileStream]) { Set-RdaLockMarkedRemoved -Lock $Held } }
             # On Linux and macOS the file is removed while the lock is still
             # held: a caller that opens the path afterwards makes a new one (and
-            # the folder is then not empty, so it stays), and one that opened
-            # it just before locks a removed file, which Lock-RdaOutputDirectory
-            # sees and refuses. Windows does not
-            # remove a file that is open, and no caller can open it while it is
-            # held, so there it is let go first; if another rebuild takes it in
-            # between, the file and the folder stay for that rebuild.
-            if (-not $IsWindows) { Clear-RdaLeftover -Path $LockFile }
+            # the folder is then not empty, so it stays). A file that could not
+            # be removed is emptied again, so it does not refuse every later
+            # rebuild. Windows does not remove a file that is open, and no
+            # caller can open it while it is held, so there it is let go first;
+            # if another rebuild takes it in between, the file and the folder
+            # stay for that rebuild (which opens it again and clears the mark).
+            if (-not $IsWindows)
+            {
+                Clear-RdaLeftover -Path $LockFile
+                if (Test-Path -LiteralPath $LockFile) { foreach ($Held in $HeldLocks) { if ($Held -is [System.IO.FileStream]) { Set-RdaLockMarkedRemoved -Lock $Held -Clear } } }
+            }
             foreach ($Held in $HeldLocks) { $Held.Dispose() }
             $HeldLocks.Clear()
             if ($IsWindows) { try { Remove-Item -LiteralPath $LockFile -Force -ErrorAction Stop } catch { Write-Verbose ('Left the lock file {0} to the rebuild that took it: {1}' -f $LockFile, $_.Exception.Message) } }

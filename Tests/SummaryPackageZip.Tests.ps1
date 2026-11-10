@@ -1616,6 +1616,78 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at o
         Test-Path -LiteralPath $Out | Should -BeFalse
     }
 
+    It 'writes the removed mark into its lock file before it removes it, so a caller that locks that removed file sees it (Linux and macOS)' -Skip:($IsWindows) {
+        $Out = Join-Path $script:TmpRoot 'mark-before-remove'
+        $script:MarkAtRemoval = $null
+        Mock Move-RdaFile { throw 'disk full' }
+        Mock Clear-RdaLeftover -ParameterFilter { $Path -like '*.rda-rebuild.lock' } -MockWith {
+            # cat reads past the lock, as the handle of a caller that opened the file would.
+            $script:MarkAtRemoval = (& cat $Path)
+            Remove-Item -LiteralPath $Path -Force
+        }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*disk full*'
+        $script:MarkAtRemoval | Should -Be 'removed'
+        Test-Path -LiteralPath $Out | Should -BeFalse
+    }
+
+    It 'opens the lock file again when the one it locked holds the removed mark, so it locks the file in the folder, not the removed one' {
+        $Out = Join-Path $script:TmpRoot 'marked-then-new'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        $script:MarkChecks = 0
+        # The first file locked is one its holder marked and removed; the second is a new one.
+        Mock Test-RdaLockMarkedRemoved { $script:MarkChecks++; $script:MarkChecks -eq 1 }
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null
+        $script:MarkChecks | Should -Be 2
+        Test-Path -LiteralPath (Join-Path $Out 'MainSummary.html') | Should -BeTrue
+    }
+
+    It 'refuses the rebuild, removing nothing, when a third caller holds the new lock file by the time it opens again' {
+        $Out = Join-Path $script:TmpRoot 'marked-then-held'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Out 'kept.txt') -Value 'keep' -NoNewline
+        $script:Third = $null
+        try
+        {
+            # The file this caller locked holds the removed mark; by the time it
+            # opens again, a third caller has made and holds a new lock file.
+            # (Here the first lock is let go before that open, as in the race.)
+            Mock Test-RdaLockMarkedRemoved {
+                param($Lock)
+                if ($null -eq $script:Third)
+                {
+                    $Path = $Lock.Name
+                    $Lock.Dispose()
+                    $script:Third = [System.IO.File]::Open($Path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+                    return $true
+                }
+                return $false
+            }
+            { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*another rebuild is writing into*'
+            @(Get-ChildItem -LiteralPath $Out -Force | Where-Object { $_.Name -ne '.rda-rebuild.lock' } | ForEach-Object { $_.Name }) | Should -Be @('kept.txt')
+        }
+        finally { if ($null -ne $script:Third) { $script:Third.Dispose() } }
+    }
+
+    It 'empties a lock file left with the removed mark, so that and every later rebuild goes ahead' {
+        $Out = Join-Path $script:TmpRoot 'stale-mark'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        $Lock = Join-Path $Out '.rda-rebuild.lock'
+        [System.IO.File]::WriteAllText($Lock, 'removed')
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null
+        (Get-Item -LiteralPath $Lock -Force).Length | Should -Be 0
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null | Out-Null
+    }
+
+    It 'empties the lock file again when it cannot remove it, so it does not refuse every later rebuild (Linux and macOS)' -Skip:($IsWindows) {
+        $Out = Join-Path $script:TmpRoot 'mark-not-removed'
+        Mock Move-RdaFile { throw 'disk full' }
+        Mock Clear-RdaLeftover -ParameterFilter { $Path -like '*.rda-rebuild.lock' } -MockWith { }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*disk full*'
+        $Lock = Join-Path $Out '.rda-rebuild.lock'
+        Test-Path -LiteralPath $Lock | Should -BeTrue
+        (Get-Item -LiteralPath $Lock -Force).Length | Should -Be 0
+    }
+
     It 'refuses the rebuild when the lock file is gone once the lock is taken (it locked a file its holder had just removed)' {
         $Out = Join-Path $script:TmpRoot 'lock-file-gone'
         New-Item -ItemType Directory -Path $Out -Force | Out-Null

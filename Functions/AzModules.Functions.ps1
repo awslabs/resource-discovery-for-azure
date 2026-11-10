@@ -102,6 +102,7 @@ function Test-RdaAzAccountsVersion
         $Messages += 'If your PowerShell profile loads Az.Accounts, start the new session with: pwsh -NoProfile'
         # -NoProfile also drops a sign-in the profile makes (Cloud Shell does).
         $Messages += 'In that new session, sign in first (Connect-AzAccount, or Connect-AzAccount -Identity on an Azure VM), then run again.'
+        $Messages += @(Get-RdaAzAccountsPinRetryMessage -Pinning $Pinning)
     }
     elseif ($Installed -lt $Required -or -not $Installed)
     {
@@ -128,6 +129,7 @@ function Test-RdaAzAccountsVersion
             $Messages += ('Then {0} Az.Accounts:' -f $Verb)
             $Messages += ('  ' + $InstallCommand)
             $Messages += 'Then run again.'
+            $Messages += @(Get-RdaAzAccountsPinRetryMessage -Pinning $Pinning)
         }
         else
         {
@@ -147,6 +149,7 @@ function Test-RdaAzAccountsVersion
             $Messages += ('Az.Accounts {0} is installed, and this tool needs Az.Accounts {1} or newer.' -f $Installed, $Required)
             $Messages += @(Get-RdaAzAccountsPinMessage -Pinning $Pinning -Effect 'so loading it would load that older copy, or fail when that copy is not installed')
             $Messages += 'Then run again.'
+            $Messages += @(Get-RdaAzAccountsPinRetryMessage -Pinning $Pinning)
         }
     }
 
@@ -250,9 +253,23 @@ function Get-RdaModuleCopyToLoad
     return @($Copies | Sort-Object -Property { [version]$_.Version } -Descending | Select-Object -First 1)
 }
 
-# The lines that name each module that pins an older Az.Accounts, the command
-# that updates it, and how to remove an old copy that is still found first.
-# None when nothing pins.
+# One entry per Name and Version, in the order given: the same version in
+# two folders (the user's and all users') is the same advice, so it is
+# printed once.
+function Select-RdaAzAccountsPinUnique
+{
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([object[]]$Pinning = @())
+
+    $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    return @($Pinning | Where-Object { $null -ne $_ -and $Seen.Add(('{0}|{1}' -f $_.Name, $_.Version)) })
+}
+
+# The lines that name each module that pins an older Az.Accounts and the
+# command that updates it. None when nothing pins. What to do when a re-run
+# stops again is in Get-RdaAzAccountsPinRetryMessage, printed after the last
+# step.
 function Get-RdaAzAccountsPinMessage
 {
     [CmdletBinding()]
@@ -263,11 +280,7 @@ function Get-RdaAzAccountsPinMessage
         [string]$Effect = 'so PowerShell loads that older copy for it in every new session'
     )
 
-    # One entry per Name and Version, in the order given: the same version in
-    # two folders (the user's and all users') is the same advice, so it is
-    # printed once.
-    $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $Pinning = @($Pinning | Where-Object { $null -ne $_ -and $Seen.Add(('{0}|{1}' -f $_.Name, $_.Version)) })
+    $Pinning = @(Select-RdaAzAccountsPinUnique -Pinning $Pinning)
     if ($Pinning.Count -eq 0) { return @() }
     $Lines = @()
     foreach ($P in $Pinning)
@@ -277,7 +290,20 @@ function Get-RdaAzAccountsPinMessage
     $PinnedNames = @($Pinning | ForEach-Object { $_.Name } | Select-Object -Unique)
     $Lines += ('Update {0} first:' -f ($PinnedNames -join ', '))
     $Lines += ('  Install-Module -Name {0} -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck' -f ($PinnedNames -join ','))
-    foreach ($P in $Pinning)
+    return $Lines
+}
+
+# How to remove an old pinning copy that is still found first, for a re-run
+# that stops again with the same one. It is about what happens after the
+# steps, so the callers print it after the last one. None when nothing pins.
+function Get-RdaAzAccountsPinRetryMessage
+{
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([object[]]$Pinning = @())
+
+    $Lines = @()
+    foreach ($P in @(Select-RdaAzAccountsPinUnique -Pinning $Pinning))
     {
         $Lines += ('If this stops again with the same {0} {1}, that old copy is still found first: see where each copy is with Get-Module -Name {0} -ListAvailable, and remove the old one with Uninstall-Module -Name {0} -RequiredVersion {1} (or delete its folder).' -f $P.Name, $P.Version)
     }

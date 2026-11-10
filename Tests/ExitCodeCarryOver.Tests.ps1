@@ -1327,7 +1327,7 @@ function Get-UsageAggregates
         $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -Stream7FailedUnreadable $script:SubA.Id
         $Run.ExitCode | Should -Be 0 -Because $Run.Console
         $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
-        $Warning = 'WARNING: Could not read the stream resume state file {0}, so its records were not read in this run. It is kept for a later run.' -f $Stream7
+        $Warning = 'WARNING: Could not read the stream resume state file {0}, so its records were not read in this run.' -f $Stream7
         @([regex]::Matches($Run.Console, [regex]::Escape($Warning))).Count | Should -Be 1 -Because $Run.Console
         Test-Path -LiteralPath $Stream7 -PathType Leaf | Should -BeTrue
         [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]'UserRead, UserWrite')

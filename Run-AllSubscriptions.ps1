@@ -776,7 +776,7 @@ if ($Resume -or $ResumeFailedOnly)
     foreach ($Aside in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue))
     {
         $AsideOf = $Aside.FullName -replace '\.unreadable-[0-9]+$', ''
-        Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it (a run without -Resume or -ResumeFailedOnly removes it as stale once it has collected)." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
+        Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it (a run without -Resume or -ResumeFailedOnly removes it as stale once it has collected, unless the resume state still lists as completed a subscription that run did not collect)." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
         $UnreadableStreamFiles += $Aside.FullName
     }
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -794,7 +794,7 @@ if ($Resume -or $ResumeFailedOnly)
                 # Stop on any read error, and on an empty file: either one would
                 # otherwise read as a file with no record, and be removed.
                 $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                if ($null -eq $Obj) { throw 'the file is empty' }
+                if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
                 if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
                 if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
@@ -881,7 +881,8 @@ else
     # -ResumeFailedOnly still collects that subscription. A stale file that
     # cannot be read is put aside, like one an earlier run put aside: those
     # (and only those, not one this run's own merge puts aside) are removed
-    # once this run has collected (see below). A file that cannot be removed,
+    # once this run has collected (see below; not while the state lists an
+    # older completion of one it left out). A file that cannot be removed,
     # or a state that cannot be saved, stops the run.
     # (The rename is written here, not with Move-UnreadableStreamFile: that
     # one's warning says the file keeps the state with exit 2 and is to be
@@ -893,7 +894,7 @@ else
         try
         {
             $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            if ($null -eq $Obj) { throw 'the file is empty' }
+            if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
             if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts) { $StaleFailed += @($Obj.FailedAttempts | Where-Object { $null -ne $_ }) }
         }
         catch
@@ -906,7 +907,7 @@ else
                 Write-Host ("ERROR: Could not read the per-stream resume state file {0} of an earlier run ({1}), and could not rename it aside: {2}. Rename or delete it, then run again. Nothing was collected (exit 1)." -f $StreamFile.FullName, $Why, $_.Exception.Message) -ForegroundColor Red
                 Exit-Wrapper -Code 1
             }
-            Write-Host ("WARNING: Could not read the per-stream resume state file {0} of an earlier run: {1} It is put aside as {2} and removed once this run has collected every subscription." -f $StreamFile.FullName, $Why, $Aside) -ForegroundColor Yellow
+            Write-Host ("WARNING: Could not read the per-stream resume state file {0} of an earlier run: {1} It is put aside as {2} and removed once this run has collected, unless the resume state still lists as completed a subscription this run did not collect." -f $StreamFile.FullName, $Why, $Aside) -ForegroundColor Yellow
             $StaleAsideFiles += $Aside
             continue
         }
@@ -1976,7 +1977,7 @@ else
                 {
                     # As at the start: a read error or an empty file is unreadable.
                     $Obj = Get-Content -LiteralPath $PerStreamFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                    if ($null -eq $Obj) { throw 'the file is empty' }
+                    if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
                     $MergedStreamFiles += $StreamFile
                     if ($null -ne $Obj.Completed)
                     {
@@ -2128,19 +2129,21 @@ else
 # (before this run, or by its start) holds nothing newer than this run's own
 # records: it is removed, so no later -Resume names it again or folds it in.
 # One this run's own merge put aside holds this run's records and is kept (it
-# is named, with exit 2). All are kept when this run left out a listed
-# subscription (disabled without -IncludeDisabled, or skipped as not readable):
-# a file can hold a failure of one, which a later -Resume would otherwise skip
-# as completed. One that cannot be removed is named, with the advice to delete
-# it, not to rename it back.
+# is named, with exit 2). All are kept while the state still lists as completed
+# a subscription this run did not collect (left out of its set, or missing
+# from a listing that came back incomplete): a file can hold a newer failure of
+# it, which a later -Resume would otherwise skip as completed. Any other
+# subscription it holds was collected by this run or has no completion to
+# skip. One that cannot be removed is named, with the advice to delete it, not
+# to rename it back.
 if (-not ($Resume -or $ResumeFailedOnly))
 {
-    $LeftOutOfRun = @($AllSubscriptions | Where-Object { $null -ne $_ -and $RunSubscriptionIds -notcontains [string]$_.Id })
+    $OlderCompletions = @($CompletedIds | Where-Object { $_ -and $RunSubscriptionIds -notcontains [string]$_ })
     foreach ($Aside in @($StaleAsideFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
     {
-        if ($LeftOutOfRun.Count -gt 0)
+        if ($OlderCompletions.Count -gt 0)
         {
-            Write-Host ("Kept: {0}, a per-stream resume state file put aside as unreadable. This run left out {1} listed subscription(s), whose failures it may hold, so every -Resume names it until it is fixed and renamed back, or deleted." -f $Aside, $LeftOutOfRun.Count) -ForegroundColor Yellow
+            Write-Host ("Kept: {0}, a per-stream resume state file put aside as unreadable. The resume state still lists {1} subscription(s) this run did not collect as completed, and the file may hold a newer failure of one, so every -Resume names it until it is fixed and renamed back, or deleted." -f $Aside, $OlderCompletions.Count) -ForegroundColor Yellow
             continue
         }
         try { Remove-Item -LiteralPath $Aside -Force -ErrorAction Stop }

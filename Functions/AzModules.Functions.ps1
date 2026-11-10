@@ -87,16 +87,17 @@ function Test-RdaAzAccountsVersion
         $Status = 'LoadedTooOld'
         $Messages += ('Az.Accounts {0} is already loaded in this PowerShell session. This tool needs Az.Accounts {1} or newer.' -f $Loaded, $Required)
         $Messages += 'An older Az.Accounts that is already loaded cannot be replaced in a running session.'
-        if (-not $Installed -or $Installed -lt $Required)
-        {
-            $Messages += 'Install a supported version first:'
-            $Messages += ('  ' + $InstallCommand)
-        }
         # The submodules whose manifest pins an older Az.Accounts.
         # PowerShell loads that older Az.Accounts for them in every new
-        # session, so the new session alone would stop again.
+        # session, so the new session alone would stop again. Their update
+        # comes first, as in the Missing and TooOld advice below.
         $Pinning = @(Get-RdaAzAccountsPinning -SubModule $SubModule -Minimum $Required)
         $Messages += @(Get-RdaAzAccountsPinMessage -Pinning $Pinning)
+        if (-not $Installed -or $Installed -lt $Required)
+        {
+            $Messages += $(if ($Pinning.Count -gt 0) { 'Then install a supported Az.Accounts:' } else { 'Install a supported version first:' })
+            $Messages += ('  ' + $InstallCommand)
+        }
         $Messages += 'Then open a new PowerShell session and run again.'
         $Messages += 'If your PowerShell profile loads Az.Accounts, start the new session with: pwsh -NoProfile'
         # -NoProfile also drops a sign-in the profile makes (Cloud Shell does).

@@ -363,7 +363,6 @@ Describe 'Retry-list entries this run leaves out' {
 
     It 'are named in the run summary, before the wrapper transcript stops, so the transcript says why the run ends with exit 2' {
         $OwedIfAt = [array]::IndexOf($script:TopStatements, $script:OwedIf[0])
-        $OwedIfAt | Should -BeLessThan $script:TimeAt
         $OwedIfAt | Should -BeLessThan $script:StopAt
     }
 

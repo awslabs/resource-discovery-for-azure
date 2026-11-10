@@ -242,12 +242,21 @@ Describe 'The shape of a per-stream file and the read-back of the end-of-run mer
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{}]}' }
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":""}]}' }
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":7}]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":"sub-b","Attempts":1}]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":"sub-b","LastFailedAt":"soon","Attempts":1}]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":"sub-b","LastFailedAt":7,"Attempts":1}]}' }
         @{ Text = '{"Completed":[{"Id":"sub-a"}]}' }
         @{ Text = '{"Completed":[null]}' }
         @{ Text = '{"Completed":[""]}' }
     ) {
         $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text $Text
         Read-StreamResumeStateFile -Path $File | Should -BeNullOrEmpty
+    }
+
+    It 'reads a retry entry with no LastFailedAt as a file that cannot be read under strict mode too, so the merge never converts it' {
+        $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{"Completed":["sub-a"],"FailedAttempts":[{"Id":"sub-b","Attempts":1}]}'
+        $R = & { Set-StrictMode -Version Latest; Read-StreamResumeStateFile -Path $File }
+        $R | Should -BeNullOrEmpty
     }
 
     # [null] is what Write-StreamState writes for an empty retry list: @($null).

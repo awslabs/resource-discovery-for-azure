@@ -750,7 +750,8 @@ if ($Resume -or $ResumeFailedOnly)
         $StrandedCompleted = @()
         $StrandedFailed = @()
         # A file that cannot be read (it cannot be parsed, parses to nothing,
-        # or is not an object with a Completed list) is moved aside
+        # is not an object with a Completed list, or is not in the shape
+        # Write-StreamState writes: Read-StreamResumeStateFile) is moved aside
         # (Move-UnreadableStreamStateFile); when one cannot be moved aside the
         # run stops after this loop with exit 1, before any record is saved.
         $UnreadableNotMoved = @()

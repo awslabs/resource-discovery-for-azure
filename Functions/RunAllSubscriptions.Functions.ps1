@@ -497,9 +497,10 @@ function Get-StreamResumeStateFiles
 }
 
 # Read one per-stream resume-state file. Returns its content, or $null when the
-# file cannot be read or does not hold a JSON object. A write cut short leaves a
-# partial file, which fails to parse, or an empty one, which ConvertFrom-Json
-# turns into $null without an error; both come back as $null here.
+# file cannot be read, does not hold a JSON object, or is not in the shape
+# Write-StreamState writes (its lists and their entries, below). A write cut
+# short leaves a partial file, which fails to parse, or an empty one, which
+# ConvertFrom-Json turns into $null without an error; both come back as $null.
 function Read-StreamResumeStateFile
 {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -513,12 +514,26 @@ function Read-StreamResumeStateFile
     }
     if ($Obj -isnot [System.Management.Automation.PSCustomObject]) { return $null }
     # Write-StreamState always writes Completed as a list of ids and, when
-    # there, FailedAttempts as a list of Add-FailedAttempt records (each with an
-    # Id): any other shape (FailedAttempts null included) is a file that cannot
-    # be read. A null FailedAttempts entry is written ("FailedAttempts": [null]
-    # for an empty list, as @($null)), so it is let through; the readers drop it.
+    # there, FailedAttempts as a list of Add-FailedAttempt records (each with a
+    # text Id and a LastFailedAt date, which Merge-FailedAttempts converts):
+    # any other shape (FailedAttempts null included) is a file that cannot be
+    # read. A null FailedAttempts entry is written ("FailedAttempts": [null] for
+    # an empty list, as @($null)), so it is let through; the readers drop it.
     if ($Obj.PSObject.Properties['Completed'] -and ($Obj.Completed -isnot [array] -or @($Obj.Completed | Where-Object { $_ -isnot [string] -or $_ -eq '' }).Count -gt 0)) { return $null }
-    if ($Obj.PSObject.Properties['FailedAttempts'] -and ($Obj.FailedAttempts -isnot [array] -or @($Obj.FailedAttempts | Where-Object { $null -ne $_ -and ($_ -isnot [System.Management.Automation.PSCustomObject] -or -not $_.PSObject.Properties['Id'] -or $_.Id -isnot [string] -or $_.Id -eq '') }).Count -gt 0)) { return $null }
+    if ($Obj.PSObject.Properties['FailedAttempts'])
+    {
+        if ($Obj.FailedAttempts -isnot [array]) { return $null }
+        foreach ($Entry in @($Obj.FailedAttempts))
+        {
+            if ($null -eq $Entry) { continue }
+            if ($Entry -isnot [System.Management.Automation.PSCustomObject] -or -not $Entry.PSObject.Properties['Id'] -or $Entry.Id -isnot [string] -or $Entry.Id -eq '') { return $null }
+            # ConvertFrom-Json turns an ISO 8601 date text into a [datetime]; any
+            # other text must parse the way the [datetime] cast does (as afo).
+            $When = [datetime]::MinValue
+            $At = if ($Entry.PSObject.Properties['LastFailedAt']) { $Entry.LastFailedAt } else { $null }
+            if ($At -isnot [datetime] -and -not ($At -is [string] -and [datetime]::TryParse($At, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$When))) { return $null }
+        }
+    }
     return $Obj
 }
 

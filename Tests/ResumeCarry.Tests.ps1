@@ -967,13 +967,27 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a') -Because 'the save did not reach the disk'
         $script:ResumeStateSaveFailed | Should -BeTrue
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
-        $Banner = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeStateSaveFailed' })
+        $Banner = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$ResumeStateSaveFailed*' })
         $Banner.Count | Should -Be 1
         Set-Variable -Name ResumeStateSaveFailed -Value $true
         Set-Variable -Name ResumeStateFile -Value $script:State
         $Lines = @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
         @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written at least once this run*a -Resume or -ResumeFailedOnly run would skip it and carry its old report.' -f $script:State) }).Count | Should -Be 1
         @($Lines | Where-Object { $_ -like '*then run again without -Resume or -ResumeFailedOnly: it collects every subscription.' }).Count | Should -Be 1
+    }
+
+    It 'a save of the resume state that reaches the disk after one that failed clears the flag, and the banner is quiet without a state file' {
+        $script:ResumeStateSaveFailed = $true
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @() -Reports @()
+        $script:ResumeStateSaveFailed | Should -BeFalse -Because 'the file now holds the whole state again'
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
+        # The run starts with the flag down.
+        @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.Text -eq '$ResumeStateSaveFailed = $false' }).Count | Should -Be 1
+        $Banner = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$ResumeStateSaveFailed -and *' })
+        $Banner.Count | Should -Be 1
+        Set-Variable -Name ResumeStateSaveFailed -Value $true
+        Set-Variable -Name ResumeStateFile -Value (Join-Path $script:Root 'no-such-state.json')
+        @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1) | Should -BeNullOrEmpty -Because 'a run that cleared the state leaves nothing a -Resume could skip on'
     }
 
     It 'a run whose saves of the resume state all reach the disk says nothing about it' {

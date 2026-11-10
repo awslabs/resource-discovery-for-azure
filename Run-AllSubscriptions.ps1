@@ -2773,10 +2773,11 @@ if (@($UncarriedSkipped).Count -gt 0)
 }
 
 # A save of the resume state that failed this run (Save-CompletedSubscriptionIds
-# warned) can leave the file listing a subscription this run failed as
-# completed, so a -Resume run would skip it and carry its old report: say so,
-# and how to run instead. A failed subscription already sets exit 2.
-if ($ResumeStateSaveFailed)
+# warned), with no later save that reached the disk, can leave the file listing
+# a subscription this run failed as completed, so a -Resume run would skip it
+# and carry its old report: say so, and how to run instead, while the file is
+# there. A failed subscription already sets exit 2.
+if ($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
 {
     Write-Host ""
     Write-Host "============== FAILED (resume state not saved) ==============" -ForegroundColor Red

@@ -193,9 +193,10 @@ Describe 'A submodule that asks for an older Az.Accounts' -Skip:$IsWindows {
         # Az.Accounts version, as a profile or an older tool does.
         $script:PinSession = Join-Path $script:PinDir 'session.ps1'
         @'
-param([string]$Functions, [string]$Preload = '')
+param([string]$Functions, [string]$Preload = '', [string]$PreloadCompute = '')
 . $Functions
 if ($Preload) { Import-Module Az.Accounts -RequiredVersion $Preload -ErrorAction Stop | Out-Null }
+if ($PreloadCompute) { Import-Module Az.Compute -RequiredVersion $PreloadCompute -ErrorAction Stop | Out-Null }
 Import-Module Az.Accounts -MinimumVersion (Get-RdaAzAccountsMinimumVersion) -ErrorAction Stop | Out-Null
 Import-Module Az.Compute -ErrorAction Stop | Out-Null
 Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
@@ -204,14 +205,15 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         # ResourceInventory.ps1 run it first.
         $script:CheckSession = Join-Path $script:PinDir 'check.ps1'
         @'
-param([string]$Functions, [string]$Preload = '')
+param([string]$Functions, [string]$Preload = '', [string]$PreloadCompute = '')
 . $Functions
 if ($Preload) { Import-Module Az.Accounts -RequiredVersion $Preload -ErrorAction Stop | Out-Null }
+if ($PreloadCompute) { Import-Module Az.Compute -RequiredVersion $PreloadCompute -ErrorAction Stop | Out-Null }
 Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
 '@ | Set-Content -LiteralPath $script:CheckSession -Encoding utf8
         function script:Invoke-PinSession
         {
-            param([string[]]$ModulePath, [string]$Preload = '', [switch]$CheckOnly)
+            param([string[]]$ModulePath, [string]$Preload = '', [string]$PreloadCompute = '', [switch]$CheckOnly)
             $Old = $env:PSModulePath
             $OldHome = $env:HOME
             $OldData = $env:XDG_DATA_HOME
@@ -223,7 +225,7 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
                 # home keeps the host's real Az modules out.
                 $env:HOME = Join-Path $script:PinDir 'home'
                 $env:XDG_DATA_HOME = Join-Path $env:HOME '.local/share'
-                $Json = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $(if ($CheckOnly) { $script:CheckSession } else { $script:PinSession }) -Functions $script:AzModulesFile -Preload $Preload | Out-String
+                $Json = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $(if ($CheckOnly) { $script:CheckSession } else { $script:PinSession }) -Functions $script:AzModulesFile -Preload $Preload -PreloadCompute $PreloadCompute | Out-String
             }
             finally
             {
@@ -373,6 +375,37 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         # The advice followed: the printed command installs a newer Az.Compute
         # into the user's folder, then a new session without the old load.
         New-PinModule -Root $UserFolder -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        $Next = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -CheckOnly
+        $Next.Status | Should -Be 'Ok' -Because $Next.Text
+        $Run = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder)
+        $Run.Status | Should -Be 'Ok' -Because $Run.Text
+    }
+
+    It 'an older Az.Accounts and a newer submodule loaded first: names the pinning submodule copy a new session would load, so one stop gives all the advice' {
+        # The session loads Az.Accounts 5.5.3 and Az.Compute 2.0.0 (a minimum
+        # only) by version, as a profile or the Az meta-module does. A new
+        # session loads neither: a plain Import-Module takes Az.Compute 1.0.0
+        # from the first folder, which asks for exactly 5.5.3.
+        $Root = Join-Path $script:PinDir 'loaded-hides-disk-pin'
+        $UserFolder = Join-Path $Root 'user'
+        $SystemFolder = Join-Path $Root 'system'
+        New-PinModule -Root $UserFolder -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+        New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version '5.5.3'
+        New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $SystemFolder -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -Preload '5.5.3' -PreloadCompute '2.0.0' -CheckOnly
+        $Stop.Status | Should -Be 'LoadedTooOld' -Because $Stop.Text
+        $Stop.Text | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+        $Stop.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3')) -Because $Stop.Text
+        $Stop.Text | Should -Not -Match 'Az\.Compute 2\.0\.0 asks for' -Because 'the loaded copy asks only for a minimum'
+        $Stop.Text | Should -Match ([regex]::Escape('Install-Module -Name Az.Compute -Repository PSGallery -Scope CurrentUser -Force'))
+        $Stop.Text | Should -Not -Match 'Install-Module -Name Az\.Accounts' -Because 'a supported Az.Accounts is installed'
+        $Stop.Text | Should -Match 'new PowerShell session'
+
+        # The advice followed: the printed command installs a newer Az.Compute
+        # into the user's folder, then a new session without the old loads.
+        New-PinModule -Root $UserFolder -Name 'Az.Compute' -Version '3.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
         $Next = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -CheckOnly
         $Next.Status | Should -Be 'Ok' -Because $Next.Text
         $Run = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder)

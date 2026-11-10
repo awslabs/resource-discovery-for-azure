@@ -90,13 +90,18 @@ function Test-RdaAzAccountsVersion
             $Messages += 'Install a supported version first:'
             $Messages += ('  ' + $InstallCommand)
         }
-        # The submodules whose manifest pins an older Az.Accounts, loaded or
-        # not: the loaded copy, or else the copy a plain Import-Module would
-        # take. PowerShell loads that older Az.Accounts for them in every new
-        # session, so the new session alone would stop again.
+        # The submodules whose manifest pins an older Az.Accounts: the loaded
+        # copies, and also the copy a plain Import-Module takes in the new
+        # session, where nothing is loaded (a loaded copy can hide a pinning
+        # one found first on disk). PowerShell loads that older Az.Accounts
+        # for them in every new session, so the new session alone would stop
+        # again.
         $Pinning = @(foreach ($Name in @($SubModule | Where-Object { $_ -and $_ -ne 'Az.Accounts' }))
             {
-                foreach ($Copy in @(Get-RdaModuleCopyToLoad -Name $Name))
+                $Copies = @(@(Get-RdaModuleCopyToLoad -Name $Name) + @(Get-RdaModuleCopyToLoad -Name $Name -OnDisk) |
+                        Where-Object { $_ } |
+                        Sort-Object -Property { [string]$_.ModuleBase } -Unique)
+                foreach ($Copy in $Copies)
                 {
                     $Pin = Get-RdaAzAccountsPin -Module $Copy -Minimum $Required
                     if ($Pin) { [pscustomobject]@{ Name = [string]$Copy.Name; Version = [version]$Copy.Version; Accounts = $Pin } }
@@ -190,15 +195,19 @@ function Get-RdaAzAccountsPin
 # The copies of a module a plain Import-Module -Name uses: the loaded ones
 # when it is loaded, or else the highest version in the first PSModulePath
 # folder that holds it (PowerShell takes that one, even when a later folder
-# holds a newer version).
+# holds a newer version). -OnDisk skips the loaded ones: the copy a new
+# session, where nothing is loaded yet, would take.
 function Get-RdaModuleCopyToLoad
 {
     [CmdletBinding()]
     [OutputType([object[]])]
-    param([string]$Name)
+    param([string]$Name, [switch]$OnDisk)
 
-    $Loaded = @(Get-Module -Name $Name -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version })
-    if ($Loaded.Count -gt 0) { return $Loaded }
+    if (-not $OnDisk)
+    {
+        $Loaded = @(Get-Module -Name $Name -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version })
+        if ($Loaded.Count -gt 0) { return $Loaded }
+    }
     $Copies = @(Get-Module -Name $Name -ListAvailable -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version -and $_.ModuleBase })
     if ($Copies.Count -eq 0) { return @() }
     # PowerShell finds a relative folder (or one with '..') from the current

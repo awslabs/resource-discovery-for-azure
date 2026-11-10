@@ -126,15 +126,26 @@ if ((Get-RdaStandInScenario).NarrationFail)
     }
 }
 # With ResumeRemoveFail, the wrapper cannot remove the resume state file at
-# the end of a clean run, with an error whose text holds braces.
-if ((Get-RdaStandInScenario).ResumeRemoveFail)
+# the end of a clean run, with an error whose text holds braces. With
+# ResumeRemoveSoftFail, the removal fails as Remove-Item itself fails on a
+# locked file: with a non-terminating error, which a catch sees only when the
+# call asks for -ErrorAction Stop.
+if ((Get-RdaStandInScenario).ResumeRemoveFail -or (Get-RdaStandInScenario).ResumeRemoveSoftFail)
 {
     function Remove-Item
     {
         [CmdletBinding()] param([Parameter(Position = 0)]$Path, $LiteralPath, [switch]$Force, [switch]$Recurse)
         # The wrapper names the file by -LiteralPath (or by -Path).
         $Target = if ($PSBoundParameters.ContainsKey('LiteralPath')) { [string]$LiteralPath } else { [string]$Path }
-        if ($Target -like '*.resume-state-*' -and $Target -notlike '*-stream-*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the file is in use by {another process}' }
+        if ($Target -like '*.resume-state-*' -and $Target -notlike '*-stream-*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1')
+        {
+            if ((Get-RdaStandInScenario).ResumeRemoveSoftFail)
+            {
+                $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([System.IO.IOException]::new('stand-in: the file is locked by another process'), 'RemoveFileSystemItemIOError', [System.Management.Automation.ErrorCategory]::WriteError, $Target))
+                return
+            }
+            throw 'stand-in: the file is in use by {another process}'
+        }
         Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
     }
 }
@@ -401,7 +412,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked, [switch]$ResumeRemoveSoftFail)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -549,7 +560,7 @@ function Get-UsageAggregates
             $RunTool = if ($StandInInventory) { $script:ToolStandIn } else { $script:Tool }
             $RunWrapper = Join-Path $RunTool 'Run-AllSubscriptions.ps1'
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail; UnifiedStateOnce = [bool]$UnifiedStateBlocked; SummaryStateFail = [bool]$SummaryStateBlocked } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; ResumeRemoveSoftFail = [bool]$ResumeRemoveSoftFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail; UnifiedStateOnce = [bool]$UnifiedStateBlocked; SummaryStateFail = [bool]$SummaryStateBlocked } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             # ConsumptionPageFail runs the consumption phase (see
             # Get-UsageAggregates in the stand-in), MetricsTokenFail the
@@ -1171,6 +1182,29 @@ function Get-UsageAggregates
         $Run.Console | Should -Match ('WARNING: Could not remove resume state file .+: ' + [regex]::Escape('stand-in: the file is in use by {another process}')) -Because $Run.Console
         $Run.Console | Should -Not -Match 'Error formatting a string' -Because $Run.Console
         $Run.ExitCode | Should -Be 0 -Because $Run.Console
+    }
+
+    It 'sequential: a resume state file whose removal fails with a non-terminating error (a locked file) is not called cleared, the warning says a later -Resume skips what it lists, and the next two runs clear it and then read none' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA) -ResumeRemoveSoftFail
+        $Run.Console | Should -Match ('WARNING: Could not remove resume state file .+: ' + [regex]::Escape('stand-in: the file is locked by another process')) -Because $Run.Console
+        $Run.Console | Should -Match 'still lists the subscriptions it holds as completed, so a later -Resume run skips them' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Resume state cleared \(clean run\)' -Because 'the file is still there'
+        $Run.StateKept | Should -BeTrue -Because 'the removal failed'
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+
+        # The next run, a -Resume once the lock is gone, reads the kept state
+        # as kept (and says so), and its clean end clears it.
+        $Next = Invoke-CarryOverRun -Subs @($script:SubA) -Resume -ReuseHome $Run.Home
+        $Next.Console | Should -Match 'Resume mode: 1 previously completed subscription\(s\) will be skipped' -Because $Next.Console
+        $Next.Console | Should -Match 'Resume state cleared \(clean run\)' -Because $Next.Console
+        $Next.StateKept | Should -BeFalse -Because $Next.Console
+        $Next.ExitCode | Should -Be 0 -Because $Next.Console
+
+        # The run after that reads no state and runs the subscription.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA) -Resume -ReuseHome $Run.Home
+        $After.Console | Should -Match 'Resume mode: no previous state found' -Because $After.Console
+        $After.Console | Should -Match 'Processing subscription: Sub A' -Because $After.Console
+        $After.ExitCode | Should -Be 0 -Because $After.Console
     }
 
     It 'sequential: a non-zero $LASTEXITCODE left in the session before the run fails no subscription' {
@@ -1916,5 +1950,33 @@ function Get-UsageAggregates
         $Run.Console | Should -Match '\[stream-1\] done: Sub B'
         $Run.FailedIds.Count | Should -Be 0
         $Run.ExitCode | Should -Be 0
+    }
+}
+
+# Remove-Item fails a locked or denied file with a non-terminating error,
+# which a catch never sees unless the call asks for -ErrorAction: the code
+# after it then runs as if the file was gone (as "Resume state cleared" did).
+# So each Remove-Item in the body of a try in the wrapper, its stream worker
+# and their functions names its -ErrorAction (Stop to reach the catch, or
+# SilentlyContinue where a failure is left on purpose).
+Describe 'Each Remove-Item inside a try names its -ErrorAction' {
+    It '<File>' -ForEach @(
+        @{ File = 'Run-AllSubscriptions.ps1' }
+        @{ File = 'Run-AllSubscriptions.Stream.ps1' }
+        @{ File = 'Functions/RunAllSubscriptions.Functions.ps1' }
+    ) {
+        $Path = Join-Path (Join-Path $PSScriptRoot '..') $File
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+        $Missing = @()
+        foreach ($Try in $Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TryStatementAst] }, $true))
+        {
+            foreach ($Cmd in $Try.Body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Remove-Item' }, $true))
+            {
+                $Names = @($Cmd.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+                if (-not ($Names | Where-Object { $_ -in @('ErrorAction', 'EA') })) { $Missing += ('line {0}: {1}' -f $Cmd.Extent.StartLineNumber, $Cmd.Extent.Text) }
+            }
+        }
+        # A nested try finds the same call twice.
+        @($Missing | Select-Object -Unique) | Should -BeNullOrEmpty
     }
 }

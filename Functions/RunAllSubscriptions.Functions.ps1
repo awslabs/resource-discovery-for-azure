@@ -662,7 +662,7 @@ function Remove-StreamSummaryFiles
     {
         if (Test-Path -LiteralPath $S.SummaryPath)
         {
-            try { Remove-Item -LiteralPath $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
+            try { Remove-Item -LiteralPath $S.SummaryPath -Force -ErrorAction Stop } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
         }
     }
 }
@@ -734,7 +734,10 @@ function Get-FailedAttempts
         $State = $Text | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.FailedAttempts) { return @() }
-        return @($State.FailedAttempts)
+        # A save after the last failure was cleared writes [null]: that is no
+        # failure, and a null counted as one kept the state from ever being
+        # cleared on a -Resume run that skipped every subscription.
+        return @($State.FailedAttempts | Where-Object { $null -ne $_ })
     }
     catch
     {

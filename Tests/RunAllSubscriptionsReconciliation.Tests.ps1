@@ -929,6 +929,20 @@ Describe 'The wrapper keeps a resume state with one entry as a list' {
         $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id 'sub-d' -Name 'D' -Reason 'r'
         @($FailedAttempts).Count | Should -Be 2
     }
+
+    It 'reads a resume state saved once its last failure was cleared as holding no failure, so a later clean run clears it' {
+        # A success clears the last failure: Remove-FailedAttempt returns no
+        # item, the save writes "FailedAttempts": [null], and a read that
+        # counted that null kept the state as one pending retry on every
+        # -Resume run that skipped every subscription.
+        $ResumeStateFile = Join-Path $script:OneDir 'cleared.json'
+        $TenantID = 't'
+        $FailedAttempts = Remove-FailedAttempt -Existing @([pscustomobject]@{ Id = 'sub-b'; Name = 'B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 }) -Id 'sub-b'
+        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids @('sub-a', 'sub-b') -FailedAttempts $FailedAttempts
+        foreach ($Read in $script:StateReads) { . $Read }
+        $FailedAttempts.Count | Should -Be 0 -Because 'the wrapper counts it so to call a run clean'
+        @($CompletedIds) | Should -Be @('sub-a', 'sub-b')
+    }
 }
 
 Describe 'The resume state in a folder whose path holds [ or ]' {

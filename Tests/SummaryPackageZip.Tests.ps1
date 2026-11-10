@@ -25,6 +25,16 @@ BeforeAll {
     New-Item -ItemType Directory -Path $script:TmpRoot -Force | Out-Null
     $script:PlaceholderId = '12345678-1234-1234-1234-123456789012'
 
+    # A folder a refused or failed rebuild made is removed, except on macOS,
+    # where its lock file stays (a removed one cannot be told there), so the
+    # folder stays holding only that file (see Test-RdaCanSeeRemovedLock).
+    function Assert-RdaMadeFolderLeft
+    {
+        param([string]$Path)
+        if (-not $IsWindows -and -not (Test-RdaCanSeeRemovedLock)) { @(Get-ChildItem -LiteralPath $Path -Force -Recurse -File | ForEach-Object { $_.Name }) | Should -Be @('.rda-rebuild.lock') }
+        else { Test-Path -LiteralPath $Path | Should -BeFalse -Because 'a refused or failed rebuild leaves no folder it made' }
+    }
+
     # One per-subscription report as ResourceInventory.ps1 names its files.
     function New-SubReportFiles
     {
@@ -508,7 +518,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip checks a zip before it extracts it' {
         $script:StagingMode | Should -Be '700'
     }
 
-    It 'does not count a report zip that holds no inventory, and says no report was found when that is all there is' -Skip:($IsMacOS) {
+    It 'does not count a report zip that holds no inventory, and says no report was found when that is all there is' {
         $Root = Join-Path $script:TmpRoot 'no-inventory'
         $Stage = Join-Path $Root 'outer'
         New-Item -ItemType Directory -Path $Stage -Force | Out-Null
@@ -516,7 +526,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip checks a zip before it extracts it' {
         $Zip = Join-Path $Root 'AllSubscriptions_ResourcesReport_2026-01-02_03-04-09.zip'
         Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory (Join-Path $Root 'out') 6>$null } | Should -Throw '*no per-subscription reports found*'
-        Test-Path -LiteralPath (Join-Path $Root 'out') | Should -BeFalse -Because 'a refused rebuild leaves no folder it made'
+        Assert-RdaMadeFolderLeft -Path (Join-Path $Root 'out')
     }
 }
 
@@ -630,7 +640,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip counts the files it renders in its bud
 Describe 'New-RdaAllSubHtmlSummaryFromZip budget for extracted folders, the bundle check and the summary write' {
     BeforeAll { . (Join-Path $script:RepoRoot 'Functions/AllSubHtmlSummary.Functions.ps1') }
 
-    It 'plans extracted report folders against the same budget, writing nothing when they pass it' -Skip:($IsMacOS) {
+    It 'plans extracted report folders against the same budget, writing nothing when they pass it' {
         $Root = Join-Path $script:TmpRoot 'folder-budget'
         $Stage = Join-Path $Root 'outer'
         foreach ($N in 1..1000)
@@ -644,7 +654,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip budget for extracted folders, the bund
         [System.IO.Compression.ZipFile]::CreateFromDirectory($Stage, $Outer)
         $Out = Join-Path $Root 'out'
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $Out 6>$null } | Should -Throw '*more than 2000 files in all*'
-        Test-Path -LiteralPath $Out | Should -BeFalse -Because 'a refused rebuild leaves no folder it made'
+        Assert-RdaMadeFolderLeft -Path $Out
     }
 
     It 'checks the bundle as written with the report zip limits, and leaves no bundle when it fails them' {
@@ -751,7 +761,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip over a reused folder when a write fail
         Test-Path -LiteralPath $Out | Should -BeFalse
     }
 
-    It 'leaves no folder it made, parents included, when no report is found' -Skip:($IsMacOS) {
+    It 'leaves no folder it made, parents included, when no report is found' {
         $Root = Join-Path $script:TmpRoot 'no-report-clean'
         $Stage = Join-Path $Root 'outer'
         New-Item -ItemType Directory -Path $Stage -Force | Out-Null
@@ -761,7 +771,7 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip over a reused folder when a write fail
         $Parent = Join-Path $Root 'new-parent'
         $Out = Join-Path $Parent 'out'
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $Zip -OutputDirectory $Out 6>$null } | Should -Throw '*no per-subscription reports found*'
-        Test-Path -LiteralPath $Parent | Should -BeFalse
+        Assert-RdaMadeFolderLeft -Path $Parent
     }
 
     It 'keeps a folder that was already there, even when it is empty' {
@@ -1660,11 +1670,11 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at o
         Test-Path -LiteralPath (Join-Path $Out 'other.lock') | Should -BeTrue
     }
 
-    It 'removes a folder it made, lock file included, when the rebuild fails' -Skip:($IsMacOS) {
+    It 'removes a folder it made, lock file included, when the rebuild fails' {
         $Out = Join-Path $script:TmpRoot 'made-then-failed'
         Mock Move-RdaFile { throw 'disk full' }
         { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*disk full*'
-        Test-Path -LiteralPath $Out | Should -BeFalse
+        Assert-RdaMadeFolderLeft -Path $Out
     }
 
     It 'removes the folders it made when the lock cannot be taken for another reason' -Skip:($IsWindows -or [Environment]::UserName -eq 'root') {

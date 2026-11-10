@@ -1008,6 +1008,32 @@ Describe 'Every Az.Accounts import asks for the supported version' {
     }
 }
 
+Describe 'The entry scripts find the Az.Accounts version file by its literal path' {
+
+    # Test-Path -Path reads [ and ] as wildcards, so a copy of the tool in a
+    # folder such as [client] would not find Functions/AzModules.Functions.ps1
+    # and stop as if it were missing. Each entry script checks that file
+    # with -LiteralPath.
+    It '<_> checks AzModules.Functions.ps1 with Test-Path -LiteralPath' -ForEach @('ResourceInventory.ps1', 'Run-AllSubscriptions.ps1', 'Run-AllSubscriptions.Stream.ps1') {
+        $Path = Join-Path $script:RepoRoot $_
+        $Tokens = $null
+        $Errors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$Tokens, [ref]$Errors)
+        $Checks = @($Ast.FindAll({
+                    param($Node)
+                    $Node -is [System.Management.Automation.Language.CommandAst] -and $Node.GetCommandName() -eq 'Test-Path' -and
+                    @($Node.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and $_.VariablePath.UserPath -eq 'AzModulesFunctionsFile' }).Count -gt 0
+                }, $true))
+        $Checks.Count | Should -BeGreaterThan 0 -Because "$_ checks that the file is there"
+        foreach ($Check in $Checks)
+        {
+            $Names = @($Check.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+            $Names | Should -Contain 'LiteralPath' -Because ("line {0}: {1}" -f $Check.Extent.StartLineNumber, $Check.Extent.Text)
+            $Names | Should -Not -Contain 'Path' -Because ("line {0}: {1}" -f $Check.Extent.StartLineNumber, $Check.Extent.Text)
+        }
+    }
+}
+
 Describe 'The stream worker stops without the Az.Accounts version file' {
 
     # Without Functions/AzModules.Functions.ps1 the worker does not know the

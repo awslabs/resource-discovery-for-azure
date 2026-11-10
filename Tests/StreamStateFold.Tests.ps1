@@ -522,8 +522,15 @@ Describe 'A per-stream file an earlier run put aside as unreadable' {
         $Ast2 = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
         $AfterClear = @($Ast2.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Extent.Text.Contains('$KeptAsideFiles') -and $_.Clauses[0].Item1.Extent.Text.Contains('Test-Path -LiteralPath $ResumeStateFile') })
         $AfterClear.Count | Should -Be 1
-        $null = & { $Resume = $false; $ResumeFailedOnly = $false; $KeptAsideFiles = @($Aside); $ResumeStateFile = Join-Path $Root '.resume-state-t.json'; $null = $Resume, $ResumeFailedOnly, $KeptAsideFiles, $ResumeStateFile; . ([scriptblock]::Create($AfterClear[0].Extent.Text)) } 6>$null
+        # While the state file is still there, the file it guards stays.
+        $StateHere = Join-Path $Root '.resume-state-t.json'
+        Save-CompletedSubscriptionIds -Path $StateHere -Tenant 't' -Ids @('sub-unlisted') -FailedAttempts @() -Reports @()
+        $null = & { $Resume = $false; $ResumeFailedOnly = $false; $KeptAsideFiles = @($Aside); $ResumeStateFile = $StateHere; $null = $Resume, $ResumeFailedOnly, $KeptAsideFiles, $ResumeStateFile; . ([scriptblock]::Create($AfterClear[0].Extent.Text)) } 6>$null
+        Test-Path -LiteralPath $Aside | Should -BeTrue -Because 'the state still lists an older completion'
+        Remove-Item -LiteralPath $StateHere -Force
+        $Out = @(& { $Resume = $false; $ResumeFailedOnly = $false; $KeptAsideFiles = @($Aside); $ResumeStateFile = $StateHere; $null = $Resume, $ResumeFailedOnly, $KeptAsideFiles, $ResumeStateFile; . ([scriptblock]::Create($AfterClear[0].Extent.Text)) } 6>&1 | ForEach-Object { [string]$_ })
         Test-Path -LiteralPath $Aside | Should -BeFalse -Because 'no state is left, so no completion a -Resume would skip'
+        @($Out | Where-Object { $_ -like ('Removed: {0}, kept above. The resume state is cleared*' -f $Aside) }).Count | Should -Be 1 -Because 'the Kept line said every -Resume names it'
         Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
         # A left-out subscription with no completion (a disabled one) does not keep it.
         $null = & { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = @($Aside); $CompletedIds = @('sub-a'); $RunSubscriptionIds = @('sub-a'); $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a' }, [pscustomobject]@{ Id = 'sub-off' }); $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles, $CompletedIds, $RunSubscriptionIds, $AllSubscriptions; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>$null

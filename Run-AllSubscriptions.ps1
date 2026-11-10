@@ -980,6 +980,9 @@ $DiagFile = $null
 # explanation is that the signed-in identity does not have Reader on the
 # subscription, but it can also legitimately mean the subscription is empty).
 $SubResourceCounts = @()
+# The report zips the output check finds after the collection; the
+# consolidated zip build reads them, also when that check does not run.
+$ActualSubZips = @()
 
 if ($ParallelStreams -le 1)
 {
@@ -1634,10 +1637,6 @@ else
 }
 
 Write-Host "All subscriptions processed!" -ForegroundColor Green
-
-# The report zips the output check below finds; the consolidated zip build
-# reads them, also when that check does not run.
-$ActualSubZips = @()
 
 # === Per-subscription output verification (hard-stop) ========================
 #

@@ -600,6 +600,10 @@ function Save-CompletedSubscriptionIds
     {
         Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
         Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
+        # The file on disk can now be older than this run's state (it can still
+        # list a subscription this run failed as completed); the wrapper says so
+        # at the end of the run.
+        $script:ResumeStateSaveFailed = $true
     }
 }
 

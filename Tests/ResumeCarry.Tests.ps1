@@ -954,6 +954,36 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         @($R.Run.SkippedSubscriptions | ForEach-Object Id) | Should -BeNullOrEmpty -Because 'the -Resume run must not skip a subscription whose latest run left no report'
         @($R.Run.SubResourceCounts | ForEach-Object Id) | Should -Be @('sub-a', 'sub-b')
     }
+
+    It 'a failed save of the resume state after a subscription fails is named at the end, with a run without -Resume as the way on' {
+        # Run 1 (BeforeEach) completed sub-a. This run fails sub-a, and its save of
+        # that does not reach the disk, so the file still lists sub-a as completed:
+        # a -Resume would skip it and carry its old report.
+        $Global:RdaCarryTestFailIds = @('sub-a')
+        $S = script:Read-State -Path $script:State
+        $script:ResumeStateSaveFailed = $false
+        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' } -MockWith { throw 'stand-in: disk full' }
+        $null = & $script:SeqBlock $script:FailRoot @($script:A) $false $S.Completed @(Get-FailedAttempts -Path $script:State -Tenant 't') $S.Reports $script:Root $script:State 't' $false 6>$null
+        (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a') -Because 'the save did not reach the disk'
+        $script:ResumeStateSaveFailed | Should -BeTrue
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
+        $Banner = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeStateSaveFailed' })
+        $Banner.Count | Should -Be 1
+        Set-Variable -Name ResumeStateSaveFailed -Value $true
+        Set-Variable -Name ResumeStateFile -Value $script:State
+        $Lines = @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
+        @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written at least once this run*a -Resume or -ResumeFailedOnly run would skip it and carry its old report.' -f $script:State) }).Count | Should -Be 1
+        @($Lines | Where-Object { $_ -like '*then run again without -Resume or -ResumeFailedOnly: it collects every subscription.' }).Count | Should -Be 1
+    }
+
+    It 'a run whose saves of the resume state all reach the disk says nothing about it' {
+        $Global:RdaCarryTestFailIds = @('sub-a')
+        $S = script:Read-State -Path $script:State
+        $script:ResumeStateSaveFailed = $false
+        $null = & $script:SeqBlock $script:FailRoot @($script:A) $false $S.Completed @(Get-FailedAttempts -Path $script:State -Tenant 't') $S.Reports $script:Root $script:State 't' $false 6>$null
+        (script:Read-State -Path $script:State).Completed | Should -BeNullOrEmpty
+        $script:ResumeStateSaveFailed | Should -BeFalse
+    }
 }
 
 Describe 'The -Resume output shows when each carried report was written' {

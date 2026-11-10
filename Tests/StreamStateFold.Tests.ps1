@@ -344,6 +344,31 @@ Describe 'Resume state helpers with a folder whose path holds brackets' {
     }
 }
 
+Describe 'A temporary state file whose write fails without stopping' {
+    It 'is not moved over the last good <Name> file' -ForEach @(@{ Name = 'per-stream' }, @{ Name = 'unified' }) {
+        $Root = Join-Path $script:TestBase ('nonterm-' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        $Path = Join-Path $Root '.resume-state-t-stream-0.json'
+        Set-Content -LiteralPath $Path -Value '{"Completed":["sub-good"]}' -NoNewline
+        # What a full disk does: part of the file is written, and the error does not stop the pipeline.
+        Mock Set-Content -ParameterFilter { $LiteralPath -like '*.tmp' } -MockWith {
+            [System.IO.File]::WriteAllText($LiteralPath, '{"Compl')
+            Write-Error 'stand-in: No space left on device'
+        }
+        if ($Name -eq 'per-stream')
+        {
+            $TenantID = 't'; $StreamId = 0; $Tag = '[stream-0]'; $null = $TenantID, $StreamId, $Tag
+            Write-StreamState -Path $Path -Completed @('sub-new') 6>$null 2>$null
+        }
+        else
+        {
+            Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-new') -FailedAttempts @() -Reports @() 6>$null 2>$null
+        }
+        Get-Content -LiteralPath $Path -Raw | Should -Be '{"Completed":["sub-good"]}'
+        Test-Path -LiteralPath "$Path.tmp" | Should -BeFalse
+    }
+}
+
 Describe 'Write-StreamState' {
     It 'leaves the file it had when the write is stopped, never one cut short' {
         $Dir = Join-Path $script:TestBase ('ws-' + [guid]::NewGuid().ToString().Substring(0, 8))

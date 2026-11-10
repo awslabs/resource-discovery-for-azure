@@ -513,6 +513,45 @@ Describe 'A resume state warning that cannot be written' {
     }
 }
 
+Describe 'A stream resume state holds no [null] failure' {
+    # A worker's first success runs Remove-FailedAttempt on an empty list,
+    # and assigning the empty result sets $null. A [null] in the file then
+    # read back as one failure: the next run's start counted a failure for
+    # every stream file of a stream where every subscription worked.
+    BeforeAll {
+        $script:NullDir = Join-Path $script:TestRoot ('nullstream_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path $script:NullDir -Force | Out-Null
+    }
+
+    It 'Write-StreamState writes [] after the last failure was cleared, as a worker passes it' {
+        Set-Variable -Name Tag -Value '[stream-0]'
+        $Path = Join-Path $script:NullDir 'cleared.json'
+        $FailedAttempts = @()
+        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id 'sub-a'
+        Write-StreamState -Path $Path -Completed @('sub-a') -FailedAttempts $FailedAttempts
+        $Obj = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        @($Obj.FailedAttempts | Where-Object { $null -eq $_ }).Count | Should -Be 0 -Because (Get-Content -LiteralPath $Path -Raw)
+        @((Read-StreamState -Path $Path).Failed).Count | Should -Be 0
+    }
+
+    It 'Read-StreamState reads [null] in a file an earlier worker wrote as no failure' {
+        $Path = Join-Path $script:NullDir 'older.json'
+        Set-Content -LiteralPath $Path -Value '{"Tenant":"t","StreamId":"0","Completed":["sub-a"],"FailedAttempts":[null]}' -Encoding utf8
+        $Read = Read-StreamState -Path $Path
+        @($Read.Failed).Count | Should -Be 0
+        @($Read.Completed) | Should -Be @('sub-a')
+    }
+
+    It 'Write-StreamState keeps a real failure and drops only the [null]' {
+        Set-Variable -Name Tag -Value '[stream-0]'
+        $Path = Join-Path $script:NullDir 'mixed.json'
+        $Failure = [pscustomobject]@{ Id = 'sub-b'; Name = 'B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 }
+        Write-StreamState -Path $Path -Completed @() -FailedAttempts @($null, $Failure)
+        @((Read-StreamState -Path $Path).Failed).Id | Should -Be @('sub-b')
+        @((Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json).FailedAttempts).Count | Should -Be 1
+    }
+}
+
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
     # Regression: -Existing was typed [System.Collections.IEnumerable], but when
     # the list holds exactly one prior failure PowerShell collapses it to a lone

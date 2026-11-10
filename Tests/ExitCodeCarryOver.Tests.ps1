@@ -412,7 +412,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked, [switch]$ResumeRemoveSoftFail, [switch]$BracketTool)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked, [switch]$ResumeRemoveSoftFail, [switch]$BracketTool, [string]$Stream1StateJson = '')
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -527,6 +527,13 @@ function Get-UsageAggregates
                 # can be read but is not valid JSON.
                 $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
                 Set-Content -LiteralPath (Join-Path $Reports.FullName ('.resume-state-{0}-stream-7.json' -f $script:Tenant)) -Value '{"Tenant": "cut' -Encoding utf8
+            }
+            if ($Stream1StateJson)
+            {
+                # Stream 1's resume file from an earlier parallel run, as
+                # this text.
+                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
+                Set-Content -LiteralPath (Join-Path $Reports.FullName ('.resume-state-{0}-stream-1.json' -f $script:Tenant)) -Value $Stream1StateJson -Encoding utf8
             }
             if ($Stream7LockedDuringRun.Count -gt 0)
             {
@@ -1374,6 +1381,14 @@ function Get-UsageAggregates
         $Run.Console | Should -Not -Match 'WARNING: kept [02-9]\d* stream resume state file' -Because $Run.Console
         $Run.Console | Should -Not -Match 'as the resume state could not be written' -Because 'this file was kept because it could not be parsed, not because a save failed'
         $Run.Console | Should -Not -Match 'were written to the stream resume state file' -Because 'the clean-up removed the summary-only file'
+    }
+
+    It 'sequential: the start reads a kept stream resume state file that holds [null] in its failures, from a stream where every subscription worked, as no failure' {
+        $Json = '{{"Tenant":"{0}","StreamId":"1","Completed":["{1}"],"FailedAttempts":[null]}}' -f $script:Tenant, $script:SubB.Id
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Stream1StateJson $Json
+        $Run.Console | Should -Match 'Read per-stream resume state left by an earlier parallel run \(stopped, or its resume state could not be written\): 1 completed, 0 failed subscription record\(s\)\.' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Run.FailedIds.Count | Should -Be 0
     }
 
     It 'two streams: when the resume state cannot be written, the old one is left as it was and every stream state file is kept; once it can be written, -ResumeFailedOnly retries the new failure only, and the run after has nothing to retry' {

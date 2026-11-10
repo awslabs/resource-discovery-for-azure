@@ -1063,8 +1063,10 @@ function Read-StreamState
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
-            # no FailedAttempts key, so default to @().
-            Failed    = if ($null -eq $Obj.FailedAttempts) { @() } else { @($Obj.FailedAttempts) }
+            # no FailedAttempts key, so default to @(). A [null] an older
+            # worker wrote after its last failure was cleared is no failure,
+            # as in Get-FailedAttempts.
+            Failed    = if ($null -eq $Obj.FailedAttempts) { @() } else { @($Obj.FailedAttempts | Where-Object { $null -ne $_ }) }
         }
     }
     catch
@@ -1087,7 +1089,10 @@ function Write-StreamState
             Tenant         = $TenantID
             StreamId       = $StreamId
             Completed      = $Completed
-            FailedAttempts = @($FailedAttempts)
+            # A $null (the empty list Remove-FailedAttempt gives back, once
+            # assigned) is dropped, so the file holds [] and never [null],
+            # as in Save-CompletedSubscriptionIds.
+            FailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ })
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding utf8 -ErrorAction Stop
     }
     catch

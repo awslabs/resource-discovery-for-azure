@@ -1126,8 +1126,9 @@ function Write-StreamState
 #                          SubscriptionId text, not empty, on a sign-in
 #                          ('(auth)') row, else text or empty when present
 #   Status, Reason         absent, or text
-# and it holds a row (ResourceCounts or Failed) for every subscription the
-# stream ran this time (-ExpectedIds). Returns Accepted $true with the checked
+# and it holds exactly one row (ResourceCounts or Failed) for every
+# subscription the stream ran this time (-ExpectedIds), and no row for any
+# other subscription. Returns Accepted $true with the checked
 # values, which are all the aggregation uses, or Accepted $false with the
 # reason. The reason is fixed text and counts only (the values can hold real
 # names). A bad value never throws here.
@@ -1264,9 +1265,18 @@ function Resolve-StreamSummary
         $Health[$Name] = $Rows
     }
 
+    # Exactly one outcome row (success or failed) for each subscription the
+    # stream ran, and none for any other: a second row would count that
+    # subscription's resources and zip twice, and a row for a subscription
+    # the stream did not run would add counts and a zip it did not make.
+    # Ids are compared without regard to case, as -contains does.
     $RowIds = @(@($ResourceCounts) + @($Failed) | ForEach-Object { $_.Id })
     $NoRow = @(@($ExpectedIds) | Where-Object { $RowIds -notcontains $_ })
     if ($NoRow.Count -gt 0) { return (& $NotConfirmed ('it has no row for {0} of the {1} subscription(s) the stream ran' -f $NoRow.Count, @($ExpectedIds).Count)) }
+    $Unexpected = @($RowIds | Where-Object { @($ExpectedIds) -notcontains $_ })
+    if ($Unexpected.Count -gt 0) { return (& $NotConfirmed ('it has {0} row(s) for a subscription the stream did not run' -f $Unexpected.Count)) }
+    $Repeated = @($RowIds | Group-Object | Where-Object { $_.Count -gt 1 })
+    if ($Repeated.Count -gt 0) { return (& $NotConfirmed ('it has more than one row for {0} of the {1} subscription(s) the stream ran' -f $Repeated.Count, @($ExpectedIds).Count)) }
 
     return [pscustomobject]@{
         Accepted              = $true

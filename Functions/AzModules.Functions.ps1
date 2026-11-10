@@ -90,11 +90,13 @@ function Test-RdaAzAccountsVersion
             $Messages += 'Install a supported version first:'
             $Messages += ('  ' + $InstallCommand)
         }
-        # The loaded submodules whose manifest pins an older Az.Accounts:
-        # PowerShell loads that copy for them in every new session.
+        # The submodules whose manifest pins an older Az.Accounts, loaded or
+        # not: the loaded copy, or else the copy a plain Import-Module would
+        # take. PowerShell loads that older Az.Accounts for them in every new
+        # session, so the new session alone would stop again.
         $Pinning = @(foreach ($Name in @($SubModule | Where-Object { $_ -and $_ -ne 'Az.Accounts' }))
             {
-                foreach ($Copy in @(Get-Module -Name $Name -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version }))
+                foreach ($Copy in @(Get-RdaModuleCopyToLoad -Name $Name))
                 {
                     $Pin = Get-RdaAzAccountsPin -Module $Copy -Minimum $Required
                     if ($Pin) { [pscustomobject]@{ Name = [string]$Copy.Name; Version = [version]$Copy.Version; Accounts = $Pin } }

@@ -642,6 +642,9 @@ $FailedAttempts = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID)
 # merge). A clean run removes only these: a file it never read may hold a
 # failure this run knows nothing of.
 $ReadStreamStateFiles = @()
+# The stream resume state files this run could not read and has warned
+# about, so a parallel run that tries again in its merge warns once.
+$UnreadStreamStateFiles = @()
 $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
 if ($StrandedStreamFiles.Count -gt 0)
 {
@@ -662,6 +665,12 @@ if ($StrandedStreamFiles.Count -gt 0)
         catch
         {
             Write-Verbose ("Could not read stranded stream resume file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message)
+            # A failure held only there is not retried this run: say so.
+            if ($UnreadStreamStateFiles -notcontains $StreamFile.FullName)
+            {
+                $UnreadStreamStateFiles += $StreamFile.FullName
+                Write-Host ('WARNING: Could not read the stream resume state file {0}, so its records were not read in this run. It is kept for a later run.' -f $StreamFile.FullName) -ForegroundColor Yellow
+            }
         }
     }
     if ($StrandedCompleted.Count -gt 0)
@@ -1590,6 +1599,12 @@ else
                 catch
                 {
                     Write-Verbose ("Could not read stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message)
+                    # Once per file: the start of the run may have warned.
+                    if ($UnreadStreamStateFiles -notcontains $PerStreamFile)
+                    {
+                        $UnreadStreamStateFiles += $PerStreamFile
+                        Write-Host ('WARNING: Could not read the stream resume state file {0}, so its records were not read in this run. It is kept for a later run.' -f $PerStreamFile) -ForegroundColor Yellow
+                    }
                 }
             }
             if ($AllCompletedFromStreams.Count -gt 0)

@@ -1318,6 +1318,21 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
+    It '<Case>: a stream state file the run cannot read is named once in a warning, by its path, saying its records were not read' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
+        # The two-stream run reads the stream state files at its start and
+        # again in its end-of-run merge; the warning is printed once.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -Stream7FailedUnreadable $script:SubA.Id
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
+        $Warning = 'WARNING: Could not read the stream resume state file {0}, so its records were not read in this run. It is kept for a later run.' -f $Stream7
+        @([regex]::Matches($Run.Console, [regex]::Escape($Warning))).Count | Should -Be 1 -Because $Run.Console
+        Test-Path -LiteralPath $Stream7 -PathType Leaf | Should -BeTrue
+        [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]'UserRead, UserWrite')
+    }
+
     It '<Case>: a resume state file the run cannot read stops the run with the read failure and is not written over, so once it can be read the next -ResumeFailedOnly retries its failure, and the run after has nothing to retry' -ForEach @(
         @{ Case = 'sequential'; Streams = 1 }
         @{ Case = 'two streams'; Streams = 2 }

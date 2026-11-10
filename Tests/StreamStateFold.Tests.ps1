@@ -114,6 +114,15 @@ Describe 'The per-stream resume state files at the start of a run' {
         @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty -Because 'a later run does not fold it in again'
     }
 
+    It 'are folded and removed, and the run goes on, when they hold no record and the unified file needs reconciling (a subscription both completed and failed)' {
+        $State = Join-Path $script:Root '.resume-state-t.json'
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @('sub-x') -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 }) -Reports @()
+        $Path = script:New-StreamFile -Root $script:Root -N 0
+        Mock Exit-Wrapper { throw ('Exit-Wrapper ' + $Code) }
+        $null = script:Invoke-Fold -Root $script:Root -Resume $true
+        Test-Path -LiteralPath $Path | Should -BeFalse
+    }
+
     It 'let a failure in a per-stream file win over an older completion in the unified file' {
         $State = Join-Path $script:Root '.resume-state-t.json'
         Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @() -Reports @()
@@ -265,6 +274,7 @@ Describe 'Write-StreamState' {
         Write-StreamState -Path $Path -Completed @('sub-a', 'sub-b') -FailedAttempts @() -Reports @() 6>$null
         Get-Content -LiteralPath $Path -Raw | Should -Be $Before
         @(Get-StreamResumeStateFiles -InventoryRoot $Dir -Tenant 't').Count | Should -Be 1
+        Test-Path -LiteralPath ($Path + '.tmp') | Should -BeFalse -Because 'a failed write leaves no copy of the records behind'
     }
 }
 
@@ -296,5 +306,70 @@ Describe '-ResumeFailedOnly with a retry list none of whose subscriptions are li
         $script:Out = @()
         { . ([scriptblock]::Create($Block[0].Extent.Text)) 6>&1 | ForEach-Object { $script:Out += [string]$_ } } | Should -Throw 'Exit-Wrapper 2'
         @($script:Out | Where-Object { $_ -like '*delete the resume state files .resume-state-t.json and .resume-state-t-stream-`*.json*' }).Count | Should -Be 1
+    }
+}
+
+Describe 'The end-of-run merge reads stream summaries by literal path' {
+    It 'reads a summary in a folder whose path holds brackets, so its failures reach the retry list' {
+        $Root = Join-Path $script:TestBase 'sum[1]'
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        $Summary = Join-Path $Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'partial-failure'; Completed = @(); ResourceCounts = @(); Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stand-in failure' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 1 })
+        Set-Variable -Name Subscriptions -Value @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B' })
+        $State = Join-Path $Root '.resume-state-t.json'
+        $UnreadableStreamFiles = @()
+        $LeftStreamFiles = @()
+        $null = & { . $script:MergeBlock $Streams $Root 't' $State @() @() @() } 6>$null
+        @(Get-FailedAttempts -Path $State -Tenant 't' | Where-Object { $null -ne $_ } | ForEach-Object Id) | Should -Be @('sub-b')
+    }
+}
+
+Describe 'Retry-list entries this run leaves out' {
+    BeforeAll {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $Top = @($Ast.EndBlock.Statements)
+        $script:NotInRunSet = @($Top | Where-Object { $_.Extent.Text -like '$RetryNotInRunIds = *' })
+        $script:OwedSet = @($Top | Where-Object { $_.Extent.Text -like '$RetryOwedNotInRun = *' })
+        $script:OwedIf = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RetryOwedNotInRun.Count -gt 0' })
+        $script:WrapperSource = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
+    }
+
+    It 'are those whose subscription is not in the run''s set, named with the way out, and they make the run end with exit 2' {
+        $script:NotInRunSet.Count | Should -Be 1
+        $script:OwedSet.Count | Should -Be 1
+        $script:OwedIf.Count | Should -Be 1
+        $Subscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        $RunSubscriptionIds = @('sub-a')
+        $FailedAttempts = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; Attempts = 1; Reason = 'r' }, [pscustomobject]@{ Id = 'sub-off'; Name = 'Sub Off'; Attempts = 1; Reason = 'r' })
+        $RetryLimitedOwed = @()
+        $TenantID = 't'
+        $null = $Subscriptions, $RunSubscriptionIds, $FailedAttempts, $RetryLimitedOwed, $TenantID
+        . ([scriptblock]::Create($script:NotInRunSet[0].Extent.Text))
+        . ([scriptblock]::Create($script:OwedSet[0].Extent.Text))
+        @($RetryOwedNotInRun | ForEach-Object Id) | Should -Be @('sub-off')
+        $Out = @(. ([scriptblock]::Create($script:OwedIf[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
+        @($Out | Where-Object { $_ -like 'Not In This Run:*Sub Off (sub-off)*' }).Count | Should -Be 1
+        @($Out | Where-Object { $_ -like '*delete the resume state files .resume-state-t.json*' }).Count | Should -Be 1
+        $script:WrapperSource | Should -Match ([regex]::Escape('-or (@($RetryOwedNotInRun).Count -gt 0)) -SubscriptionsFailed'))
+    }
+}
+
+Describe 'The end-of-run merge with a stream whose own file is unread (incomplete data)' {
+    It 'puts a subscription the summary lists as incomplete on the retry list with its reason' -Skip:(-not ((Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw).Contains('$StreamSummary.Incomplete'))) {
+        $Root = Join-Path $script:TestBase ('inc-' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $Root '.resume-state-t-stream-0.json') -Value '{ not json' -NoNewline
+        $Summary = Join-Path $Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'ok'; Completed = @(); ResourceCounts = @(); Failed = @(); Incomplete = @(@{ Id = 'sub-c'; Name = 'Sub C'; Reason = 'Metrics were left incomplete for Sub C.' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 1 })
+        Set-Variable -Name Subscriptions -Value @([pscustomobject]@{ Id = 'sub-c'; Name = 'Sub C' })
+        $State = Join-Path $Root '.resume-state-t.json'
+        $UnreadableStreamFiles = @()
+        $LeftStreamFiles = @()
+        $null = & { . $script:MergeBlock $Streams $Root 't' $State @() @() @() } 6>$null
+        $Entry = @(Get-FailedAttempts -Path $State -Tenant 't' | Where-Object { $null -ne $_ -and $_.Id -eq 'sub-c' })
+        $Entry.Count | Should -Be 1
+        $Entry[0].Reason | Should -Be 'Metrics were left incomplete for Sub C.'
     }
 }

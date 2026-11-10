@@ -316,7 +316,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
             # without some of its metrics or consumption, so the sub goes into
             # the retry list instead of the completed list.
             Write-Stream ("{0} It stays in the retry list, so -Resume or -ResumeFailedOnly collects '{1}' again." -f $IncompleteReason, $SubName) 'Yellow'
-            $IncompleteSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName }
+            $IncompleteSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = $IncompleteReason }
             $Completed = @($Completed | Where-Object { $_ -ne $SubId })
             $Reports = @($Reports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $SubId })
             $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $SubId -Name $SubName -Reason $IncompleteReason

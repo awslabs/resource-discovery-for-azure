@@ -35,6 +35,12 @@ Describe 'The VM billing check under Set-StrictMode -Version Latest' {
         $Html | Should -Match '<div class="coverage-banner">'
     }
 
+    It 'renders an inventory with no Version key when no -Version is given' {
+        $Inv = [pscustomobject]@{ StorageAcc = @([pscustomobject]@{ Name = 'prod_3f8fad5b-d9cb-469f-a165-70867728950e'; Subscription = 'prod_1f8fad5b-d9cb-469f-a165-70867728950e' }) }
+        $Html = script:Invoke-StrictSummary -Inventory $Inv -Rows @([pscustomobject]@{ MeterCategory = 'Storage'; ResourceId = 'prod_2f8fad5b-d9cb-469f-a165-70867728950e' })
+        $Html | Should -Match '<html'
+    }
+
     It 'renders an inventory with no VirtualMachines section' {
         $Inv = [pscustomobject]@{ Version = 'test'; StorageAcc = @([pscustomobject]@{ Name = 'prod_3f8fad5b-d9cb-469f-a165-70867728950e'; Subscription = 'prod_1f8fad5b-d9cb-469f-a165-70867728950e' }) }
         $Html = script:Invoke-StrictSummary -Inventory $Inv -Rows @([pscustomobject]@{ MeterCategory = 'Storage'; ResourceId = 'prod_2f8fad5b-d9cb-469f-a165-70867728950e' })

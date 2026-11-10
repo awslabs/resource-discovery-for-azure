@@ -234,7 +234,7 @@ if ([string]::IsNullOrWhiteSpace($SubscriptionName))
 }
 
 # Resolve version: explicit -Version wins, else the JSON's Version key.
-if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Version)
+if ([string]::IsNullOrWhiteSpace([string]$Version) -and $Inventory.PSObject.Properties.Name -contains 'Version' -and $null -ne $Inventory.Version)
 {
     $Version = [string]$Inventory.Version
 }

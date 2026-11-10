@@ -233,6 +233,14 @@ function Import-AzContext
                 Set-Content -LiteralPath (Join-Path $OtherDir.FullName 'ResourcesReport_otherrun.zip') -Value 'another run''s report' -Encoding utf8
                 Set-Content -LiteralPath (Join-Path $Root '.rda-stream-0-99999999-0000-0000-0000-000000000000-summary.json') -Value '{"RunId":"99999999-0000-0000-0000-000000000000","StreamId":"0","Status":"ok","ResourceCounts":[],"Failed":[]}' -Encoding utf8
             }
+            if ($Kind -eq 'LockedStreamState')
+            {
+                # Stream 7's resume state file, holding the failures named in
+                # Text, written now and made unreadable (mode 000).
+                $Locked = Join-Path ([string]$Bound['InventoryRoot']) ('.resume-state-{0}-stream-7.json' -f (Get-RdaStandInScenario).Tenant)
+                [pscustomobject]@{ Tenant = (Get-RdaStandInScenario).Tenant; StreamId = '7'; Completed = @(); FailedAttempts = @(([string]$Plant.Text -split ',') | ForEach-Object { [pscustomobject]@{ Id = $_; Name = 'earlier'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier failure'; Attempts = 1 } }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Locked -Encoding utf8
+                [System.IO.File]::SetUnixFileMode($Locked, [System.IO.UnixFileMode]::None)
+            }
             if ($Kind -eq 'Text' -or $Kind -eq 'Keep') { [System.IO.File]::SetUnixFileMode($SummaryPath, [System.IO.UnixFileMode]'UserRead, GroupRead, OtherRead') }
         }
     }
@@ -374,7 +382,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @())
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -482,6 +490,21 @@ function Get-UsageAggregates
                 $Stream7 = Join-Path $Reports.FullName ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
                 [pscustomobject]@{ Tenant = $script:Tenant; StreamId = '7'; Completed = @(); FailedAttempts = @($Stream7FailedUnreadable | ForEach-Object { [pscustomobject]@{ Id = $_; Name = 'earlier'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier failure'; Attempts = 1 } }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Stream7 -Encoding utf8
                 [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]::None)
+            }
+            if ($Stream7Unparseable)
+            {
+                # Stream 7's resume file from an earlier run, cut short: it
+                # can be read but is not valid JSON.
+                $Reports = New-Item -ItemType Directory -Path (Join-Path $CaseHome 'InventoryReports') -Force
+                Set-Content -LiteralPath (Join-Path $Reports.FullName ('.resume-state-{0}-stream-7.json' -f $script:Tenant)) -Value '{"Tenant": "cut' -Encoding utf8
+            }
+            if ($Stream7LockedDuringRun.Count -gt 0)
+            {
+                # Stream 7's resume file, holding these failures, is written
+                # once stream 0 has started (after this run's start read the
+                # stream files), and cannot be read (mode 000), so this run
+                # meets it first when the streams are done.
+                $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'LockedStreamState'; Text = ($Stream7LockedDuringRun -join ',') }
             }
             if ($Stream1SummaryJson)
             {
@@ -1324,25 +1347,89 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
-    It 'two streams: a stream state file the run cannot read is kept though the resume state is saved, so once it can be read the next -ResumeFailedOnly retries its failure, and the run after has nothing to retry' {
+    It '<Case>: a stream state file the run cannot open stops the run with exit 1 before any write, naming it and the way out; once it can be read the next -ResumeFailedOnly retries its failure, and the run after has nothing to retry' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
         # An earlier run with more streams left the failure of Sub A only in
-        # stream 7's state file, which this run cannot read. This plain
-        # two-stream run does not see Sub A; its own streams work, and the
-        # resume state is saved.
-        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams 2 -Stream7FailedUnreadable $script:SubA.Id
-        $Run.Console | Should -Match '\[stream-1\] done: Sub C' -Because $Run.Console
-        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        # stream 7's state file, which this run cannot open (locked, no
+        # access). Going on without it would end clean and clear the resume
+        # state, so Sub A would never be retried.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -Stream7FailedUnreadable $script:SubA.Id
         $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
-        Test-Path -LiteralPath $Stream7 -PathType Leaf | Should -BeTrue -Because 'the run never read that file, so it may hold a failure this run knows nothing of'
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+        @([regex]::Matches($Run.Console, [regex]::Escape(('ERROR: The stream resume state file {0} exists but could not be read: ' -f $Stream7)))).Count | Should -Be 1 -Because $Run.Console
+        $Run.Console | Should -Match '(?i)denied' -Because 'the real read failure is named'
+        $Run.Console | Should -Match ([regex]::Escape('Fix its permissions')) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('move the file away first')) -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Processing subscription' -Because 'the run stops before any subscription'
+        $Run.Console | Should -Not -Match '\[stream-\d\]' -Because 'the run stops before any stream'
+        $Run.StateKept | Should -BeFalse -Because 'the run stops before it writes the resume state'
+        Test-Path -LiteralPath $Stream7 -PathType Leaf | Should -BeTrue
 
-        # The file can be read again (the lock is gone). The next run retries
-        # Sub A only, and it works.
+        # Its permissions are fixed. The next run retries Sub A only, and it
+        # works.
+        [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]'UserRead, UserWrite')
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams $Streams -ResumeFailedOnly -ReuseHome $Run.Home
+        $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
+        $Retry.Console | Should -Match '(Processing subscription|done): Sub A' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match '(Processing subscription|done): Sub B' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match '(Processing subscription|done): Sub C' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+        $Retry.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'that run read the stream state files, so they are cleared'
+
+        # The run after that has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams $Streams -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
+    It '<Case>: the other way out, moving the stream state file the run cannot open away, drops its records: the next run is clean, and the run after has nothing to retry' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -Stream7FailedUnreadable $script:SubA.Id
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+        $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
+        $Moved = Join-Path $Run.Home 'moved-stream-7.json'
+        [System.IO.File]::Move($Stream7, $Moved)
+
+        $Next = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -ReuseHome $Run.Home
+        $Next.Console | Should -Not -Match 'could not be read' -Because $Next.Console
+        $Next.ExitCode | Should -Be 0 -Because $Next.Console
+        $Next.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+
+        $After = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+        Test-Path -LiteralPath $Moved -PathType Leaf | Should -BeTrue -Because 'the moved file is left as it is'
+        [System.IO.File]::SetUnixFileMode($Moved, [System.IO.UnixFileMode]'UserRead, UserWrite')
+    }
+
+    It 'two streams: a stream state file that cannot be opened when the streams are done stops the run with exit 1 before the resume state is written; once it can be read the next -ResumeFailedOnly retries its failure, and the run after has nothing to retry' {
+        # Stream 7's state file, holding Sub A's failure, appears after this
+        # run's start read the stream files, and cannot be opened.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams 2 -Stream7LockedDuringRun $script:SubA.Id
+        $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
+        $Run.Console | Should -Match '\[stream-1\] done: Sub C' -Because $Run.Console
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+        @([regex]::Matches($Run.Console, [regex]::Escape(('ERROR: The stream resume state file {0} exists but could not be read: ' -f $Stream7)))).Count | Should -Be 1 -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('no consolidated zip was made')) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('Fix its permissions')) -Because $Run.Console
+        $Run.StateKept | Should -BeFalse -Because 'the run stops before it writes the resume state'
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 3 -Because 'every stream state file is kept: this run''s two hold its records'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter '.rda-stream-azcontext-*' -Force).Count | Should -Be 0 -Because 'the context snapshot is still removed'
+
+        # Its permissions are fixed. The next run reads every stream state
+        # file at its start and retries Sub A only, and it works.
         [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]'UserRead, UserWrite')
         $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
         $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
         $Retry.Console | Should -Match 'Processing subscription: Sub A' -Because $Retry.Console
-        $Retry.Console | Should -Not -Match 'Processing subscription: Sub B' -Because $Retry.Console
-        $Retry.Console | Should -Not -Match 'Processing subscription: Sub C' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match '(Processing subscription|done): Sub B' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match '(Processing subscription|done): Sub C' -Because $Retry.Console
         $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
         $Retry.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
         @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'that run read the stream state files, so they are cleared'
@@ -1353,19 +1440,18 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
-    It '<Case>: a stream state file the run cannot read is named once in a warning, by its path, saying its records were not read' -ForEach @(
+    It '<Case>: a stream state file that opens but is not valid JSON is named once in a warning, by its path, saying its records were not read, and is kept' -ForEach @(
         @{ Case = 'sequential'; Streams = 1 }
         @{ Case = 'two streams'; Streams = 2 }
     ) {
         # The two-stream run reads the stream state files at its start and
         # again in its end-of-run merge; the warning is printed once.
-        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -Stream7FailedUnreadable $script:SubA.Id
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -Stream7Unparseable
         $Run.ExitCode | Should -Be 0 -Because $Run.Console
         $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
         $Warning = 'WARNING: Could not read the stream resume state file {0}, so its records were not read in this run.' -f $Stream7
         @([regex]::Matches($Run.Console, [regex]::Escape($Warning))).Count | Should -Be 1 -Because $Run.Console
         Test-Path -LiteralPath $Stream7 -PathType Leaf | Should -BeTrue
-        [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]'UserRead, UserWrite')
     }
 
     It '<Case>: a resume state file the run cannot read stops the run with the read failure and is not written over, so once it can be read the next -ResumeFailedOnly retries its failure, and the run after has nothing to retry' -ForEach @(

@@ -561,10 +561,9 @@ Describe 'Retry limit on the parallel path' {
         $R = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
         @(script:Get-Lines -Run $R -Like ('WARNING: Could not read the per-stream resume state file {0}*' -f $Bad)).Count | Should -Be 1
         $R.ExitCode | Should -Be 2
-        Test-Path -LiteralPath $Bad | Should -BeTrue
-        # A run without either switch removes it, and the next -ResumeFailedOnly is clean.
-        $null = script:Invoke-Run -Subs @($script:A, $script:B)
+        # Renamed aside, kept for the user; the next -ResumeFailedOnly does not see it.
         Test-Path -LiteralPath $Bad | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-0.json.unreadable-*').Count | Should -Be 1
         $R3 = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
         $R3.ExitCode | Should -Be 0
     }

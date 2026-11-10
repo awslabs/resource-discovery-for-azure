@@ -496,24 +496,66 @@ function Read-ResumeStateText
 # here with exit 1, before it writes the resume state, naming the file and
 # the way out. Once the file can be read, or is moved away (which drops its
 # records), the next run goes on, so this stop never repeats by itself.
-# -AfterStreams: the stop comes after the streams ran, so it says where
-# their reports are. A file that opens but is not valid JSON is not stopped
-# on here; the caller warns about it.
+# A file that opens but is not valid JSON is not stopped on here; the
+# caller warns about it. After the streams ran, the wrapper opens the files
+# itself and stops with Stop-StreamResumeStateUnopened, once it has saved
+# what only the stream summaries hold.
 function Read-StreamResumeStateText
 {
-    param([string]$Path, [string]$InventoryRoot = '', [switch]$AfterStreams)
+    param([string]$Path)
 
     try { return Get-Content -LiteralPath $Path -Raw -ErrorAction Stop }
-    catch
+    catch { Stop-StreamResumeStateUnopened -Unopened @([pscustomobject]@{ Path = $Path; Reason = $_.Exception.Message }) }
+}
+
+# The stop for stream resume state files that cannot be opened (see
+# Read-StreamResumeStateText): names each file and its reason, then exits 1.
+# -InventoryRoot: the stop comes after the streams ran, so it says where
+# their reports are and where their records were kept. -SummarySaved: the
+# rows only the stream summaries held were written to the resume state
+# first (Select-StreamSummaryOnlyRows), so the stop loses none of them; the
+# file that could not be opened is kept, and the next run's start stops on
+# it again until it can be read, then reads it in.
+function Stop-StreamResumeStateUnopened
+{
+    param([object[]]$Unopened, [string]$InventoryRoot = '', [switch]$SummarySaved)
+
+    foreach ($U in @($Unopened | Where-Object { $_ }))
     {
-        Write-Host ('ERROR: The stream resume state file {0} exists but could not be read: {1}' -f $Path, $_.Exception.Message) -ForegroundColor Red
-        Write-Host '  It may hold failures still to retry that are kept nowhere else, so this run stops before it writes the resume state.' -ForegroundColor Red
-        if ($AfterStreams)
-        {
-            Write-Host ('  The streams'' reports are kept in their folders under {0} and their records in their stream resume state files, but no consolidated zip was made.' -f $InventoryRoot) -ForegroundColor Red
-        }
-        Write-Host '  Fix its permissions (or close the program that holds it open), then run again. To drop its records instead, move the file away first.' -ForegroundColor Yellow
-        Exit-Wrapper -Code 1
+        Write-Host ('ERROR: The stream resume state file {0} exists but could not be read: {1}' -f $U.Path, $U.Reason) -ForegroundColor Red
+    }
+    Write-Host '  It may hold failures still to retry that are kept nowhere else, so this run stops before it merges the stream resume state files.' -ForegroundColor Red
+    if ($InventoryRoot)
+    {
+        $Kept = if ($SummarySaved) { 'their records in their stream resume state files and in the resume state' } else { 'their records in their stream resume state files' }
+        Write-Host ('  The streams'' reports are kept in their folders under {0} and {1}, but no consolidated zip was made.' -f $InventoryRoot, $Kept) -ForegroundColor Red
+    }
+    Write-Host '  Fix its permissions (or close the program that holds it open), then run again. To drop its records instead, move the file away first.' -ForegroundColor Yellow
+    Exit-Wrapper -Code 1
+}
+
+# The rows of the stream summaries that no stream resume state file the run
+# could read holds: a success row whose id no read file lists as completed,
+# and a Failed row whose id no read file lists as failed. A stream that
+# failed to start, or whose state write failed, has its rows only there.
+# -StreamTexts: the text of each stream resume state file that opened; one
+# that is not valid JSON holds nothing here. Returns { CompletedIds; Failed }.
+function Select-StreamSummaryOnlyRows
+{
+    param([object]$StreamTexts, [object]$SummaryCompletedIds, [object]$SummaryFailed)
+
+    $HeldCompleted = @()
+    $HeldFailed = @()
+    foreach ($Text in @($StreamTexts | Where-Object { $_ }))
+    {
+        try { $Obj = $Text | ConvertFrom-Json -ErrorAction Stop }
+        catch { continue }
+        if ($null -ne $Obj.Completed) { $HeldCompleted += @($Obj.Completed | ForEach-Object { [string]$_ }) }
+        if ($null -ne $Obj.FailedAttempts) { $HeldFailed += @($Obj.FailedAttempts | Where-Object { $_ } | ForEach-Object { [string]$_.Id }) }
+    }
+    [pscustomobject]@{
+        CompletedIds = @(@($SummaryCompletedIds) | Where-Object { $_ -and $HeldCompleted -notcontains [string]$_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        Failed       = @(@($SummaryFailed) | Where-Object { $_ -and $HeldFailed -notcontains [string]$_.Id })
     }
 }
 

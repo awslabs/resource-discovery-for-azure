@@ -232,14 +232,31 @@ Describe 'The shape of a per-stream file and the read-back of the end-of-run mer
         $script:State = Join-Path $script:Dir '.resume-state-t.json'
     }
 
-    It 'reads a file whose Completed or FailedAttempts is not a list (<Text>) as one that cannot be read' -TestCases @(
+    It 'reads a file whose Completed or FailedAttempts is not a list of the written shape (<Text>) as one that cannot be read' -TestCases @(
         @{ Text = '{"Completed":"sub-a"}' }
         @{ Text = '{"Completed":null}' }
         @{ Text = '{"Completed":{}}' }
         @{ Text = '{"Completed":[],"FailedAttempts":"sub-b"}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":null}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":["x"]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{}]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":""}]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":7}]}' }
+        @{ Text = '{"Completed":[{"Id":"sub-a"}]}' }
+        @{ Text = '{"Completed":[null]}' }
+        @{ Text = '{"Completed":[""]}' }
     ) {
         $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text $Text
         Read-StreamResumeStateFile -Path $File | Should -BeNullOrEmpty
+    }
+
+    It 'reads a file of the written shape, and an older one with no FailedAttempts (<Text>)' -TestCases @(
+        @{ Text = '{"Completed":[],"FailedAttempts":[]}' }
+        @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":"sub-b","Name":"B","LastFailedAt":"2026-11-01T00:00:00Z","Reason":"r","Attempts":1}]}' }
+        @{ Text = '{"Completed":["sub-a","sub-c"]}' }
+    ) {
+        $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text $Text
+        Read-StreamResumeStateFile -Path $File | Should -Not -BeNullOrEmpty
     }
 
     It 'keeps a file whose newer retry entry did not reach the state, though the state already has that id' {

@@ -1752,10 +1752,11 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
             # leaves nothing under that name. The private name matches none of
             # the patterns the inventory folder is listed with, and has no
             # leading dot: Compress-Archive -Update does not find a hidden file.
-            # shortcut: Compress-Archive reads -DestinationPath as a wildcard, and
-            # -Update fails on a path with [ or ] even when escaped (pwsh 7.4), so an
-            # inventory folder whose path holds brackets is stopped at the start;
-            # build with System.IO.Compression when such a HOME must be supported.
+            # shortcut: Compress-Archive reads -DestinationPath as a wildcard ([ ] *
+            # ?), and -Update fails on a path with [ or ] even when escaped (pwsh
+            # 7.4), so an inventory folder whose path holds any of them is stopped
+            # at the start; build with System.IO.Compression when such a HOME must
+            # be supported.
             $PartialZip = Join-Path $InventoryRoot ('rda-build-{0}.partial' -f [guid]::NewGuid().ToString('N'))
             Compress-Archive -Path $SubZips.FullName -DestinationPath $PartialZip -ErrorAction Stop
             $ZipProblem = Get-ConsolidatedZipProblem -Path $PartialZip -SubZipNames $SubZips.Name

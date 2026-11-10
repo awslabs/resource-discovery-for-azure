@@ -478,7 +478,7 @@ function Read-ResumeStateText
 {
     param([string]$Path)
 
-    try { return Get-Content -Path $Path -Raw -ErrorAction Stop }
+    try { return Get-Content -LiteralPath $Path -Raw -ErrorAction Stop }
     catch
     {
         Write-Host ('ERROR: The resume state file {0} exists but could not be read: {1}' -f $Path, $_.Exception.Message) -ForegroundColor Red
@@ -492,7 +492,7 @@ function Get-CompletedSubscriptionIds
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     $Text = Read-ResumeStateText -Path $Path
     try
     {
@@ -523,7 +523,7 @@ function Get-FailedAttempts
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     $Text = Read-ResumeStateText -Path $Path
     try
     {
@@ -570,7 +570,7 @@ function Save-CompletedSubscriptionIds
         $TmpPath = "$Path.tmp"
         # Stop on a failed write (a full disk leaves a cut temp file), so the
         # move below never puts it over the good state.
-        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8 -ErrorAction Stop
+        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8 -ErrorAction Stop
         [System.IO.File]::Move($TmpPath, $Path, $true)
         if ($PassThru) { return $true }
     }
@@ -840,10 +840,10 @@ function Write-Stream
 function Read-StreamState
 {
     param([string]$Path)
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
     try
     {
-        $Obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $Obj = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
@@ -872,7 +872,7 @@ function Write-StreamState
             StreamId       = $StreamId
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
-        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8 -ErrorAction Stop
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding utf8 -ErrorAction Stop
     }
     catch
     {

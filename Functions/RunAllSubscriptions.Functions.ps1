@@ -628,10 +628,8 @@ function Save-CompletedSubscriptionIds
         $TmpPath = "$Path.tmp"
         $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
-        # Each save writes the run's whole state (only the access check's
-        # not-readable list is taken from the file when not given), so one that
-        # reaches the disk makes the file right again after an earlier one
-        # failed.
+        # Each save writes the whole state this run holds, so one that reaches
+        # the disk makes the file right again after an earlier one failed.
         $script:ResumeStateSaveFailed = $false
     }
     catch

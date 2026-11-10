@@ -38,7 +38,7 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 . $CommonFunctionsFile
 
 $AzModulesFunctionsFile = Join-Path $PSScriptRoot 'Functions/AzModules.Functions.ps1'
-if (-not (Test-Path -Path $AzModulesFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $AzModulesFunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $AzModulesFunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow

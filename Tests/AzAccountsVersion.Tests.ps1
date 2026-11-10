@@ -1049,6 +1049,69 @@ Describe 'Every Az.Accounts import asks for the supported version' {
     }
 }
 
+Describe 'The stream worker asks for the same Az.Accounts version as the wrapper' {
+
+    # The source check above sees only that -MinimumVersion is named; a
+    # wrong value would pass it. Here the REAL worker runs in its own pwsh
+    # with an older Az.Accounts (5.5.3) found first in PSModulePath, as a
+    # stand-in Import-Module: it loads that older copy unless the import asks
+    # for a version above it. The stand-in Import-AzContext ends the run
+    # (exit 7) once the worker goes on to it. No live Azure.
+    BeforeAll {
+        $script:FloorDir = Join-Path ([System.IO.Path]::GetTempPath()) ('AzAccountsVersionWorker_' + [guid]::NewGuid().ToString('N'))
+        $script:FloorTree = Join-Path $script:FloorDir 'tree'
+        New-Item -ItemType Directory -Path $script:FloorTree -Force | Out-Null
+        foreach ($Item in @('Run-AllSubscriptions.Stream.ps1', 'Functions'))
+        {
+            Copy-Item -LiteralPath (Join-Path $script:RepoRoot $Item) -Destination $script:FloorTree -Recurse -Force
+        }
+        $script:FloorHarness = Join-Path $script:FloorDir 'worker.ps1'
+        @'
+param([string]$Tree, [string]$CallLog)
+$PSStyle.OutputRendering = 'PlainText'
+$Global:AzvCallLog = $CallLog
+function global:Import-Module
+{
+    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking, [switch]$Force, [version]$MinimumVersion)
+    if (@($Name).Count -eq 1 -and $Name[0] -like 'Az.*')
+    {
+        Add-Content -LiteralPath $Global:AzvCallLog -Value ('importmin ' + $Name[0] + ' ' + $MinimumVersion)
+        # PSModulePath holds 5.5.3 first and 5.5.4 after it.
+        $Loads = if ($MinimumVersion -and $MinimumVersion -gt [version]'5.5.3') { '5.5.4' } else { '5.5.3' }
+        Add-Content -LiteralPath $Global:AzvCallLog -Value ('loaded ' + $Name[0] + ' ' + $Loads)
+        return
+    }
+    Microsoft.PowerShell.Core\Import-Module @PSBoundParameters
+}
+function global:Disable-AzContextAutosave { param($Scope) }
+function global:Import-AzContext { param($Path) Add-Content -LiteralPath $Global:AzvCallLog -Value 'azure Import-AzContext'; exit 7 }
+$Root = Join-Path $Tree 'out'
+New-Item -ItemType Directory -Path $Root -Force | Out-Null
+$global:LASTEXITCODE = 0
+& (Join-Path $Tree 'Run-AllSubscriptions.Stream.ps1') -TenantID '00000000-0000-0000-0000-000000000001' -RunId '11111111-2222-3333-4444-555555555555' -StreamId '0' -InventoryRoot $Root -ScriptRoot $Tree -AzContextPath (Join-Path $Root 'ctx.json') -StreamSummaryPath (Join-Path $Root 'summary.json') -StreamFailuresPath (Join-Path $Root 'failures.log') -SubscriptionIds @('12345678-1234-1234-1234-123456789012') -SubscriptionNames @('Sub demo') -SkipMetrics -SkipConsumption
+exit $LASTEXITCODE
+'@ | Set-Content -LiteralPath $script:FloorHarness -Encoding utf8
+    }
+
+    AfterAll {
+        if ($script:FloorDir -and (Test-Path -LiteralPath $script:FloorDir)) { Remove-Item -LiteralPath $script:FloorDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'imports Az.Accounts with -MinimumVersion 5.5.4, the wrapper''s floor, so the older copy found first is not taken' {
+        $CallLog = Join-Path $script:FloorDir ('calls_' + [guid]::NewGuid().ToString('N') + '.log')
+        $Output = '' | & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $script:FloorHarness -Tree $script:FloorTree -CallLog $CallLog *>&1 | Out-String
+        $Code = $LASTEXITCODE
+        $Calls = if (Test-Path -LiteralPath $CallLog) { @(Get-Content -LiteralPath $CallLog) } else { @() }
+
+        $Code | Should -Be 7 -Because ('the worker goes on to import the context: ' + $Output)
+        (Get-RdaAzAccountsMinimumVersion) | Should -Be ([version]'5.5.4') -Because 'the supported version stays 5.5.4'
+        @($Calls | Where-Object { $_ -like 'importmin Az.Accounts *' }) | Should -Be @(('importmin Az.Accounts {0}' -f (Get-RdaAzAccountsMinimumVersion))) -Because ($Calls -join '; ')
+        $Calls | Should -Contain 'loaded Az.Accounts 5.5.4'
+        $Calls | Should -Not -Contain 'loaded Az.Accounts 5.5.3'
+        $Calls | Should -Contain 'azure Import-AzContext'
+    }
+}
+
 Describe 'The entry scripts find the Az.Accounts version file by its literal path' {
 
     # Test-Path -Path reads [ and ] as wildcards, so a copy of the tool in a

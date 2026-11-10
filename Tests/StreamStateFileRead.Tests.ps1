@@ -186,3 +186,23 @@ Describe 'The early exit 2 of a run whose merge could not move a per-stream file
         $script:Lines[1] | Should -Be "  This run does not use the file's records and does not write over it. It goes on as usual and ends with exit 1 (exit 2 when a report is missing), with what to do next at its end."
     }
 }
+
+Describe 'The retry-list writer when a write of the resume state stops part way' {
+    It 'is not moved over the last good file, and leaves no temporary file' {
+        Mock Write-Host { }
+        $Dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        $State = Join-Path $Dir '.resume-state-t.json'
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @('sub-good') -FailedAttempts @()
+        $Good = Get-Content -LiteralPath $State -Raw
+        # What a full disk does: part of the file is written, and the error does not stop the pipeline.
+        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.tmp' -or [string]$Path -like '*.tmp' } -MockWith {
+            $Target = if ($LiteralPath) { [string]$LiteralPath } else { [string]$Path }
+            [System.IO.File]::WriteAllText($Target, '{"Compl')
+            Write-Error 'stand-in: No space left on device'
+        }
+        Update-ResumeStateRetryList -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-good'; Name = 'Sub Good'; LastFailedAt = (Get-Date).ToString('o'); Reason = 'skipped by the up-front role check'; Attempts = 1 }) 2>$null
+        Get-Content -LiteralPath $State -Raw | Should -Be $Good
+        Test-Path -LiteralPath "$State.tmp" | Should -BeFalse
+    }
+}

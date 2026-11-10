@@ -747,8 +747,12 @@ function Update-ResumeStateRetryList
     $State | Add-Member -NotePropertyName LastUpdated -NotePropertyValue (Get-Date).ToString('o') -Force
     try
     {
+        # Every error stops here: a write error of Set-Content (a full disk)
+        # does not stop by default, and must not reach the move below, which
+        # would put a cut-short file over the last good one.
+        $ErrorActionPreference = 'Stop'
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 6 | Set-Content -Path $TmpPath -Encoding utf8
+        $State | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch

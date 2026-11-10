@@ -161,13 +161,15 @@ if ($Samples.Count -gt 0)
 # subscription (auth / billing-scope gap), not that the VM is idle.
 # shortcut: COUNTS only, so a running VM with no billing can be missed when
 # another billed VM makes the counts match. Both files carry the same id (the
-# output contract gives a masked resource one token in every file), so a join
-# by ID is possible; upstream-pr/summary-wording replaces this check with it.
+# output contract gives a masked resource one token in every file), so join
+# each running VM to the billed ids by ID, with Set (its scale set) as the
+# fallback, when that must be caught.
 $VmBilling = $null
 if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -LiteralPath $ConsumptionFile -PathType Leaf))
 {
     $RunningVmCount = 0
-    $VmRecords = $Inventory.VirtualMachines
+    # A report with no VirtualMachines section has no VM (also under Set-StrictMode).
+    $VmRecords = if ($Inventory.PSObject.Properties.Name -contains 'VirtualMachines') { $Inventory.VirtualMachines } else { $null }
     if ($VmRecords)
     {
         # As pricing reads PowerState: 'running' or 'transient' is on, and so is
@@ -187,7 +189,8 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Literal
     {
         $Consumption = @(Import-Csv -LiteralPath $ConsumptionFile -ErrorAction Stop)
         $HasConsumptionData = ($Consumption.Count -gt 0)
-        $BilledVmCount = (@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
+        # Each row's ResourceId, so no VM row (a real zero) counts 0 under Set-StrictMode too.
+        $BilledVmCount = @(@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }) | ForEach-Object { $_.ResourceId } | Sort-Object -Unique).Count
     }
     catch
     {

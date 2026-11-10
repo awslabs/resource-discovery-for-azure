@@ -283,8 +283,8 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
 
     It 'puts a subscription the stream summary lists as failed on the retry list when the stream''s own file cannot be read' {
         Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Value '{ not json' -NoNewline
-        $UnreadableStreamFiles = @()
-        $LeftStreamFiles = @()
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        Set-Variable -Name LeftStreamFiles -Value @()
         $null = & { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @(); $UnreadableStreamFiles } 6>$null
         $Entry = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ -and $_.Id -eq 'sub-b' })
         $Entry.Count | Should -Be 1 -Because 'otherwise -ResumeFailedOnly finds nothing to retry'
@@ -295,8 +295,8 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
     It 'puts a stream file that is <Kind> aside, so the subscription the summary lists as failed is on the retry list' -ForEach @(@{ Kind = 'empty'; Text = '' }, @{ Kind = 'an empty object'; Text = '{}' }, @{ Kind = 'a number'; Text = '0' }, @{ Kind = 'a string'; Text = '"text"' }) {
         $Empty = Join-Path $script:Root '.resume-state-t-stream-0.json'
         Set-Content -LiteralPath $Empty -Value $Text -NoNewline
-        $UnreadableStreamFiles = @()
-        $LeftStreamFiles = @()
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        Set-Variable -Name LeftStreamFiles -Value @()
         $Unread = @(& { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @(); $UnreadableStreamFiles } 6>$null)
         @($Unread | Where-Object { $_ -like '*.resume-state-t-stream-0.json.unreadable-*' }).Count | Should -Be 1
         @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ -and $_.Id -eq 'sub-b' }).Count | Should -Be 1
@@ -304,8 +304,8 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
 
     It 'counts a failure the stream''s own file recorded once, not again from the summary' {
         [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in failure'; Attempts = 1 }); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
-        $UnreadableStreamFiles = @()
-        $LeftStreamFiles = @()
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        Set-Variable -Name LeftStreamFiles -Value @()
         $null = & { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @() } 6>$null
         [int](@(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ -and $_.Id -eq 'sub-b' })[0].Attempts) | Should -Be 1
     }
@@ -314,8 +314,8 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
         $File = Join-Path $script:Root '.resume-state-t-stream-0.json'
         [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = @(); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $File -Encoding utf8
         Mock Remove-Item -ParameterFilter { $LiteralPath -like '*-stream-*.json' } -MockWith { throw 'stand-in: read-only' }
-        $UnreadableStreamFiles = @()
-        $LeftStreamFiles = @()
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        Set-Variable -Name LeftStreamFiles -Value @()
         $Lines = @(& { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @(); 'LEFT=' + ($LeftStreamFiles -join ',') } 6>&1 | ForEach-Object { [string]$_ })
         @($Lines | Where-Object { $_ -eq ('LEFT=' + $File) }).Count | Should -Be 1
         @($Lines | Where-Object { $_ -like ('WARNING: Could not remove the per-stream resume state file {0}:*ends with exit 2*' -f $File) }).Count | Should -Be 1
@@ -406,7 +406,7 @@ Describe '-ResumeFailedOnly with a retry list none of whose subscriptions are li
         $ResumeFailedOnly = $true
         $FailedAttempts = @([pscustomobject]@{ Id = 'sub-gone'; Name = 'Sub Gone'; Attempts = 1; Reason = 'r' })
         $Subscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
-        $UnreadableStreamFiles = @()
+        Set-Variable -Name UnreadableStreamFiles -Value @()
         $TenantID = 't'
         $ResumeStateFile = '/x/.resume-state-t.json'
         $null = $ResumeFailedOnly, $FailedAttempts, $Subscriptions, $UnreadableStreamFiles, $TenantID, $ResumeStateFile
@@ -425,8 +425,8 @@ Describe 'The end-of-run merge reads stream summaries by literal path' {
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 1 })
         Set-Variable -Name Subscriptions -Value @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B' })
         $State = Join-Path $Root '.resume-state-t.json'
-        $UnreadableStreamFiles = @()
-        $LeftStreamFiles = @()
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        Set-Variable -Name LeftStreamFiles -Value @()
         $null = & { . $script:MergeBlock $Streams $Root 't' $State @() @() @() } 6>$null
         @(Get-FailedAttempts -Path $State -Tenant 't' | Where-Object { $null -ne $_ } | ForEach-Object Id) | Should -Be @('sub-b')
     }
@@ -586,8 +586,8 @@ Describe 'The end-of-run merge with a stream whose own file is unread (incomplet
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 1 })
         Set-Variable -Name Subscriptions -Value @([pscustomobject]@{ Id = 'sub-c'; Name = 'Sub C' })
         $State = Join-Path $Root '.resume-state-t.json'
-        $UnreadableStreamFiles = @()
-        $LeftStreamFiles = @()
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        Set-Variable -Name LeftStreamFiles -Value @()
         $null = & { . $script:MergeBlock $Streams $Root 't' $State @() @() @() } 6>$null
         $Entry = @(Get-FailedAttempts -Path $State -Tenant 't' | Where-Object { $null -ne $_ -and $_.Id -eq 'sub-c' })
         $Entry.Count | Should -Be 1

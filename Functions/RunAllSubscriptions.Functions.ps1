@@ -488,6 +488,35 @@ function Read-ResumeStateText
     }
 }
 
+# The text of a stream resume state file that is there. As for the resume
+# state (Read-ResumeStateText), a file that cannot be opened (locked, no
+# access) may hold failures still to retry that are kept nowhere else: a run
+# that went on without them would end clean and clear the resume state, so
+# they would never be retried and nothing would say so. So the run stops
+# here with exit 1, before it writes the resume state, naming the file and
+# the way out. Once the file can be read, or is moved away (which drops its
+# records), the next run goes on, so this stop never repeats by itself.
+# -AfterStreams: the stop comes after the streams ran, so it says where
+# their reports are. A file that opens but is not valid JSON is not stopped
+# on here; the caller warns about it.
+function Read-StreamResumeStateText
+{
+    param([string]$Path, [string]$InventoryRoot = '', [switch]$AfterStreams)
+
+    try { return Get-Content -LiteralPath $Path -Raw -ErrorAction Stop }
+    catch
+    {
+        Write-Host ('ERROR: The stream resume state file {0} exists but could not be read: {1}' -f $Path, $_.Exception.Message) -ForegroundColor Red
+        Write-Host '  It may hold failures still to retry that are kept nowhere else, so this run stops before it writes the resume state.' -ForegroundColor Red
+        if ($AfterStreams)
+        {
+            Write-Host ('  The streams'' reports are kept in their folders under {0} and their records in their stream resume state files, but no consolidated zip was made.' -f $InventoryRoot) -ForegroundColor Red
+        }
+        Write-Host '  Fix its permissions (or close the program that holds it open), then run again. To drop its records instead, move the file away first.' -ForegroundColor Yellow
+        Exit-Wrapper -Code 1
+    }
+}
+
 function Get-CompletedSubscriptionIds
 {
     param([string]$Path, [string]$Tenant)

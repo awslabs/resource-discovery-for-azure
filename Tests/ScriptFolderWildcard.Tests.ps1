@@ -19,10 +19,10 @@ Describe 'A script folder whose path holds a wildcard character' {
         if ($script:Base -and [System.IO.Directory]::Exists($script:Base)) { [System.IO.Directory]::Delete($script:Base, $true) }
     }
 
-    It 'is stopped before the Azure CLI and the Az modules are looked for, and before the functions load' {
+    It 'is stopped before PowerShell 7, the Azure CLI and the Az modules are looked for, and before the functions load' {
         $script:Stop.Count | Should -Be 1
         $Src = Get-Content -LiteralPath $script:Wrapper -Raw
-        foreach ($Later in @('# Azure CLI bootstrap.', '# Az PowerShell module bootstrap.', '$FunctionsFile = Join-Path $PSScriptRoot', '$ResumeStateFile'))
+        foreach ($Later in @('if ($PSVersionTable.PSVersion.Major -lt 7)', '# Azure CLI bootstrap.', '# Az PowerShell module bootstrap.', '$FunctionsFile = Join-Path $PSScriptRoot', '$ResumeStateFile'))
         {
             $At = $Src.IndexOf($Later)
             $At | Should -BeGreaterThan 0 -Because $Later

@@ -769,6 +769,16 @@ $LeftStreamFiles = @()
 # stream is launched, so it cannot race live streams.
 if ($Resume -or $ResumeFailedOnly)
 {
+    # A per-stream file an earlier run put aside as unreadable may hold a
+    # failure that is newer than a completion in the unified file, so every
+    # -Resume and -ResumeFailedOnly run names it and keeps the state with exit 2
+    # until it is fixed and renamed back (and folded in) or deleted.
+    foreach ($Aside in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue))
+    {
+        $AsideOf = $Aside.FullName -replace '\.unreadable-[0-9]+$', ''
+        Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
+        $UnreadableStreamFiles += $Aside.FullName
+    }
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
     if ($StrandedStreamFiles.Count -gt 0)
     {
@@ -1614,9 +1624,9 @@ else
             # No snapshot was successfully written, so no security cleanup needed -
             # but Save-AzContext can write a partial file before throwing on some
             # error paths, so still try to remove it.
-            if (Test-Path -Path $AzContextSnapshot)
+            if (Test-Path -LiteralPath $AzContextSnapshot)
             {
-                try { Remove-Item -Path $AzContextSnapshot -Force }
+                try { Remove-Item -LiteralPath $AzContextSnapshot -Force }
                 catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
             }
             Exit-Wrapper -Code 1
@@ -2040,11 +2050,11 @@ else
             # token lifetime, but real). Best-effort: log if the delete fails
             # but do not propagate the error - that would mask the real exit
             # reason.
-            if (Test-Path -Path $AzContextSnapshot)
+            if (Test-Path -LiteralPath $AzContextSnapshot)
             {
                 try
                 {
-                    Remove-Item -Path $AzContextSnapshot -Force -ErrorAction Stop
+                    Remove-Item -LiteralPath $AzContextSnapshot -Force -ErrorAction Stop
                 }
                 catch
                 {
@@ -2263,6 +2273,11 @@ if ($ResumeFailedOnly)
 # -ResumeFailedOnly run skips them again and ends with exit 2.
 $RetryLimited = @(Get-RetryLimitedAttempts -FailedAttempts $FailedAttempts)
 $RetryLimitedOwed = @($RetryLimited | Where-Object { $RetryLimitedNotInRunIds -contains [string]$_.Id })
+# Retry-list entries this run did not collect because their subscription was
+# not in its set (see $RetryNotInRunIds), below the retry limit (those past it
+# are named under Retry Limit Reached): their reports are missing, so the run
+# ends with exit 2 and says how to end that.
+$RetryOwedNotInRun = @($FailedAttempts | Where-Object { $null -ne $_ -and $RetryNotInRunIds -contains [string]$_.Id -and @($RetryLimitedOwed | ForEach-Object { [string]$_.Id }) -notcontains [string]$_.Id })
 # Every entry keeps the state, those past the limit included: clearing the
 # state would forget their count, so the next -Resume would collect them again
 # from the first attempt and the limit would never end the cycle. They leave
@@ -2504,15 +2519,16 @@ if ($FailedSubscriptions.Count -gt 0)
         Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Red
     }
 }
-elseif ((@($FailedAttempts | Where-Object { $null -ne $_ }).Count - $RetryLimited.Count) -gt 0)
+elseif ((@($FailedAttempts | Where-Object { $null -ne $_ }).Count - $RetryLimited.Count - $RetryOwedNotInRun.Count) -gt 0)
 {
     # No new failures this run, but the resume-state file still has lingering
     # FailedAttempts from a prior run that have not yet been retried. Surface
     # them so the operator does not lose track of historical failures simply
     # because the most recent run was clean. The entries past the retry limit
-    # are named under Retry Limit Reached instead; -ResumeFailedOnly does not
+    # are named under Retry Limit Reached instead, and those not in this run's
+    # subscription set under Not In This Run; -ResumeFailedOnly does not
     # retry them, so they are not counted here.
-    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f (@($FailedAttempts | Where-Object { $null -ne $_ }).Count - $RetryLimited.Count)) -ForegroundColor Yellow
+    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f (@($FailedAttempts | Where-Object { $null -ne $_ }).Count - $RetryLimited.Count - $RetryOwedNotInRun.Count)) -ForegroundColor Yellow
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 if ($NotCollected.Count -gt 0)
@@ -2524,6 +2540,11 @@ if ($RetryLimited.Count -gt 0)
 {
     # Set by the resume-state cleanup above.
     Write-RetryLimitSummary -RetryLimited $RetryLimited -TenantID $TenantID -ExcludedIds @($Excluded | ForEach-Object { [string]$_.Id }) -NotListedIds $KeptNotListedIds -NotReadableIds @(if ($null -ne $AccessDecision) { @($AccessDecision.InaccessibleIds) | Where-Object { $_ } | ForEach-Object { [string]$_ } })
+}
+if ($RetryOwedNotInRun.Count -gt 0)
+{
+    Write-Host ("Not In This Run:         {0} ({1}) - on the retry list, but not in this run's subscription set (disabled without -IncludeDisabled, not listed, or not readable)" -f $RetryOwedNotInRun.Count, (@($RetryOwedNotInRun | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', ')) -ForegroundColor Yellow
+    Write-Host ("  Fix that and run again, or delete the resume state files .resume-state-{0}.json and .resume-state-{0}-stream-*.json in the inventory folder to start over with an empty retry list." -f $TenantID) -ForegroundColor Yellow
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile)
@@ -2715,15 +2736,6 @@ if ($WrapperTranscriptStarted)
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-# Retry-list entries this run did not collect because their subscription was
-# not in its set (see $RetryNotInRunIds) and below the retry limit (those past it are named under Retry Limit Reached): their reports are missing, so the
-# run ends with exit 2 and says how to end that.
-$RetryOwedNotInRun = @($FailedAttempts | Where-Object { $null -ne $_ -and $RetryNotInRunIds -contains [string]$_.Id -and @($RetryLimitedOwed | ForEach-Object { [string]$_.Id }) -notcontains [string]$_.Id })
-if ($RetryOwedNotInRun.Count -gt 0)
-{
-    Write-Host ("Not In This Run:         {0} ({1}) - on the retry list, but not in this run's subscription set (disabled without -IncludeDisabled, not listed, or not readable)" -f $RetryOwedNotInRun.Count, (@($RetryOwedNotInRun | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id }) -join ', ')) -ForegroundColor Yellow
-    Write-Host ("  Fix that and run again, or delete the resume state files .resume-state-{0}.json and .resume-state-{0}-stream-*.json in the inventory folder to start over with an empty retry list." -f $TenantID) -ForegroundColor Yellow
-}
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing ((@($UncarriedSkipped).Count -gt 0) -or (@($RetryLimitedOwed).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0) -or (@($LeftStreamFiles).Count -gt 0) -or (@($RetryOwedNotInRun).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
 if ($WrapperExitCode -ne 0)
 {

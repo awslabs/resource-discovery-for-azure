@@ -146,9 +146,7 @@ $Global:ResourceCount = 1
 
     # The exit code, as the wrapper computes it at the end.
     $ExitAt = script:Find-TopIndex -After $TimeAt -What 'the exit-code computation' -Match { param($s) $s.Extent.Text.StartsWith('$WrapperExitCode = Get-WrapperExitCode') }
-    # The auth and collector flags, the retry entries the run left out (and their
-    # summary line), then the exit code.
-    $ExitText = @($Top[($ExitAt - 4)..$ExitAt] | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $ExitText = @($Top[($ExitAt - 2)..$ExitAt] | ForEach-Object { $_.Extent.Text }) -join "`n"
 
     # Each run starts the way a new wrapper process does: run-wide totals empty.
     $Prologue = "function Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" +
@@ -567,8 +565,13 @@ Describe 'Retry limit on the parallel path' {
         # Renamed aside, kept for the user; the next -ResumeFailedOnly does not see it.
         Test-Path -LiteralPath $Bad | Should -BeFalse
         @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-0.json.unreadable-*').Count | Should -Be 1
+        # The file put aside is named again, with exit 2, until it is fixed or deleted.
         $R3 = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
-        $R3.ExitCode | Should -Be 0
+        $R3.ExitCode | Should -Be 2
+        @(script:Get-Lines -Run $R3 -Like 'WARNING: The per-stream resume state file *put aside by an earlier run*').Count | Should -Be 1
+        Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-0.json.unreadable-*' | Remove-Item -Force
+        $R4 = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
+        $R4.ExitCode | Should -Be 0
     }
 
     It 'counts a run whose streams failed it before the session ended once, not twice' {
@@ -959,7 +962,10 @@ Describe 'The Pending Retries line' {
         $Global:RdaRlFailIds = @()
         $R = script:Invoke-Run -Subs @($script:A, $script:X) -Resume
         @($R.Result.FailedSubscriptions) | Should -BeNullOrEmpty
-        @(script:Get-Lines -Run $R -Like 'Pending Retries:*') | Should -Be @('Pending Retries:         1 subscription(s) from a prior run still in FailedAttempts')
+        # Sub Y is not in this run's subscription set, so -ResumeFailedOnly could
+        # not collect it: it is named under Not In This Run, not Pending Retries.
+        @(script:Get-Lines -Run $R -Like 'Pending Retries:*') | Should -BeNullOrEmpty
+        @(script:Get-Lines -Run $R -Like 'Not In This Run:         1 (Sub Y (sub-y))*').Count | Should -Be 1
     }
 }
 

@@ -397,7 +397,7 @@ Describe 'Retry-list entries this run leaves out' {
         . ([scriptblock]::Create($NotListedSet[0].Extent.Text))
         @($RetryNotListed | ForEach-Object Id) | Should -Be @('sub-gone')
         $Out = @(. ([scriptblock]::Create($NotListedIf[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
-        @($Out | Where-Object { $_ -like 'Not Listed:*Sub Gone (sub-gone)*no run can collect them*' }).Count | Should -Be 1
+        @($Out | Where-Object { $_ -like 'Not Listed:*Sub Gone (sub-gone)*this run could not collect them*' }).Count | Should -Be 1
         $script:WrapperSource | Should -Match ([regex]::Escape('$FailedAttempts.Count - $RetryOwedNotInRun.Count - $RetryNotListed.Count'))
     }
 

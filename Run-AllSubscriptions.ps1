@@ -1272,8 +1272,14 @@ else
             # error paths, so still try to remove it.
             if (Test-Path -LiteralPath $AzContextSnapshot)
             {
-                try { Remove-Item -LiteralPath $AzContextSnapshot -Force }
-                catch { Write-Verbose ("Could not remove partial Az context snapshot: {0}" -f $_.Exception.Message) }
+                try { Remove-Item -LiteralPath $AzContextSnapshot -Force -ErrorAction Stop }
+                catch
+                {
+                    # As the clean-up in the finally below: the file can hold
+                    # an Azure token cache, so its owner is told.
+                    Write-Host ("WARNING: could not remove partial Az context snapshot at {0}: {1}" -f $AzContextSnapshot, $_.Exception.Message) -ForegroundColor Yellow
+                    Write-Host "  This file can contain an Azure token cache and should be deleted manually." -ForegroundColor Yellow
+                }
             }
             Exit-Wrapper -Code 1
         }
@@ -1763,7 +1769,7 @@ else
                 foreach ($StreamFile in @($AllStreamFiles | Where-Object { $ReadStreamStateFiles -contains $_.FullName }))
                 {
                     $PerStreamFile = $StreamFile.FullName
-                    try { Remove-Item -LiteralPath $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+                    try { Remove-Item -LiteralPath $PerStreamFile -Force -ErrorAction Stop } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
                 }
             }
             else
@@ -2049,12 +2055,16 @@ if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0
     {
         try
         {
-            Remove-Item -LiteralPath $ResumeStateFile -Force
+            # -ErrorAction Stop: Remove-Item fails a locked file with a
+            # non-terminating error, which would skip this catch and say the
+            # state was cleared while it still lists this run's completions.
+            Remove-Item -LiteralPath $ResumeStateFile -Force -ErrorAction Stop
             Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
         }
         catch
         {
             Write-Host ('WARNING: Could not remove resume state file {0}: {1}' -f $ResumeStateFile, $_) -ForegroundColor Yellow
+            Write-Host '  It still lists the subscriptions it holds as completed, so a later -Resume run skips them. Delete it before such a run; the next clean run whose removal works clears it.' -ForegroundColor Yellow
         }
     }
     # Stream resume state files this run read in (kept when the resume state

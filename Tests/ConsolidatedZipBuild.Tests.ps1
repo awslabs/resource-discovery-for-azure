@@ -776,9 +776,9 @@ Describe 'Move-RunOutputFile: moves a file to a free name, never over one that i
     }
 }
 
-Describe 'Run-AllSubscriptions.ps1: an inventory folder whose path holds brackets' {
+Describe 'Run-AllSubscriptions.ps1: an inventory folder whose path holds a wildcard character' {
     It 'stops at the start with exit 1, naming the folder, before anything is written' {
-        $Block = [scriptblock]::Create((Find-WrapperIf -Condition "`$InventoryRoot.IndexOfAny([char[]]'[]') -ge 0" -Contains 'has [ or ] in its path').Extent.Text)
+        $Block = [scriptblock]::Create((Find-WrapperIf -Condition "`$InventoryRoot.IndexOfAny([char[]]'[]*?') -ge 0" -Contains 'has [ ] * or ? in its path').Extent.Text)
         # The real Exit-Wrapper, under strict mode, in a pwsh of its own: exit 1.
         $Script = Join-Path $TestDrive 'bracket-stop.ps1'
         @(
@@ -794,10 +794,15 @@ Describe 'Run-AllSubscriptions.ps1: an inventory folder whose path holds bracket
         @($Out | Where-Object { $_ -like '*cannot be retrieved*' -or $_ -like '*has not been set*' }) | Should -BeNullOrEmpty
         function Exit-Wrapper { param($Code) $script:StopCode = $Code }
         $script:StopCode = $null
-        $InventoryRoot = Join-Path $TestDrive 'inv[1]/InventoryReports'
-        $Printed = @(. $Block 6>&1 | ConvertTo-Lines)
-        $script:StopCode | Should -Be 1
-        $Printed | Should -Contain ('ERROR: The inventory folder {0} has [ or ] in its path, which this script cannot use. Set HOME to a folder without them and run again.' -f $InventoryRoot)
+        # * and ? are allowed in folder names on Linux and macOS (only the path text is read here).
+        foreach ($Odd in 'inv[1]', 'inv*1', 'inv?1')
+        {
+            $script:StopCode = $null
+            $InventoryRoot = Join-Path $TestDrive ($Odd + '/InventoryReports')
+            $Printed = @(. $Block 6>&1 | ConvertTo-Lines)
+            $script:StopCode | Should -Be 1 -Because $Odd
+            $Printed | Should -Contain ('ERROR: The inventory folder {0} has [ ] * or ? in its path, which this script cannot use. Set HOME to a folder without them and run again.' -f $InventoryRoot)
+        }
         $InventoryRoot = Join-Path $TestDrive 'plain/InventoryReports'
         $script:StopCode = $null
         @(. $Block 6>&1 | ConvertTo-Lines).Count | Should -Be 0

@@ -2030,11 +2030,17 @@ else
             # run dropped as gone at the start (an interrupted run left it).
             $AllFailedFromStreams = @($AllFailedFromStreams | Where-Object { $null -ne $_ -and $GoneIds -notcontains [string]$_.Id })
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
-            $StreamFileFailedIds = @($AllFailedFromStreams | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
-            # A sub a stream's summary lists as failed that its stream's own file
-            # does not (that file could not be read) goes on the retry list here,
-            # so -ResumeFailedOnly retries it.
-            foreach ($FailedEntry in @($StreamFailedEntries | Where-Object { $null -ne $_ -and $StreamFileFailedIds -notcontains [string]$_.Id -and $GoneIds -notcontains [string]$_.Id }))
+            $FailedThisRunIds = @($AllFailedFromStreams | Where-Object {
+                    $null -ne $_ -and $_.PSObject.Properties['LastFailedAt'] -and $(try { ([datetime]$_.LastFailedAt).ToUniversalTime() -ge ([datetime]$RunStartTime).ToUniversalTime() } catch { $false })
+                } | ForEach-Object { [string]$_.Id })
+            # A sub a stream's summary lists as failed whose failure this run its
+            # stream's own file does not hold (that file could not be read, or
+            # holds only the parent's entry because a save did not reach the disk)
+            # goes on the retry list here as one more failed run, so
+            # -ResumeFailedOnly retries it and the count stays right. A stream
+            # starts from the parent's entries for its slice and saves them as
+            # they are, so only an entry with a time from this run counts.
+            foreach ($FailedEntry in @($StreamFailedEntries | Where-Object { $null -ne $_ -and $FailedThisRunIds -notcontains [string]$_.Id -and $GoneIds -notcontains [string]$_.Id }))
             {
                 $EntryName = if ($FailedEntry.PSObject.Properties['Name']) { [string]$FailedEntry.Name } else { '' }
                 $EntryReason = if ($FailedEntry.PSObject.Properties['Reason']) { [string]$FailedEntry.Reason } else { '' }

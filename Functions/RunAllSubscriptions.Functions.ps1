@@ -496,14 +496,45 @@ function Get-StreamResumeStateFiles
     return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
 }
 
-# A per-stream state file that a resuming run cannot read (an interrupted
-# write can leave it cut short). Its records are not used, so the
-# subscriptions it lists are not counted as completed: a -Resume run collects
-# them again, and under -ResumeFailedOnly a later -Resume does. The file is renamed in place to <name>.unreadable-<UTC time> and
-# kept for inspection: that name ends neither in '.json' nor matches
-# Get-StreamResumeStateFiles, so no later run reads it and no zip step that
-# picks files by '*.json' takes it. Prints a warning naming the file, never its
-# content. Returns { Name; MovedTo } (MovedTo is $null when the rename failed).
+# Read one per-stream resume-state file. Returns its content, or $null when the
+# file cannot be read or does not hold a JSON object. A write cut short leaves a
+# partial file, which fails to parse, or an empty one, which ConvertFrom-Json
+# turns into $null without an error; both come back as $null here.
+function Read-StreamResumeStateFile
+{
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try
+    {
+        $Obj = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch
+    {
+        return $null
+    }
+    if ($Obj -isnot [System.Management.Automation.PSCustomObject]) { return $null }
+    return $Obj
+}
+
+# A per-stream state file that a run cannot read: the startup fold of a
+# resuming run (an interrupted write can leave it cut short), or, with
+# -AtRunEnd, the end-of-run merge of a parallel run (Read-StreamResumeStateFile).
+# Its records are not used, so the subscriptions it lists are not counted as
+# completed: at startup a -Resume run collects them again, and under
+# -ResumeFailedOnly a later -Resume does; after the end-of-run merge a later
+# -Resume collects them. The file is renamed in place to
+# <name>.unreadable-<UTC time>, with -2, -3 and so on added when that name is
+# taken, and kept for inspection: that name ends neither in '.json' nor
+# matches Get-StreamResumeStateFiles, so no later run reads it
+# and no zip step that picks files by '*.json' takes it. Prints a warning
+# naming the file, never its content. Returns { Kind; Name; MovedTo; Path;
+# Problem; Reason; NotMoved; Unreadable }.
+# When the file cannot be renamed, later runs would read it again and warn
+# again with no end, so the run stops (Stop-WrongShapeStateNotMoved): the
+# result has NotMoved set and MovedTo $null, and this prints nothing at
+# startup, where the caller stops with exit 1 before any file is folded in;
+# with -AtRunEnd it prints the notice and the wrapper stops at the end of the
+# run under the exit-2 rule.
+# (The form of all-fixes-optimized 5f552f76.)
 function Move-UnreadableStreamStateFile
 {
     param(
@@ -511,22 +542,109 @@ function Move-UnreadableStreamStateFile
         [datetime]$Now = [datetime]::UtcNow,
         # -ResumeFailedOnly retries only the retry list, so it does not collect
         # the subscriptions the file lists; a later -Resume does.
-        [switch]$ResumeFailedOnly
+        [switch]$ResumeFailedOnly,
+        # Found by the end-of-run merge of a parallel run, after collection.
+        [switch]$AtRunEnd
     )
-    $MovedTo = '{0}.unreadable-{1}' -f $File.Name, $Now.ToString('yyyyMMdd-HHmmss')
-    $Then = if ($ResumeFailedOnly) { 'a later -Resume collects them (-ResumeFailedOnly retries only the retry list)' } else { 'this run collects them again' }
-    $Lead = 'WARNING: The per-stream state file {0} from an interrupted parallel run could not be read, so its records are not used: the subscriptions it lists are not counted as completed and {1}.' -f $File.Name, $Then
+    $Base = '{0}.unreadable-{1}' -f $File.Name, $Now.ToString('yyyyMMdd-HHmmss')
+    # A second move in the same second, or a name an earlier run left, must not
+    # make the rename fail. Up to 100 names are tried.
+    $MovedTo = $Base
+    $N = 1
+    while ($null -ne $MovedTo -and (Test-Path -LiteralPath (Join-Path $File.DirectoryName $MovedTo)))
+    {
+        $N++
+        $MovedTo = if ($N -le 100) { '{0}-{1}' -f $Base, $N } else { $null }
+    }
+    if ($AtRunEnd)
+    {
+        $Lead = 'WARNING: The per-stream state file {0} could not be read, so its records are not used: the subscriptions it lists are not counted as completed, and a later -Resume collects them again.' -f $File.Name
+    }
+    else
+    {
+        $Then = if ($ResumeFailedOnly) { 'a later -Resume collects them (-ResumeFailedOnly retries only the retry list)' } else { 'this run collects them again' }
+        $Lead = 'WARNING: The per-stream state file {0} from an interrupted parallel run could not be read, so its records are not used: the subscriptions it lists are not counted as completed and {1}.' -f $File.Name, $Then
+    }
     try
     {
+        if ($null -eq $MovedTo) { throw ('every name from {0} to {0}-100 is taken' -f $Base) }
         Rename-Item -LiteralPath $File.FullName -NewName $MovedTo -ErrorAction Stop
         Write-Host ('{0} It was moved aside to {1}.' -f $Lead, $MovedTo) -ForegroundColor Yellow
     }
     catch
     {
-        $MovedTo = $null
-        Write-Host ('{0} It could not be moved aside ({1}), so a later -Resume finds it again.' -f $Lead, $_.Exception.Message) -ForegroundColor Yellow
+        $NotMoved = [pscustomobject]@{ Kind = 'Stream'; Name = $File.Name; MovedTo = $null; Path = $File.FullName; Problem = $null; Reason = $_.Exception.Message; NotMoved = $true; Unreadable = $true }
+        if ($AtRunEnd)
+        {
+            Write-WrongShapeNotMovedLine -File $NotMoved
+            Write-Host "  This run does not use the file's records and does not write over it. It goes on as usual and ends with exit 1 (exit 2 when a report is missing or a subscription failed), with what to do next at its end." -ForegroundColor Red
+        }
+        return $NotMoved
     }
-    return [pscustomobject]@{ Name = $File.Name; MovedTo = $MovedTo }
+    return [pscustomobject]@{ Kind = 'Stream'; Name = $File.Name; MovedTo = $MovedTo; Path = $File.FullName; Problem = $null; Reason = $null; NotMoved = $false; Unreadable = $true }
+}
+
+# The first line about a state file that could not be moved aside
+# (Move-UnreadableStreamStateFile): the file and the reason the rename failed.
+function Write-WrongShapeNotMovedLine
+{
+    param([Parameter(Mandatory = $true)][object]$File)
+    $What = if ($File.Kind -eq 'Main') { 'resume state file' } else { 'per-stream state file' }
+    if ($File.PSObject.Properties['Unreadable'] -and $File.Unreadable)
+    {
+        Write-Host ('ERROR: The {0} {1} could not be read, and it could not be moved aside: {2}' -f $What, $File.Name, $File.Reason) -ForegroundColor Red
+        return
+    }
+    Write-Host ('ERROR: The {0} {1} is not the right shape ({2}), and it could not be moved aside: {3}' -f $What, $File.Name, $File.Problem, $File.Reason) -ForegroundColor Red
+}
+
+# Per-stream state files that could not be read and could not be moved aside
+# (Move-UnreadableStreamStateFile): every later run would read them again and
+# warn again, so name each one, print the command that removes it and the
+# command to run next. The remove command is a Remove-Item -LiteralPath of the
+# full path, quoted for PowerShell, with -Force (on Linux and macOS a file whose
+# name starts with a dot is hidden and is not removed without it).
+# -AfterCollection: the files were found by the end-of-run merge of a parallel
+# run; -NoExit is then given and the wrapper sets the exit code (exit 1 in place
+# of 0 and 3-5; exit 2 keeps its code). Without -AfterCollection the run stops
+# at its start, before it collects any subscription.
+# (all-fixes-optimized 5f552f76's form, for the files this branch can meet:
+# per-stream files that cannot be read.)
+function Stop-WrongShapeStateNotMoved
+{
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Files,
+        [switch]$AfterCollection,
+        [switch]$ResumeFailedOnly,
+        [switch]$NoExit
+    )
+    $Files = @($Files | Where-Object { $null -ne $_ })
+    foreach ($File in $Files) { Write-WrongShapeNotMovedLine -File $File }
+    if ($AfterCollection)
+    {
+        Write-Host "  This run ends with exit 1 in place of 0 and 3-5; a run that ends with exit 2 (a report is missing) keeps exit 2. It did not use the file's records and did not write over it; the rest of the run above went as usual." -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host "  This run stops here (exit 1), before it collects any subscription or writes any resume state. It does not use the file's records and does not write over it." -ForegroundColor Red
+    }
+    Write-Host '  While the file cannot be moved aside, every later -Resume or -ResumeFailedOnly run reads it at its start and stops the same way, and a run with more than one stream reads it at its end.' -ForegroundColor Yellow
+    $Lead = if ($Files.Count -gt 1) { '  Once the cause shown above is fixed, remove the files with these commands:' } else { '  Once the cause shown above is fixed, remove the file with this command:' }
+    Write-Host $Lead -ForegroundColor Yellow
+    foreach ($File in $Files)
+    {
+        Write-Host ("  Remove-Item -LiteralPath '{0}' -Force" -f [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($File.Path)) -ForegroundColor Yellow
+    }
+    if ($ResumeFailedOnly)
+    {
+        Write-Host "  Then run the same command without -ResumeFailedOnly, with -Resume: the retry list then holds none of this file's entries, so -ResumeFailedOnly would not retry them." -ForegroundColor Yellow
+    }
+    else
+    {
+        Write-Host '  Then run the same command again.' -ForegroundColor Yellow
+    }
+    if ($NoExit) { return }
+    Exit-Wrapper -Code 1
 }
 
 # The end-of-run line for each per-stream state file this run could not read

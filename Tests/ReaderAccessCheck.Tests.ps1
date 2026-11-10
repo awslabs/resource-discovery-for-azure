@@ -1669,16 +1669,64 @@ Describe 'Resume-state helpers: the retry list and an unreadable per-stream file
         @(Get-ChildItem -LiteralPath $script:Dir -Force -File -Filter '*.json') | Should -BeNullOrEmpty
     }
 
-    It 'Move-UnreadableStreamStateFile says so when the file cannot be moved, and keeps the file in place' {
+    It 'Move-UnreadableStreamStateFile takes the next free name when an earlier one holds the name, and leaves that file as it was' {
         $File = Join-Path $script:Dir '.resume-state-t-stream-0.json'
         Set-Content -LiteralPath $File -Value 'cut'
         $Now = [datetime]'2026-10-29T14:02:55'
         Set-Content -LiteralPath (Join-Path $script:Dir '.resume-state-t-stream-0.json.unreadable-20261029-140255') -Value 'an earlier one'
         $R = Move-UnreadableStreamStateFile -File (Get-Item -LiteralPath $File -Force) -Now $Now
-        $R.MovedTo | Should -BeNullOrEmpty
-        Test-Path -LiteralPath $File | Should -BeTrue
+        $R.MovedTo | Should -Be '.resume-state-t-stream-0.json.unreadable-20261029-140255-2'
+        $R.NotMoved | Should -BeFalse
+        Test-Path -LiteralPath $File | Should -BeFalse
         Get-Content -LiteralPath (Join-Path $script:Dir '.resume-state-t-stream-0.json.unreadable-20261029-140255') -Raw | Should -Match 'an earlier one'
-        $script:Lines[0] | Should -BeLike 'WARNING: The per-stream state file .resume-state-t-stream-0.json from an interrupted parallel run could not be read, so its records are not used: * It could not be moved aside (*), so a later -Resume finds it again.'
+        $script:Lines[0] | Should -BeLike '*It was moved aside to .resume-state-t-stream-0.json.unreadable-20261029-140255-2.'
+    }
+
+    It 'Move-UnreadableStreamStateFile marks a file it cannot move as not moved and prints nothing at startup; the run then stops with exit 1 and the command that removes it' {
+        $File = Join-Path $script:Dir '.resume-state-t-stream-0.json'
+        Set-Content -LiteralPath $File -Value 'cut'
+        Mock Rename-Item { throw 'denied' }
+        $R = Move-UnreadableStreamStateFile -File (Get-Item -LiteralPath $File -Force)
+        $R.NotMoved | Should -BeTrue
+        $R.MovedTo | Should -BeNullOrEmpty
+        $R.Path | Should -Be (Get-Item -LiteralPath $File -Force).FullName
+        Test-Path -LiteralPath $File | Should -BeTrue
+        $script:Lines.Count | Should -Be 0
+        Mock Exit-Wrapper { throw ('EXIT {0}' -f $Code) }
+        { Stop-WrongShapeStateNotMoved -Files @($R) } | Should -Throw 'EXIT 1'
+        $script:Lines[0] | Should -Be 'ERROR: The per-stream state file .resume-state-t-stream-0.json could not be read, and it could not be moved aside: denied'
+        @($script:Lines | Where-Object { $_ -like "  Remove-Item -LiteralPath '*.resume-state-t-stream-0.json' -Force" }).Count | Should -Be 1
+        # The startup fold of the wrapper stops this way, after reading every file and before saving any record.
+        $Src = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
+        $Src | Should -Match ([regex]::Escape('if ($UnreadableNotMoved.Count -gt 0) { Stop-WrongShapeStateNotMoved -Files $UnreadableNotMoved -ResumeFailedOnly:$ResumeFailedOnly }'))
+    }
+
+    It 'Move-UnreadableStreamStateFile -AtRunEnd says a later -Resume collects the subscriptions, and names a file it cannot move' {
+        $File = Join-Path $script:Dir '.resume-state-t-stream-3.json'
+        Set-Content -LiteralPath $File -Value 'cut'
+        $null = Move-UnreadableStreamStateFile -File (Get-Item -LiteralPath $File -Force) -Now ([datetime]'2026-10-29T14:02:55') -AtRunEnd
+        $script:Lines[0] | Should -Be 'WARNING: The per-stream state file .resume-state-t-stream-3.json could not be read, so its records are not used: the subscriptions it lists are not counted as completed, and a later -Resume collects them again. It was moved aside to .resume-state-t-stream-3.json.unreadable-20261029-140255.'
+        $script:Lines.Clear()
+        Set-Content -LiteralPath $File -Value 'cut'
+        Mock Rename-Item { throw 'denied' }
+        $R = Move-UnreadableStreamStateFile -File (Get-Item -LiteralPath $File -Force) -AtRunEnd
+        $R.NotMoved | Should -BeTrue
+        $script:Lines[0] | Should -Be 'ERROR: The per-stream state file .resume-state-t-stream-3.json could not be read, and it could not be moved aside: denied'
+    }
+
+    It 'Read-StreamResumeStateFile returns nothing for a file that is empty, cut short, not an object, or cannot be read' {
+        $File = Join-Path $script:Dir '.resume-state-t-stream-5.json'
+        foreach ($Text in '', '{ "Completed": [', '0', '"text"')
+        {
+            Set-Content -LiteralPath $File -Value $Text -NoNewline
+            Read-StreamResumeStateFile -Path $File | Should -BeNullOrEmpty
+        }
+        Set-Content -LiteralPath $File -Value '{ "Completed": [ "sub-a" ] }'
+        @((Read-StreamResumeStateFile -Path $File).Completed) | Should -Be @('sub-a')
+        # A read error that does not stop by default (a file the user cannot read) is not read as an empty file.
+        Mock Get-Content { Write-Error 'Access to the path is denied.' }
+        Read-StreamResumeStateFile -Path $File | Should -BeNullOrEmpty
+        Read-StreamResumeStateFile -Path (Join-Path $script:Dir 'missing.json') | Should -BeNullOrEmpty
     }
 
     It 'Write-UnreadableStreamStateSummary says whether the state was cleared or kept, and where the file went' {

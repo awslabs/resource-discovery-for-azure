@@ -742,22 +742,27 @@ if ($Resume -or $ResumeFailedOnly)
     {
         $StrandedCompleted = @()
         $StrandedFailed = @()
+        # A file that cannot be read (it cannot be parsed, or parses to nothing)
+        # is moved aside (Move-UnreadableStreamStateFile); when one cannot be
+        # moved aside the run stops after this loop with exit 1, before any
+        # record is saved.
+        $UnreadableNotMoved = @()
         foreach ($StreamFile in $StrandedStreamFiles)
         {
-            try
+            $Obj = Read-StreamResumeStateFile -Path $StreamFile.FullName
+            if ($null -eq $Obj)
             {
-                $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
-                if ($null -eq $Obj -or $Obj -isnot [pscustomobject]) { throw 'not a per-stream state record' }
-                $FoldedStreamFiles = @(@($FoldedStreamFiles | Where-Object { $null -ne $_ }) + $StreamFile)
-                if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
-                if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+                Write-Verbose ("Could not read stranded stream resume file {0}" -f $StreamFile.FullName)
+                $Unreadable = Move-UnreadableStreamStateFile -File $StreamFile -ResumeFailedOnly:$ResumeFailedOnly
+                if ($Unreadable.NotMoved) { $UnreadableNotMoved += $Unreadable }
+                else { $UnreadableStreamFiles = @(@($UnreadableStreamFiles | Where-Object { $null -ne $_ }) + $Unreadable) }
+                continue
             }
-            catch
-            {
-                Write-Verbose ("Could not read stranded stream resume file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message)
-                $UnreadableStreamFiles = @(@($UnreadableStreamFiles | Where-Object { $null -ne $_ }) + (Move-UnreadableStreamStateFile -File $StreamFile -ResumeFailedOnly:$ResumeFailedOnly))
-            }
+            $FoldedStreamFiles = @(@($FoldedStreamFiles | Where-Object { $null -ne $_ }) + $StreamFile)
+            if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
         }
+        if ($UnreadableNotMoved.Count -gt 0) { Stop-WrongShapeStateNotMoved -Files $UnreadableNotMoved -ResumeFailedOnly:$ResumeFailedOnly }
         if ($StrandedCompleted.Count -gt 0)
         {
             $CompletedIds = @($CompletedIds + $StrandedCompleted | Sort-Object -Unique)

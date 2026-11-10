@@ -619,17 +619,20 @@ $CompletedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $T
 # uses it to filter the subscription list.
 $FailedAttempts = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID)
 
-# Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
+# Fold in any per-stream resume-state left by an earlier parallel run: one that
+# was stopped before its end-of-run merge, or one that kept its stream files
+# because the unified resume state could not be written.
 # A parallel run persists each stream's Completed/FailedAttempts to its own
 # .resume-state-<tenant>-stream-<N>.json and only merges them into the unified
 # file at end-of-run. If that run was killed before the merge (Ctrl+C, SIGKILL,
-# Cloud Shell timeout), the failures live ONLY in the per-stream files while the
-# unified file is stale. Without this, -ResumeFailedOnly reads the unified file,
+# Cloud Shell timeout), or the merge could not be saved, the failures live ONLY
+# in the per-stream files while the unified file is stale. Without this, -ResumeFailedOnly reads the unified file,
 # sees no failures, and wrongly reports "Nothing to retry" - silently dropping
 # the retry set. Read (do NOT delete) the per-stream files here so BOTH -Resume
-# (skip-completed) and -ResumeFailedOnly (retry list) see the full picture; the
-# end-of-run merge still owns per-stream cleanup. Safe on non-interrupted runs: a
-# cleanly-finished parallel run deletes its per-stream files, so this finds none.
+# (skip-completed) and -ResumeFailedOnly (retry list) see the full picture. The
+# first clean run that read them removes them (see $ReadStreamStateFiles); a
+# parallel run's end-of-run merge also removes them once its save works. A
+# parallel run whose save worked deletes its per-stream files, so this finds none.
 # Runs at startup before any stream is launched, so it cannot race live streams.
 # Read on every run, as the unified file is: a plain run's successes then clear
 # the failures these files hold, and a plain parallel run, whose streams start
@@ -667,10 +670,11 @@ if ($StrandedStreamFiles.Count -gt 0)
     $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
     if ($StrandedCompleted.Count -gt 0 -or @($StrandedFailed).Count -gt 0)
     {
-        Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f $StrandedCompleted.Count, @($StrandedFailed).Count) -ForegroundColor Cyan
+        Write-Host ("Read per-stream resume state left by an earlier parallel run (stopped, or its resume state could not be written): {0} completed, {1} failed subscription record(s)." -f $StrandedCompleted.Count, @($StrandedFailed).Count) -ForegroundColor Cyan
         # Heal the unified file immediately so even a re-interrupted run keeps
-        # the recovered picture. Per-stream files are intentionally left for
-        # the end-of-run merge to reconcile and clean up.
+        # the recovered picture. The per-stream files stay until the first
+        # clean run that read them (or a parallel merge whose save works)
+        # removes them.
         Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
     }
 }

@@ -1186,7 +1186,7 @@ function Get-UsageAggregates
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
 
         $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home -UnifiedStateBlocked
-        $Retry.Console | Should -Match 'Recovered per-stream state from an interrupted parallel run' -Because $Retry.Console
+        $Retry.Console | Should -Match 'Read per-stream resume state left by an earlier parallel run \(stopped, or its resume state could not be written\)' -Because $Retry.Console
         # Only the start-up write fails; the end-of-run write works, so the
         # stream state files are not kept for a failed write.
         @([regex]::Matches($Retry.Console, 'WARNING: Failed to persist resume state to ')).Count | Should -Be 1 -Because $Retry.Console

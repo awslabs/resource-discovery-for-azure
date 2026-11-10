@@ -1568,10 +1568,13 @@ else
             # held nowhere else (a stream that failed to start, or whose state
             # write failed), so those rows are first written to the resume
             # state: the next run's -ResumeFailedOnly retries those failures
-            # too. The summaries are removed only once that write worked (or
-            # there was nothing to write). When it failed, they are kept and
-            # the stop names each subscription whose record is not in the
-            # resume state, and how to run it again. The file that could not
+            # too. When that write fails, they are written to a stream resume
+            # state file of their own (Save-StreamSummaryOnlyState), which the
+            # next run's start reads, so its -ResumeFailedOnly retries them
+            # all the same. The summaries are removed only once one of those
+            # writes worked (or there was nothing to write). When both failed,
+            # they are kept and the stop names each subscription whose record
+            # is in no file, and how to run it again. The file that could not
             # be opened is kept, and the next run's start stops on it until
             # it can be read.
             # The text of each file, by its place in $AllStreamFiles.
@@ -1601,7 +1604,15 @@ else
                     $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $SummaryFailedAttempts -CompletedIds $CompletedIds
                     $SummarySaved = Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -PassThru
                 }
+                $SummaryStateFile = $null
                 if ($HasSummaryOnly -and -not $SummarySaved)
+                {
+                    # The resume state could not be written: the rows go to a
+                    # stream resume state file of their own, which every later
+                    # run's start reads (see Save-StreamSummaryOnlyState).
+                    $SummaryStateFile = Save-StreamSummaryOnlyState -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $RunId -CompletedIds $SummaryOnly.CompletedIds -FailedAttempts $SummaryFailedAttempts
+                }
+                if ($HasSummaryOnly -and -not $SummarySaved -and -not $SummaryStateFile)
                 {
                     # The summaries are the only record of these rows: kept.
                     $Unsaved = @(foreach ($f in $SummaryOnly.Failed) { [pscustomobject]@{ Name = [string]$f.Name; Id = [string]$f.Id; Outcome = 'failed' } })
@@ -1609,15 +1620,15 @@ else
                     Stop-StreamResumeStateUnopened -Unopened $UnopenedStreamFiles -InventoryRoot $InventoryRoot -Unsaved $Unsaved -KeptSummaries @($StreamSummaries | ForEach-Object { $_.SummaryPath } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
                 }
                 Remove-StreamSummaryFiles -StreamSummaries $StreamSummaries
-                Stop-StreamResumeStateUnopened -Unopened $UnopenedStreamFiles -InventoryRoot $InventoryRoot -SummarySaved:$SummarySaved
+                Stop-StreamResumeStateUnopened -Unopened $UnopenedStreamFiles -InventoryRoot $InventoryRoot -SummarySaved:$SummarySaved -SummaryStateFile ([string]$SummaryStateFile)
             }
 
-            # Clean up per-stream summary JSON files (the data is now folded into
-            # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
-            # they are referenced from the merged $DiagFile via Append above. The
-            # Az context snapshot cleanup lives in the `finally` block below so it
-            # runs even on failure paths.
-            Remove-StreamSummaryFiles -StreamSummaries $StreamSummaries
+            # The rows of the stream summaries that no stream resume state
+            # file holds (a stream that failed to start, or whose state write
+            # failed). Should the resume state not be written below, they are
+            # written to a stream resume state file of their own before the
+            # stream summaries are removed.
+            $SummaryOnly = Select-StreamSummaryOnlyRows -StreamTexts $StreamTexts -SummaryCompletedIds $StreamSummaryCompletedIds -SummaryFailed $StreamSummaryFailed
             for ($i = 0; $i -lt $AllStreamFiles.Count; $i++)
             {
                 $PerStreamFile = $AllStreamFiles[$i].FullName
@@ -1685,6 +1696,42 @@ else
             {
                 $UnifiedStateSaved = Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -PassThru
             }
+            # When the resume state could not be written, the rows only the
+            # stream summaries hold are kept in no stream resume state file,
+            # so they go to one of their own: the start of every later run
+            # reads it, as it reads the kept stream resume state files, and
+            # it is removed as they are once a run has read and settled it.
+            # Should that write fail too, the stream summaries are kept and
+            # the warning names each subscription whose record they alone
+            # hold. Else the summaries are removed.
+            $SummaryStateFile = $null
+            $HasSummaryOnly = $SummaryOnly.CompletedIds.Count -gt 0 -or $SummaryOnly.Failed.Count -gt 0
+            $KeepSummaries = $false
+            if (-not $UnifiedStateSaved -and $HasSummaryOnly)
+            {
+                $SummaryOnlyFailedIds = @($SummaryOnly.Failed | ForEach-Object { [string]$_.Id })
+                $SummaryOnlyAttempts = @($FailedAttempts | Where-Object { $_ -and $SummaryOnlyFailedIds -contains [string]$_.Id })
+                $SummaryStateFile = Save-StreamSummaryOnlyState -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $RunId -CompletedIds $SummaryOnly.CompletedIds -FailedAttempts $SummaryOnlyAttempts
+                if (-not $SummaryStateFile)
+                {
+                    $KeepSummaries = $true
+                    $Unsaved = @(foreach ($f in $SummaryOnly.Failed) { [pscustomobject]@{ Name = [string]$f.Name; Id = [string]$f.Id; Outcome = 'failed' } })
+                    $Unsaved += @(foreach ($Id in $SummaryOnly.CompletedIds) { [pscustomobject]@{ Name = [string](@($Subscriptions | Where-Object { [string]$_.Id -eq $Id }) | Select-Object -First 1).Name; Id = $Id; Outcome = 'worked' } })
+                    # Its own guard, as the warnings below: the console can be gone.
+                    try { Write-StreamSummaryUnsaved -Unsaved $Unsaved -KeptSummaries @($StreamSummaries | ForEach-Object { $_.SummaryPath } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }) }
+                    catch { $null = $_ }
+                }
+            }
+            # Clean up per-stream summary JSON files (the data is now folded into
+            # the wrapper's accumulators and held in the resume state or a
+            # stream resume state file). Per-stream failures logs are NOT
+            # deleted - they are referenced from the merged $DiagFile via
+            # Append above. The Az context snapshot cleanup lives in the
+            # `finally` block below so it runs even on failure paths.
+            if (-not $KeepSummaries)
+            {
+                Remove-StreamSummaryFiles -StreamSummaries $StreamSummaries
+            }
             # Also delete per-stream resume files now that the unified file holds
             # the truth - this prevents drift if a future run uses a different
             # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
@@ -1709,6 +1756,11 @@ else
             elseif ($AllStreamFiles.Count -gt 0)
             {
                 try { Write-Host ("WARNING: kept {0} stream resume state file(s) in {1}, as the resume state could not be written; the next run reads them at its start." -f $AllStreamFiles.Count, $InventoryRoot) -ForegroundColor Yellow }
+                catch { $null = $_ }
+            }
+            if ($SummaryStateFile)
+            {
+                try { Write-Host ("WARNING: the resume state could not be written, so the records held only in the stream summaries were written to the stream resume state file {0}; the next run reads it at its start." -f $SummaryStateFile) -ForegroundColor Yellow }
                 catch { $null = $_ }
             }
         }

@@ -276,7 +276,35 @@ function Import-AzContext
     }
     Get-RdaStandInContext
 }
-function Save-AzContext { [CmdletBinding()] param($Path, [switch]$Force) Set-Content -LiteralPath $Path -Value '{}' }
+function Save-AzContext
+{
+    [CmdletBinding()] param($Path, [switch]$Force)
+    # With SnapshotPartialFail, the write stops part way (as on a full disk):
+    # part of the file is there, and the call throws.
+    if ((Get-RdaStandInScenario).SnapshotPartialFail)
+    {
+        Set-Content -LiteralPath $Path -Value '{"Contexts":' -NoNewline
+        throw 'stand-in: the disk is full'
+    }
+    Set-Content -LiteralPath $Path -Value '{}'
+}
+# With SnapshotPartialFail, the wrapper also cannot remove that part of the
+# context snapshot: Remove-Item fails as it does on a locked file, with a
+# non-terminating error, which a catch sees only with -ErrorAction Stop.
+if ((Get-RdaStandInScenario).SnapshotPartialFail)
+{
+    function Remove-Item
+    {
+        [CmdletBinding()] param([Parameter(Position = 0)]$Path, $LiteralPath, [switch]$Force, [switch]$Recurse)
+        $Target = if ($PSBoundParameters.ContainsKey('LiteralPath')) { [string]$LiteralPath } else { [string]$Path }
+        if ($Target -like '*.rda-stream-azcontext-*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1')
+        {
+            $PSCmdlet.WriteError([System.Management.Automation.ErrorRecord]::new([System.IO.IOException]::new('stand-in: the file is locked by another process'), 'RemoveFileSystemItemIOError', [System.Management.Automation.ErrorCategory]::WriteError, $Target))
+            return
+        }
+        Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+    }
+}
 function Disable-AzContextAutosave { [CmdletBinding()] param($Scope) }
 function Get-AzContextAutosaveSetting { [CmdletBinding()] param($Scope) [pscustomobject]@{ Mode = 'Process'; ContextFile = 'None'; CacheFile = 'None' } }
 function Connect-AzAccount { [CmdletBinding()] param($Tenant, [switch]$UseDeviceAuthentication) throw 'stand-in: no sign-in expected' }
@@ -412,7 +440,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked, [switch]$ResumeRemoveSoftFail, [switch]$BracketTool, [switch]$Stream0Unparseable, [string]$Stream1StateJson = '')
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked, [switch]$ResumeRemoveSoftFail, [switch]$BracketTool, [switch]$SnapshotPartialFail, [switch]$Stream0Unparseable, [string]$Stream1StateJson = '')
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -584,7 +612,7 @@ function Get-UsageAggregates
             }
             $RunWrapper = Join-Path $RunTool 'Run-AllSubscriptions.ps1'
             $Scenario = Join-Path $CaseDir 'scenario.json'
-            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; ResumeRemoveSoftFail = [bool]$ResumeRemoveSoftFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail; UnifiedStateOnce = [bool]$UnifiedStateBlocked; SummaryStateFail = [bool]$SummaryStateBlocked } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
+            [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; ResumeRemoveSoftFail = [bool]$ResumeRemoveSoftFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail; UnifiedStateOnce = [bool]$UnifiedStateBlocked; SummaryStateFail = [bool]$SummaryStateBlocked; SnapshotPartialFail = [bool]$SnapshotPartialFail } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
             # ConsumptionPageFail runs the consumption phase (see
             # Get-UsageAggregates in the stand-in), MetricsTokenFail the
@@ -1413,6 +1441,20 @@ function Get-UsageAggregates
         $Run.Console | Should -Match 'Read per-stream resume state left by an earlier parallel run \(stopped, or its resume state could not be written\): 1 completed, 0 failed subscription record\(s\)\.' -Because $Run.Console
         $Run.ExitCode | Should -Be 0 -Because $Run.Console
         $Run.FailedIds.Count | Should -Be 0
+    }
+
+    It 'two streams: a context snapshot that is cut short and cannot then be removed is named with a warning, and the run stops with exit 1' {
+        # Save-AzContext writes part of the file and throws; Remove-Item on
+        # that file fails with a non-terminating error. The file can hold an
+        # Azure token cache, so the run must say it is still there.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -SnapshotPartialFail
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('ERROR: could not snapshot Az context for stream workers: stand-in: the disk is full')) -Because $Run.Console
+        $Snapshot = @(Get-ChildItem -LiteralPath $Run.Root -Filter '.rda-stream-azcontext-*.json' -File -Force)
+        $Snapshot.Count | Should -Be 1 -Because 'the removal failed, so the part of the file is still there'
+        $Run.Console | Should -Match ([regex]::Escape(('WARNING: could not remove partial Az context snapshot at {0}: stand-in: the file is locked by another process' -f $Snapshot[0].FullName))) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('  This file can contain an Azure token cache and should be deleted manually.')) -Because $Run.Console
+        $Run.Console | Should -Not -Match '\[stream-\d+\] queued' -Because 'no stream starts'
     }
 
     It 'two streams: when the resume state cannot be written, the old one is left as it was and every stream state file is kept; once it can be written, -ResumeFailedOnly retries the new failure only, and the run after has nothing to retry' {

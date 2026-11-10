@@ -2096,11 +2096,14 @@ else
 if (-not ($Resume -or $ResumeFailedOnly))
 {
     $OlderCompletions = @($CompletedIds | Where-Object { $_ -and $RunSubscriptionIds -notcontains [string]$_ })
+    # Those kept here: removed below if the run then clears the resume state.
+    $KeptAsideFiles = @()
     foreach ($Aside in @($StaleAsideFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
     {
         if ($OlderCompletions.Count -gt 0)
         {
             Write-Host ("Kept: {0}, a per-stream resume state file put aside as unreadable. The resume state still lists {1} subscription(s) this run did not collect as completed, and the file may hold a newer failure of one, so every -Resume names it until it is fixed and renamed back, or deleted." -f $Aside, $OlderCompletions.Count) -ForegroundColor Yellow
+            $KeptAsideFiles += $Aside
             continue
         }
         try { Remove-Item -LiteralPath $Aside -Force -ErrorAction Stop }
@@ -2323,6 +2326,18 @@ if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test
     catch
     {
         Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
+    }
+}
+
+# A put-aside file kept above for an older completion: once a clean run has
+# cleared the resume state there is no completion left for a -Resume to skip,
+# so it goes too, and no later -Resume names it.
+if (-not ($Resume -or $ResumeFailedOnly) -and @($KeptAsideFiles).Count -gt 0 -and -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
+{
+    foreach ($Aside in @($KeptAsideFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
+    {
+        try { Remove-Item -LiteralPath $Aside -Force -ErrorAction Stop }
+        catch { Write-Host ("WARNING: Could not remove {0}, a per-stream resume state file put aside as unreadable that this run makes stale: {1}. Delete it; do not rename it back." -f $Aside, $_.Exception.Message) -ForegroundColor Yellow }
     }
 }
 

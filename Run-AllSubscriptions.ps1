@@ -776,7 +776,7 @@ if ($Resume -or $ResumeFailedOnly)
     foreach ($Aside in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue))
     {
         $AsideOf = $Aside.FullName -replace '\.unreadable-[0-9]+$', ''
-        Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
+        Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it (a run without -Resume or -ResumeFailedOnly also removes it, as stale)." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
         $UnreadableStreamFiles += $Aside.FullName
     }
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -879,6 +879,15 @@ else
             Write-Host ("ERROR: Could not remove the per-stream resume state file {0} of an earlier run: {1}. Remove it, then run again. Nothing was collected (exit 1)." -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Red
             Exit-Wrapper -Code 1
         }
+    }
+    # A file an earlier run put aside as unreadable is stale too: this run
+    # collects every subscription, so its records cannot be newer than this
+    # run's, and folding it in later would undo this run's completions. One
+    # that cannot be removed is named; no -Resume reads it as owed then either.
+    foreach ($Aside in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $TenantID) -File -Force -ErrorAction SilentlyContinue))
+    {
+        try { Remove-Item -LiteralPath $Aside.FullName -Force -ErrorAction Stop }
+        catch { Write-Host ("WARNING: Could not remove {0}, a per-stream resume state file an earlier run put aside as unreadable and this run makes stale: {1}. Delete it." -f $Aside.FullName, $_.Exception.Message) -ForegroundColor Yellow }
     }
 }
 

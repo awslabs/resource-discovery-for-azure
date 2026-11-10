@@ -366,7 +366,24 @@ Describe 'Retry-list entries this run leaves out' {
         $OwedIfAt | Should -BeLessThan $script:StopAt
     }
 
-    It 'leave out a subscription the tenant no longer lists, which no run could collect (sync/pr-61)' -Skip:($script:ListedSet.Count -eq 0) {
+    It 'name a subscription the tenant no longer lists apart, not as pending (sync/pr-61)' -Skip:(-not (Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw).Contains('$ListedSubscriptionIds = ')) {
+        $NotListedSet = @($script:TopStatements | Where-Object { $_.Extent.Text -like '$RetryNotListed = *' })
+        $NotListedIf = @($script:TopStatements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RetryNotListed.Count -gt 0' })
+        $NotListedSet.Count | Should -Be 1
+        $NotListedIf.Count | Should -Be 1
+        $FailedAttempts = @([pscustomobject]@{ Id = 'sub-gone'; Name = 'Sub Gone'; Attempts = 1; Reason = 'r' }, [pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; Attempts = 1; Reason = 'r' })
+        $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        $TenantID = 't'
+        $null = $FailedAttempts, $AllSubscriptions, $TenantID
+        foreach ($Listed in $script:ListedSet) { . ([scriptblock]::Create($Listed.Extent.Text)) }
+        . ([scriptblock]::Create($NotListedSet[0].Extent.Text))
+        @($RetryNotListed | ForEach-Object Id) | Should -Be @('sub-gone')
+        $Out = @(. ([scriptblock]::Create($NotListedIf[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
+        @($Out | Where-Object { $_ -like 'Not Listed:*Sub Gone (sub-gone)*no run can collect them*' }).Count | Should -Be 1
+        $script:WrapperSource | Should -Match ([regex]::Escape('$FailedAttempts.Count - $RetryOwedNotInRun.Count - $RetryNotListed.Count'))
+    }
+
+    It 'leave out a subscription the tenant no longer lists, which no run could collect (sync/pr-61)' -Skip:(-not (Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw).Contains('$ListedSubscriptionIds = ')) {
         $Subscriptions = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
         $RunSubscriptionIds = @('sub-a')
         $FailedAttempts = @([pscustomobject]@{ Id = 'sub-gone'; Name = 'Sub Gone'; Attempts = 1; Reason = 'r' })
@@ -391,6 +408,16 @@ Describe 'A per-stream file an earlier run put aside as unreadable' {
             @($R.Lines | Where-Object { $_ -like ('WARNING: The per-stream resume state file {0}, put aside by an earlier run*rename it back to *.resume-state-t-stream-3.json for the next -Resume*' -f $Aside) }).Count | Should -Be 1
         }
         Remove-Item -LiteralPath $Aside -Force
+        (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
+    }
+
+    It 'is removed as stale by a run without -Resume or -ResumeFailedOnly, so a later -Resume names nothing' {
+        $Root = Join-Path $script:TestBase ('aside-plain-' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        $Aside = Join-Path $Root '.resume-state-t-stream-1.json.unreadable-20261109000000000'
+        Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
+        $null = script:Invoke-Fold -Root $Root -Resume $false
+        Test-Path -LiteralPath $Aside | Should -BeFalse
         (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
     }
 }

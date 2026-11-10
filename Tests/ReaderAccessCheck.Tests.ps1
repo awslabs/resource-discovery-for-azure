@@ -2314,7 +2314,7 @@ exit 1
         $Four = @{ DOTNET_PROCESSOR_COUNT = '4' }
         $R1 = script:Invoke-WrapperRun -Arguments '-Resume' -Streams $Streams -Environment $Four
         $R1.ExitCode | Should -Be 0
-        @($R1.Text | Where-Object { $_ -like 'Recovered per-stream state from an interrupted parallel run: 2 completed, *' }).Count | Should -Be 1
+        @($R1.Text | Where-Object { $_ -like 'Recovered per-stream state from an interrupted parallel run: 2 completed, 0 failed subscription record(s).' }).Count | Should -Be 1 -Because 'a stream file''s [null] retry list is no failure'
         $R1.Text | Should -Contain '  Skipping them and finishing the run: the other 2 subscription(s) were completed by an earlier run, so nothing is left to collect. To include them: Grant the identity Reader on these subscriptions, then re-run.'
         $R1.Text | Should -Contain 'Skipping (already completed): Sub A (sub-a)'
         $R1.Text | Should -Contain 'Skipping (already completed): Sub B (sub-b)'
@@ -2408,7 +2408,7 @@ exit 1
         $Moved[0] | Should -Match ('^' + [regex]::Escape($Cut) + '\.unreadable-\d{8}-\d{6}$')
         $Warning[0] | Should -Be ('WARNING: The per-stream state file {0} from an interrupted parallel run could not be read, so its records are not used: the subscriptions it lists are not counted as completed and this run collects them again. It was moved aside to {1}.' -f $Cut, $Moved[0])
         ($Warning[0]) | Should -Not -Match 'sub-b'
-        @($R1.Text | Where-Object { $_ -like 'Recovered per-stream state from an interrupted parallel run: 1 completed, *' }).Count | Should -Be 1 -Because 'the other stream file was read'
+        @($R1.Text | Where-Object { $_ -like 'Recovered per-stream state from an interrupted parallel run: 1 completed, 0 failed subscription record(s).' }).Count | Should -Be 1 -Because 'the other stream file was read'
         @($R1.Text | Where-Object { $_ -match '^(Skipping \(already completed\): |\[stream-\d+\] skipping \(already completed\): )Sub A \(sub-a\)$' }).Count | Should -Be 1
         @($R1.Text | Where-Object { $_ -match '^(Processing subscription: |\[stream-\d+\] processing \(\d+ of \d+\): )Sub B \(sub-b\)$' }).Count | Should -Be 1 -Because 'Sub B was recorded only in the file that could not be read'
         $R1.Text | Should -Not -Contain 'Resume state cleared (clean run).'

@@ -768,7 +768,8 @@ if ($Resume -or $ResumeFailedOnly)
             $FoldedStreamFiles = @(@($FoldedStreamFiles | Where-Object { $null -ne $_ }) + $StreamFile)
             if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
             # An older file has no FailedAttempts list (read under strict mode too).
-            if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+            # Its null entries ([null] is written for an empty list) are no failure.
+            if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts | Where-Object { $null -ne $_ }) }
         }
         if ($UnreadableNotMoved.Count -gt 0) { Stop-WrongShapeStateNotMoved -Files $UnreadableNotMoved -ResumeFailedOnly:$ResumeFailedOnly }
         if ($StrandedCompleted.Count -gt 0)
@@ -1585,7 +1586,7 @@ else
                 # An older file has no FailedAttempts list.
                 if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts)
                 {
-                    $AllFailedFromStreams += @($Obj.FailedAttempts)
+                    $AllFailedFromStreams += @($Obj.FailedAttempts | Where-Object { $null -ne $_ })
                 }
             }
             if ($AllCompletedFromStreams.Count -gt 0)

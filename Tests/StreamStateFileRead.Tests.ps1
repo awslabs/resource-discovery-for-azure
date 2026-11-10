@@ -243,6 +243,8 @@ Describe 'The shape of a per-stream file and the read-back of the end-of-run mer
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":""}]}' }
         @{ Text = '{"Completed":["sub-a"],"FailedAttempts":[{"Id":7}]}' }
         @{ Text = '{"Completed":[{"Id":"sub-a"}]}' }
+        @{ Text = '{"Completed":[null]}' }
+        @{ Text = '{"Completed":[""]}' }
     ) {
         $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text $Text
         Read-StreamResumeStateFile -Path $File | Should -BeNullOrEmpty

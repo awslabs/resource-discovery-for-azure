@@ -143,6 +143,24 @@ Describe 'The per-stream resume state files at the start of a run' {
         Test-Path -LiteralPath $Path | Should -BeTrue -Because 'the file on disk still holds the older entry'
     }
 
+    It 'end, in a run without -Resume, the older completion of a subscription they list as failed before they are removed' {
+        $State = Join-Path $script:Root '.resume-state-t.json'
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @() -Reports @()
+        $Path = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 })
+        $R = script:Invoke-Fold -Root $script:Root -Resume $false
+        Test-Path -LiteralPath $Path | Should -BeFalse
+        $R.Completed | Should -Be @('sub-b') -Because 'a -Resume after this run stops early must still collect Sub A'
+    }
+
+    It 'are put aside, not removed, by a run without -Resume when they cannot be read' {
+        $Bad = Join-Path $script:Root '.resume-state-t-stream-4.json'
+        Set-Content -LiteralPath $Bad -Value '{ not json' -NoNewline
+        $R = script:Invoke-Fold -Root $script:Root -Resume $false
+        Test-Path -LiteralPath $Bad | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-4.json.unreadable-*').Count | Should -Be 1
+        @($R.Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0} of an earlier run:*removed once this run has collected*' -f $Bad) }).Count | Should -Be 1
+    }
+
     It 'are removed as stale by a run without -Resume or -ResumeFailedOnly' {
         $null = script:New-StreamFile -Root $script:Root -N 0 -Completed @('sub-a')
         $R = script:Invoke-Fold -Root $script:Root -Resume $false
@@ -379,7 +397,7 @@ Describe 'Retry-list entries this run leaves out' {
         . ([scriptblock]::Create($NotListedSet[0].Extent.Text))
         @($RetryNotListed | ForEach-Object Id) | Should -Be @('sub-gone')
         $Out = @(. ([scriptblock]::Create($NotListedIf[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
-        @($Out | Where-Object { $_ -like 'Not Listed:*Sub Gone (sub-gone)*no run can collect them*' }).Count | Should -Be 1
+        @($Out | Where-Object { $_ -like 'Not Listed:*Sub Gone (sub-gone)*this run could not collect them*' }).Count | Should -Be 1
         $script:WrapperSource | Should -Match ([regex]::Escape('$FailedAttempts.Count - $RetryOwedNotInRun.Count - $RetryNotListed.Count'))
     }
 
@@ -411,12 +429,18 @@ Describe 'A per-stream file an earlier run put aside as unreadable' {
         (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
     }
 
-    It 'is removed as stale by a run without -Resume or -ResumeFailedOnly, so a later -Resume names nothing' {
+    It 'is kept by a run without -Resume until it has collected, then removed as stale, so a later -Resume names nothing' {
         $Root = Join-Path $script:TestBase ('aside-plain-' + [guid]::NewGuid().ToString().Substring(0, 8))
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
         $Aside = Join-Path $Root '.resume-state-t-stream-1.json.unreadable-20261109000000000'
         Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
         $null = script:Invoke-Fold -Root $Root -Resume $false
+        Test-Path -LiteralPath $Aside | Should -BeTrue -Because 'the run may still stop before it collects'
+        # After the collection: the step before "All subscriptions processed!".
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $AfterRun = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '-not ($Resume -or $ResumeFailedOnly)' -and $_.Extent.Text.Contains('.unreadable-') })
+        $AfterRun.Count | Should -Be 1
+        & { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>$null
         Test-Path -LiteralPath $Aside | Should -BeFalse
         (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
     }

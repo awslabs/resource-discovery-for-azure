@@ -222,3 +222,40 @@ Describe 'The retry-list writer when a write of the resume state stops part way'
         Test-Path -LiteralPath "$State.tmp" | Should -BeFalse
     }
 }
+
+Describe 'The shape of a per-stream file and the read-back of the end-of-run merge' {
+    BeforeEach {
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { $script:Lines.Add([string]$Object) }
+        $script:Dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:Dir -Force | Out-Null
+        $script:State = Join-Path $script:Dir '.resume-state-t.json'
+    }
+
+    It 'reads a file whose Completed or FailedAttempts is not a list (<Text>) as one that cannot be read' -TestCases @(
+        @{ Text = '{"Completed":"sub-a"}' }
+        @{ Text = '{"Completed":null}' }
+        @{ Text = '{"Completed":{}}' }
+        @{ Text = '{"Completed":[],"FailedAttempts":"sub-b"}' }
+    ) {
+        $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text $Text
+        Read-StreamResumeStateFile -Path $File | Should -BeNullOrEmpty
+    }
+
+    It 'keeps a file whose newer retry entry did not reach the state, though the state already has that id' {
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-11-01T00:00:00.0000000Z'; Reason = 'old'; Attempts = 1 })
+        $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{ "Completed": [], "FailedAttempts": [ { "Id": "sub-x", "Name": "Sub X", "LastFailedAt": "2026-11-09T00:00:00.0000000Z", "Reason": "new", "Attempts": 2 } ] }'
+        Mock Set-Content -ParameterFilter { [string]$Path -like '*.tmp' -or [string]$LiteralPath -like '*.tmp' } -MockWith { throw 'stand-in: disk full' }
+        $R = & $script:MergeBlock $script:Dir 't' $script:State
+        Test-Path -LiteralPath $File | Should -BeTrue -Because 'it holds the only copy of the newer entry'
+        @($R.Left) | Should -Be @($File)
+    }
+
+    It 'removes a file whose records did reach the state' {
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-11-01T00:00:00.0000000Z'; Reason = 'old'; Attempts = 1 })
+        $File = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{ "Completed": [ "sub-a" ], "FailedAttempts": [ { "Id": "sub-x", "Name": "Sub X", "LastFailedAt": "2026-11-09T00:00:00.0000000Z", "Reason": "new", "Attempts": 2 } ] }'
+        $R = & $script:MergeBlock $script:Dir 't' $script:State
+        Test-Path -LiteralPath $File | Should -BeFalse
+        @($R.Left) | Should -BeNullOrEmpty
+    }
+}

@@ -512,6 +512,10 @@ function Read-StreamResumeStateFile
         return $null
     }
     if ($Obj -isnot [System.Management.Automation.PSCustomObject]) { return $null }
+    # Write-StreamState always writes Completed as a list (and FailedAttempts,
+    # when there, as a list): any other shape is a file that cannot be read.
+    if ($Obj.PSObject.Properties['Completed'] -and $Obj.Completed -isnot [array]) { return $null }
+    if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts -and $Obj.FailedAttempts -isnot [array]) { return $null }
     return $Obj
 }
 

@@ -1602,9 +1602,21 @@ else
                 # Read back: Save-CompletedSubscriptionIds only warns when its
                 # write fails, and the per-stream files may then hold the only
                 # copy of their records.
-                $SavedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID)
-                $SavedFailedIds = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
-                $StreamStateSaved = (@($CompletedIds | Where-Object { $SavedIds -notcontains $_ }).Count -eq 0) -and (@($FailedAttempts | Where-Object { $null -ne $_ -and $SavedFailedIds -notcontains [string]$_.Id }).Count -eq 0)
+                # Whole entries are compared (id, attempts, time, reason), and
+                # the completed list as a set, so an older file that only shares
+                # the ids does not count as saved.
+                # (A time is compared as UTC: ConvertFrom-Json reads it back as a date.)
+                $EntryText = {
+                    param($E)
+                    $When = if ($E.PSObject.Properties['LastFailedAt']) { $E.LastFailedAt } else { $null }
+                    $WhenText = try { if ($null -eq $When -or [string]$When -eq '') { '' } else { ([datetime]$When).ToUniversalTime().ToString('o') } } catch { [string]$When }
+                    '{0}|{1}|{2}|{3}' -f [string]$E.Id, [string]$(if ($E.PSObject.Properties['Attempts']) { $E.Attempts }), $WhenText, [string]$(if ($E.PSObject.Properties['Reason']) { $E.Reason })
+                }
+                $SavedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID | Sort-Object -Unique)
+                $SavedEntries = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $null -ne $_ } | ForEach-Object { & $EntryText $_ } | Sort-Object)
+                $WantIds = @($CompletedIds | Sort-Object -Unique)
+                $WantEntries = @($FailedAttempts | Where-Object { $null -ne $_ } | ForEach-Object { & $EntryText $_ } | Sort-Object)
+                $StreamStateSaved = (($SavedIds -join "`n") -ceq ($WantIds -join "`n")) -and (($SavedEntries -join "`n") -ceq ($WantEntries -join "`n"))
             }
             # Also delete per-stream resume files now that the unified file holds
             # the truth - this prevents drift if a future run uses a different
@@ -1862,7 +1874,7 @@ if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $Left
 }
 # A run that could not read a per-stream state file is not a clean run: say
 # whether the state was cleared or kept, and where that file went.
-Write-UnreadableStreamStateSummary -Unreadable $UnreadableStreamFiles -StateKept (Test-Path -Path $ResumeStateFile -PathType Leaf)
+Write-UnreadableStreamStateSummary -Unreadable $UnreadableStreamFiles -StateKept (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
 
 # Final summary
 $Elapsed = (Get-Date) - $RunStartTime

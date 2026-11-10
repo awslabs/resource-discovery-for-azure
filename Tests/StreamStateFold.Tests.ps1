@@ -82,15 +82,38 @@ Describe 'The per-stream resume state files at the start of a run' {
         @($R.Lines | Where-Object { $_ -like 'WARNING: The resume state file * does not hold every record of the per-stream files*' }).Count | Should -Be 1
     }
 
-    It 'that cannot be read are named, kept and recorded as unread, so the run is not clean' {
+    It 'that cannot be read are renamed aside, named and recorded as unread, so the run is not clean and no stream writes over them' {
         $Bad = Join-Path $script:Root '.resume-state-t-stream-3.json'
         Set-Content -LiteralPath $Bad -Value '{ not json' -NoNewline
         $Good = script:New-StreamFile -Root $script:Root -N 0 -Completed @('sub-a')
         $R = script:Invoke-Fold -Root $script:Root -Resume $true
-        Test-Path -LiteralPath $Bad | Should -BeTrue
+        Test-Path -LiteralPath $Bad | Should -BeFalse
         Test-Path -LiteralPath $Good | Should -BeFalse
-        $R.Unreadable | Should -Be @($Bad)
-        @($R.Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0} of an interrupted run:*Fix or delete the file*' -f $Bad) }).Count | Should -Be 1
+        $Aside = @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-3.json.unreadable-*')
+        $Aside.Count | Should -Be 1
+        Get-Content -LiteralPath $Aside[0].FullName -Raw | Should -Be '{ not json'
+        $R.Unreadable | Should -Be @($Aside[0].FullName)
+        @($R.Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0} of an interrupted run:*It is kept as {1}: fix it and rename it back*' -f $Bad, $Aside[0].FullName) }).Count | Should -Be 1
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty -Because 'a later run does not fold it in again'
+    }
+
+    It 'let a failure in a per-stream file win over an older completion in the unified file' {
+        $State = Join-Path $script:Root '.resume-state-t.json'
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @() -Reports @()
+        $null = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 })
+        $R = script:Invoke-Fold -Root $script:Root -Resume $true
+        $R.Completed | Should -Be @('sub-b')
+        $R.Failed | Should -Be @('sub-a')
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty
+    }
+
+    It 'are kept when the saved state does not match what was folded (a retry entry with an older count)' {
+        $State = Join-Path $script:Root '.resume-state-t.json'
+        $Path = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'newer'; Attempts = 3 })
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'older'; Attempts = 1 }) -Reports @()
+        Mock Save-CompletedSubscriptionIds { }
+        $null = script:Invoke-Fold -Root $script:Root -Resume $true
+        Test-Path -LiteralPath $Path | Should -BeTrue -Because 'the file on disk still holds the older entry'
     }
 
     It 'are removed as stale by a run without -Resume or -ResumeFailedOnly' {

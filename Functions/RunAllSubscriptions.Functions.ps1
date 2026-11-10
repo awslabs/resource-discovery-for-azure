@@ -600,6 +600,48 @@ function Save-CompletedSubscriptionIds
     }
 }
 
+# Whether the resume state file at $Path holds exactly the state given: the
+# completed ids, each retry-list entry with its count of failed runs and its
+# reason, and the report zip of each completed id. Save-CompletedSubscriptionIds
+# reports a failed write only as a warning, so this is read back before the
+# per-stream files that gave those records are removed.
+function Test-ResumeStateSaved
+{
+    param([string]$Path, [string]$Tenant, [string[]]$Ids = @(), $FailedAttempts = @(), $Reports = @())
+    $WantIds = @(@($Ids) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    $WantFailed = @(@($FailedAttempts) | Where-Object { $null -ne $_ })
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return ($WantIds.Count -eq 0 -and $WantFailed.Count -eq 0) }
+    $SavedIds = @(Get-CompletedSubscriptionIds -Path $Path -Tenant $Tenant | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    if (($SavedIds -join "`n") -ne ($WantIds -join "`n")) { return $false }
+    $FailedKey = { param($Entry) '{0}|{1}|{2}' -f [string]$Entry.Id, $(if ($Entry.PSObject.Properties['Attempts']) { [string]$Entry.Attempts } else { '' }), [string]$Entry.Reason }
+    $SavedFailed = @(Get-FailedAttempts -Path $Path -Tenant $Tenant | Where-Object { $null -ne $_ } | ForEach-Object { & $FailedKey $_ } | Sort-Object)
+    if (($SavedFailed -join "`n") -ne (@($WantFailed | ForEach-Object { & $FailedKey $_ } | Sort-Object) -join "`n")) { return $false }
+    $WantReports = Get-LatestCompletedReports -Reports $Reports
+    $SavedReports = Get-LatestCompletedReports -Reports @(Get-CompletedReports -Path $Path -Tenant $Tenant)
+    foreach ($Id in $WantIds)
+    {
+        if (-not $WantReports.ContainsKey($Id)) { continue }
+        if (-not $SavedReports.ContainsKey($Id) -or [string]$SavedReports[$Id].Zip -ne [string]$WantReports[$Id].Zip) { return $false }
+    }
+    return $true
+}
+
+# A per-stream resume state file that could not be read is renamed aside (to
+# <name>.unreadable-<time>), so no stream of a later run writes over it and no
+# later run folds it in again, and it is named in a warning with what to do.
+# Returns the path it is now at (the old path when it cannot be renamed).
+function Move-UnreadableStreamFile
+{
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$Reason, [switch]$Interrupted)
+    $Aside = '{0}.unreadable-{1}' -f $Path, (Get-Date -Format 'yyyyMMddHHmmssfff')
+    $Now = $Path
+    try { Move-Item -LiteralPath $Path -Destination $Aside -ErrorAction Stop; $Now = $Aside }
+    catch { Write-Verbose ('Could not rename {0} aside: {1}' -f $Path, $_.Exception.Message) }
+    $Of = if ($Interrupted) { ' of an interrupted run' } else { '' }
+    Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {3}: fix it and rename it back to {0} for the next -Resume to fold it in, or delete it." -f $Path, $Of, $Reason, $Now) -ForegroundColor Yellow
+    return $Now
+}
+
 # Update an in-memory FailedAttempts list to record (or refresh) one sub's
 # failure. Increments Attempts when the sub is already in the list. Caller
 # is responsible for persisting via Save-CompletedSubscriptionIds afterwards.

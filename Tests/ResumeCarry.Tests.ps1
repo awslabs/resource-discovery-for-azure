@@ -759,15 +759,28 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Src | Should -Match ([regex]::Escape('PriorFailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ -and $SliceIds -contains [string]$_.Id })'))
     }
 
-    It 'the end-of-run merge keeps a per-stream file it cannot read, names it, and records it as unread' {
+    It 'the end-of-run merge renames aside a per-stream file it cannot read, names it, and records it as unread' {
         $S = script:Read-State -Path $script:State
         $Bad = Join-Path $script:Root '.resume-state-t-stream-7.json'
         Set-Content -LiteralPath $Bad -Value '{ not json' -NoNewline
         $Streams = @()
         $UnreadableStreamFiles = @()
         $Lines = @(& { . $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports; $UnreadableStreamFiles } 6>&1 | ForEach-Object { [string]$_ })
-        Test-Path -LiteralPath $Bad | Should -BeTrue
+        Test-Path -LiteralPath $Bad | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-7.json.unreadable-*').Count | Should -Be 1
         @($Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0}:*' -f $Bad) }).Count | Should -Be 1
+    }
+
+    It 'the end-of-run merge keeps a per-stream file whose only record is a failure when the save does not reach the disk' {
+        $S = script:Read-State -Path $script:State
+        $File = Join-Path $script:Root '.resume-state-t-stream-0.json'
+        [pscustomobject]@{ Tenant = 't'; Completed = @(); FailedAttempts = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 }); Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $File -Encoding utf8
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'partial-failure'; Completed = @(); ResourceCounts = @(); Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stand-in' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1 })
+        Mock Save-CompletedSubscriptionIds { }
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports 6>$null
+        Test-Path -LiteralPath $File | Should -BeTrue -Because 'it holds the only copy of the failure'
     }
 
     It 'the end-of-run merge keeps the per-stream files when the resume state does not hold their records afterwards' {
@@ -789,6 +802,18 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $After = script:Read-State -Path $script:State
         $After.Completed | Should -BeNullOrEmpty
         $After.Failed | Should -Be @('sub-a')
+    }
+
+    It 'a -ResumeFailedOnly run that finds none of the retry list in the subscription set ends with exit 2' {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
+        $Block = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeFailedOnly' -and $_.Extent.Text.Contains('none are visible in the current subscription set') })
+        $Block.Count | Should -Be 1
+        function Exit-Wrapper { param([int]$Code) throw ('Exit-Wrapper ' + $Code) }
+        Set-Variable -Name ResumeFailedOnly -Value $true
+        Set-Variable -Name FailedAttempts -Value @([pscustomobject]@{ Id = 'sub-gone'; Name = 'Gone' })
+        Set-Variable -Name Subscriptions -Value @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        { . ([scriptblock]::Create($Block[0].Extent.Text)) 6>$null } | Should -Throw 'Exit-Wrapper 2'
     }
 
     It 'a run in which a stream did not start exits 2: the wrapper passes its failed subscriptions to the exit code' {

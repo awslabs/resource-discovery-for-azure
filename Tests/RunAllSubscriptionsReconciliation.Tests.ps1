@@ -863,3 +863,31 @@ Describe 'Consumption failures: one rule for the count, the list and the sign-in
         }
     }
 }
+
+Describe 'The wrapper keeps a resume state with one entry as a list' {
+    # A function's return unrolls a one-item array to the item itself, so a
+    # state file with one completed id (or one failure) read straight into
+    # the wrapper's variables gave a string (or one object). The next += then
+    # glued two ids into one ("<A><B>") instead of adding one.
+    BeforeAll {
+        $Wrapper = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $script:StateReads = @($Wrapper.EndBlock.Statements | Where-Object {
+                $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -in @('$CompletedIds', '$FailedAttempts') -and $_.Right.Extent.Text -match 'Get-(CompletedSubscriptionIds|FailedAttempts) '
+            } | ForEach-Object { [scriptblock]::Create($_.Extent.Text) })
+        $script:OneDir = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-one-entry-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:OneDir -Force | Out-Null
+    }
+    AfterAll { Remove-Item -LiteralPath $script:OneDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'reads one completed id and one failure as one-item lists, so the next id is added, not glued' {
+        $script:StateReads.Count | Should -Be 2 -Because 'the wrapper reads both lists from the resume state'
+        $ResumeStateFile = Join-Path $script:OneDir 'state.json'
+        $TenantID = 't'
+        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids @('sub-a') -FailedAttempts @([pscustomobject]@{ Id = 'sub-b'; Name = 'B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 })
+        foreach ($Read in $script:StateReads) { . $Read }
+        $CompletedIds += 'sub-c'
+        @($CompletedIds) | Should -Be @('sub-a', 'sub-c')
+        $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id 'sub-d' -Name 'D' -Reason 'r'
+        @($FailedAttempts).Count | Should -Be 2
+    }
+}

@@ -523,7 +523,7 @@ function Read-StreamResumeStateText
 # run, which runs every subscription.
 function Stop-StreamResumeStateUnopened
 {
-    param([object[]]$Unopened, [string]$InventoryRoot = '', [switch]$SummarySaved, [object[]]$Unsaved = @(), [string[]]$KeptSummaries = @())
+    param([object[]]$Unopened, [string]$InventoryRoot = '', [switch]$SummarySaved, [object[]]$Unsaved = @(), [string[]]$KeptSummaries = @(), [string]$SummaryStateFile = '')
 
     foreach ($U in @($Unopened | Where-Object { $_ }))
     {
@@ -535,22 +535,92 @@ function Stop-StreamResumeStateUnopened
         $Kept = if ($SummarySaved) { 'their records in their stream resume state files and in the resume state' } else { 'their records in their stream resume state files' }
         Write-Host ('  The streams'' reports are kept in their folders under {0} and {1}, but no consolidated zip was made.' -f $InventoryRoot, $Kept) -ForegroundColor Red
     }
+    # -SummaryStateFile: the resume state could not be written, so the rows
+    # only the stream summaries held went to this stream resume state file
+    # (Save-StreamSummaryOnlyState), which the next run's start reads.
+    if ($SummaryStateFile)
+    {
+        Write-Host ('  The resume state could not be written, so the records held only in the stream summaries were written to the stream resume state file {0}; the next run reads it at its start.' -f $SummaryStateFile) -ForegroundColor Red
+    }
     $Unsaved = @($Unsaved | Where-Object { $_ })
     if ($Unsaved.Count -gt 0)
     {
         Write-Host '  The resume state could not be written either, so the records of these subscriptions are in no stream resume state file and not in the resume state:' -ForegroundColor Red
-        foreach ($R in $Unsaved)
-        {
-            Write-Host ('    {0} ({1}): {2} in this run' -f $R.Name, $R.Id, $R.Outcome) -ForegroundColor Red
-        }
-        foreach ($P in @($KeptSummaries | Where-Object { $_ }))
-        {
-            Write-Host ('  The stream summary {0} that holds them is kept; no run reads it.' -f $P) -ForegroundColor Red
-        }
-        Write-Host '  -ResumeFailedOnly does not retry them, so once the file can be opened, run again without -Resume and -ResumeFailedOnly: a plain run runs every subscription, these too. Then remove the kept stream summaries.' -ForegroundColor Yellow
+        Write-StreamSummaryUnsaved -Unsaved $Unsaved -KeptSummaries $KeptSummaries -Then 'so once the file can be opened, run again'
     }
     Write-Host '  Fix its permissions (or close the program that holds it open), then run again. To drop its records instead, move the file away first.' -ForegroundColor Yellow
     Exit-Wrapper -Code 1
+}
+
+# Names each subscription whose record only the kept stream summaries hold
+# ({ Name; Id; Outcome }), the kept summaries, and the way to run them again:
+# -ResumeFailedOnly does not retry them and no run reads the summaries (their
+# names hold this run's id), so a plain run, which runs every subscription.
+# With no -Then, the warning at the end of a parallel run, whose resume state
+# and summary-only stream resume state file could not be written: its lead
+# line says so. -Then: the stop's words for when to run again.
+function Write-StreamSummaryUnsaved
+{
+    param([object[]]$Unsaved, [string[]]$KeptSummaries = @(), [string]$Then = '')
+
+    $Colour = if ($Then) { 'Red' } else { 'Yellow' }
+    if (-not $Then)
+    {
+        Write-Host 'WARNING: The resume state and the stream resume state file for the records held only in the stream summaries could not be written, so the records of these subscriptions are in no stream resume state file and not in the resume state:' -ForegroundColor Yellow
+        $Then = 'so run again'
+    }
+    foreach ($R in @($Unsaved | Where-Object { $_ }))
+    {
+        Write-Host ('    {0} ({1}): {2} in this run' -f $R.Name, $R.Id, $R.Outcome) -ForegroundColor $Colour
+    }
+    foreach ($P in @($KeptSummaries | Where-Object { $_ }))
+    {
+        Write-Host ('  The stream summary {0} that holds them is kept; no run reads it.' -f $P) -ForegroundColor $Colour
+    }
+    Write-Host ('  -ResumeFailedOnly does not retry them, {0} without -Resume and -ResumeFailedOnly: a plain run runs every subscription, these too. Then remove the kept stream summaries.' -f $Then) -ForegroundColor Yellow
+}
+
+# When the resume state cannot be written, the rows only the stream
+# summaries hold (Select-StreamSummaryOnlyRows: a stream that failed to
+# start, or whose state write failed) are in no file. They are written here
+# to a stream resume state file of their own, in the shape a stream writes
+# (Completed, FailedAttempts), named for this run:
+# .resume-state-<tenant>-stream-summary-<RunId>.json. No stream writes that
+# name (a stream's number is a whole number), and Get-StreamResumeStateFiles
+# finds it, so the start of every later run reads it and folds it in, and a
+# run that has read and settled it removes it, as any kept stream resume
+# state file (a clean run, or a parallel run whose resume state is written).
+# The write goes through a temp file, as Save-CompletedSubscriptionIds does.
+# Returns the file's path when it was written, else $null with a warning.
+function Save-StreamSummaryOnlyState
+{
+    param([string]$InventoryRoot, [string]$Tenant, [string]$RunId, [string[]]$CompletedIds = @(), $FailedAttempts = @())
+
+    $Path = Join-Path $InventoryRoot (".resume-state-{0}-stream-summary-{1}.json" -f $Tenant, $RunId)
+    $TmpPath = "$Path.tmp"
+    try
+    {
+        [ordered]@{
+            Tenant         = $Tenant
+            StreamId       = ('summary-{0}' -f $RunId)
+            Completed      = @($CompletedIds | Where-Object { $_ })
+            FailedAttempts = @($FailedAttempts | Where-Object { $_ })
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8 -ErrorAction Stop
+        [System.IO.File]::Move($TmpPath, $Path, $true)
+        return $Path
+    }
+    catch
+    {
+        $WriteError = $_.Exception.Message
+        try { Write-Host ('WARNING: Failed to write the stream resume state file {0}: {1}' -f $Path, $WriteError) -ForegroundColor Yellow }
+        catch { $null = $_ }
+        if (Test-Path -LiteralPath $TmpPath -PathType Leaf)
+        {
+            try { Remove-Item -LiteralPath $TmpPath -Force -ErrorAction Stop }
+            catch { $null = $_ }
+        }
+        return $null
+    }
 }
 
 # Removes this run's stream summary files once their rows are held

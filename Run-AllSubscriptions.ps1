@@ -1635,6 +1635,10 @@ else
 
 Write-Host "All subscriptions processed!" -ForegroundColor Green
 
+# The report zips the output check below finds; the consolidated zip build
+# reads them, also when that check does not run.
+$ActualSubZips = @()
+
 # === Per-subscription output verification (hard-stop) ========================
 #
 # Hard-fail with exit code 2 (distinct from auth/runtime exit code 1) if the
@@ -1660,8 +1664,6 @@ Write-Host "All subscriptions processed!" -ForegroundColor Green
 # their zip-or-no-zip state is unreliable and the wrapper already surfaces
 # them via the failure summary.
 $ExpectedZipCount = @($SubResourceCounts).Count
-# Read by the consolidated zip build below, also when this check does not run.
-$ActualSubZips = @()
 if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
 {
     $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })

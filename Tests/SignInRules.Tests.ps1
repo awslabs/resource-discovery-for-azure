@@ -408,6 +408,7 @@ Describe 'Choosing the tenant after a fresh sign-in' {
         $script:Run = Invoke-SignIn -Answers @('') -Sim @{ Tenants = @($script:TenantA, $script:TenantB) }
 
         $script:Run.ExitCode | Should -Be 0
+        $script:Run.Output | Should -Match 'the browser will open' -Because 'a session with a console signs in in the browser'
         $script:Run.ReadHosts.Count | Should -Be 1
         $script:Run.Subscriptions | Should -Be ('subscriptions {0}' -f $script:Sorted[0])
     }
@@ -432,6 +433,7 @@ Describe 'A direct run with nothing to collect, or nobody to sign in, stops' {
         $script:Run.Connects.Count | Should -Be 0
         $script:Run.Returned | Should -BeFalse
         $script:Run.Output | Should -Match 'non-interactive'
+        $script:Run.Output | Should -Not -Match 'the browser will open' -Because 'no browser is opened'
     }
 
     It 'stops with exit 1, without opening a browser, in a session with no console when the cached sign-in is stale' {

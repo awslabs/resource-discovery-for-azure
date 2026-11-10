@@ -9,6 +9,14 @@ Describe 'A script folder whose path holds a wildcard character' {
         $script:Wrapper = Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:Wrapper, [ref]$null, [ref]$null)
         $script:Stop = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq "`$PSScriptRoot.IndexOfAny([char[]]'[]*?') -ge 0" })
+        # Not under TestDrive: Pester removes TestDrive with a wildcard path,
+        # which fails on a folder named rda*2. Removed here by .NET (paths as written).
+        $script:Base = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-wild-' + [guid]::NewGuid().ToString('N'))
+        $null = [System.IO.Directory]::CreateDirectory($script:Base)
+    }
+
+    AfterAll {
+        if ($script:Base -and [System.IO.Directory]::Exists($script:Base)) { [System.IO.Directory]::Delete($script:Base, $true) }
     }
 
     It 'is stopped before the Azure CLI and the Az modules are looked for, and before the functions load' {
@@ -31,7 +39,7 @@ Describe 'A script folder whose path holds a wildcard character' {
         param($Name, $Exit)
         # * and ? cannot be in a folder name on Windows.
         if ($IsWindows -and $Name -match '[*?]') { Set-ItResult -Skipped -Because 'Windows folder names cannot hold * or ?'; return }
-        $Dir = Join-Path $TestDrive $Name
+        $Dir = Join-Path $script:Base $Name
         $null = [System.IO.Directory]::CreateDirectory($Dir)
         $Probe = Join-Path $Dir 'probe.ps1'
         [System.IO.File]::WriteAllText($Probe, $script:Stop[0].Extent.Text)

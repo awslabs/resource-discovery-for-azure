@@ -177,6 +177,22 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         @(Get-ChildItem -LiteralPath $Root -File -Force | ForEach-Object { $_.Name }) | Should -BeNullOrEmpty
     }
 
+    It 'a build that fails part-way and whose part cannot be removed names it: delete it, do not share it' {
+        $Root = Join-Path $TestDrive 'part-kept'
+        $null = New-SubReport -Root $Root -Stamp 'K1'
+        Mock Compress-Archive -ParameterFilter { -not $Update } {
+            Set-Content -LiteralPath $DestinationPath -Value 'PK part' -NoNewline
+            throw [System.IO.IOException]::new('No space left on device')
+        }
+        Mock Remove-Item -ParameterFilter { $LiteralPath -like '*rda-build-*.partial' } { }
+        $R = Invoke-BundleBlock -Root $Root
+
+        $Left = @(Get-ChildItem -LiteralPath $Root -File -Force -Filter 'rda-build-*.partial')
+        $Left.Count | Should -Be 1
+        $R.BundleBuildError | Should -BeLike ('*: No space left on device {0} could not be removed: delete it, do not share it.' -f $Left[0].FullName)
+        $R.OuterZipFile | Should -BeNullOrEmpty
+    }
+
     It 'a written zip that cannot be read fails the check before it takes its name: no file is left under the name or the name it was written to' {
         $Root = Join-Path $TestDrive 'unreadable'
         $null = New-SubReport -Root $Root -Stamp 'U1'

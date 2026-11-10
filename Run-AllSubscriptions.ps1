@@ -1768,8 +1768,18 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
         }
         finally
         {
-            # Whatever a failed or stopped build left of it goes.
-            if (-not $PartialBuilt -and $null -ne $PartialZip -and (Test-Path -LiteralPath $PartialZip)) { Remove-Item -LiteralPath $PartialZip -Force -ErrorAction SilentlyContinue }
+            # Whatever a failed or stopped build left of it goes. One that
+            # cannot be removed (held open, or not allowed) is named, as it
+            # holds copies of the reports and may be cut short.
+            if (-not $PartialBuilt -and $null -ne $PartialZip -and (Test-Path -LiteralPath $PartialZip))
+            {
+                Remove-Item -LiteralPath $PartialZip -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $PartialZip)
+                {
+                    if ($BundleBuildError) { $BundleBuildError += (" {0} could not be removed: delete it, do not share it." -f $PartialZip) }
+                    Write-Host ("WARNING: {0} is the consolidated zip this run could not finish, and it could not be removed: delete it, do not share it." -f $PartialZip) -ForegroundColor Yellow
+                }
+            }
         }
     }
     else

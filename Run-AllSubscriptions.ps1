@@ -1550,19 +1550,6 @@ else
                 }
             }
 
-            # Clean up per-stream summary JSON files (the data is now folded into
-            # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
-            # they are referenced from the merged $DiagFile via Append above. The
-            # Az context snapshot cleanup lives in the `finally` block below so it
-            # runs even on failure paths.
-            foreach ($S in $StreamSummaries)
-            {
-                if (Test-Path -LiteralPath $S.SummaryPath)
-                {
-                    try { Remove-Item -LiteralPath $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
-                }
-            }
-
             # When parallel streams have completed (clean or otherwise), merge each
             # stream's resume-state file into the unified resume-state file so a
             # subsequent -Resume run picks up correctly. The unified file is also
@@ -1577,13 +1564,16 @@ else
             # As at the start: a file that cannot be opened stops the run,
             # before the stream resume state files are merged and before any
             # of them is removed (the finally below still removes the context
-            # snapshot and the jobs). The stream summaries are already
-            # removed, and some of their rows are held nowhere else (a stream
-            # that failed to start, or whose state write failed), so those
-            # rows are first written to the resume state: the next run's
-            # -ResumeFailedOnly retries those failures too. The file that
-            # could not be opened is kept, and the next run's start stops on
-            # it until it can be read.
+            # snapshot and the jobs). Some rows of the stream summaries are
+            # held nowhere else (a stream that failed to start, or whose state
+            # write failed), so those rows are first written to the resume
+            # state: the next run's -ResumeFailedOnly retries those failures
+            # too. The summaries are removed only once that write worked (or
+            # there was nothing to write). When it failed, they are kept and
+            # the stop names each subscription whose record is not in the
+            # resume state, and how to run it again. The file that could not
+            # be opened is kept, and the next run's start stops on it until
+            # it can be read.
             # The text of each file, by its place in $AllStreamFiles.
             $StreamTexts = [object[]]::new($AllStreamFiles.Count)
             $UnopenedStreamFiles = @()
@@ -1596,7 +1586,8 @@ else
             {
                 $SummaryOnly = Select-StreamSummaryOnlyRows -StreamTexts $StreamTexts -SummaryCompletedIds $StreamSummaryCompletedIds -SummaryFailed $StreamSummaryFailed
                 $SummarySaved = $false
-                if ($SummaryOnly.CompletedIds.Count -gt 0 -or $SummaryOnly.Failed.Count -gt 0)
+                $HasSummaryOnly = $SummaryOnly.CompletedIds.Count -gt 0 -or $SummaryOnly.Failed.Count -gt 0
+                if ($HasSummaryOnly)
                 {
                     if ($SummaryOnly.CompletedIds.Count -gt 0)
                     {
@@ -1610,8 +1601,23 @@ else
                     $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $SummaryFailedAttempts -CompletedIds $CompletedIds
                     $SummarySaved = Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -PassThru
                 }
+                if ($HasSummaryOnly -and -not $SummarySaved)
+                {
+                    # The summaries are the only record of these rows: kept.
+                    $Unsaved = @(foreach ($f in $SummaryOnly.Failed) { [pscustomobject]@{ Name = [string]$f.Name; Id = [string]$f.Id; Outcome = 'failed' } })
+                    $Unsaved += @(foreach ($Id in $SummaryOnly.CompletedIds) { [pscustomobject]@{ Name = [string](@($Subscriptions | Where-Object { [string]$_.Id -eq $Id }) | Select-Object -First 1).Name; Id = $Id; Outcome = 'worked' } })
+                    Stop-StreamResumeStateUnopened -Unopened $UnopenedStreamFiles -InventoryRoot $InventoryRoot -Unsaved $Unsaved -KeptSummaries @($StreamSummaries | ForEach-Object { $_.SummaryPath } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+                }
+                Remove-StreamSummaryFiles -StreamSummaries $StreamSummaries
                 Stop-StreamResumeStateUnopened -Unopened $UnopenedStreamFiles -InventoryRoot $InventoryRoot -SummarySaved:$SummarySaved
             }
+
+            # Clean up per-stream summary JSON files (the data is now folded into
+            # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
+            # they are referenced from the merged $DiagFile via Append above. The
+            # Az context snapshot cleanup lives in the `finally` block below so it
+            # runs even on failure paths.
+            Remove-StreamSummaryFiles -StreamSummaries $StreamSummaries
             for ($i = 0; $i -lt $AllStreamFiles.Count; $i++)
             {
                 $PerStreamFile = $AllStreamFiles[$i].FullName

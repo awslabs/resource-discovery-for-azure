@@ -1481,6 +1481,54 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
+    It 'two streams: when a stream state file cannot be opened when the streams are done and the resume state cannot be written either, the stream summaries are kept, the stop names the subscription of the stream that could not start and says a plain run runs it; that run does, and the run after has nothing to retry' {
+        # As above (Sub C's failure is only in stream 1's summary, stream 7's
+        # state file cannot be opened), and the write of Sub C's failure to
+        # the resume state fails too.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams 2 -ImportFailStream '1' -Stream7LockedDuringRun $script:SubA.Id -UnifiedStateBlocked
+        $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('WARNING: Failed to persist resume state')) -Because $Run.Console
+        $Run.Console | Should -Not -Match ([regex]::Escape('and in the resume state, but no consolidated zip was made')) -Because 'the resume state could not be written'
+        $Run.Console | Should -Match ([regex]::Escape(('{0} ({1}): failed in this run' -f $script:SubC.Name, $script:SubC.Id))) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('-ResumeFailedOnly does not retry them')) -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('a plain run runs every subscription')) -Because $Run.Console
+        $Run.StateKept | Should -BeFalse -Because 'the resume state could not be written'
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        Test-Path -LiteralPath $Stream7 -PathType Leaf | Should -BeTrue -Because 'the file that could not be opened is kept'
+        $Kept = @(Get-ChildItem -LiteralPath $Run.Root -Filter '.rda-stream-*-summary.json' -File -Force)
+        $Kept.Count | Should -Be 2 -Because 'the stream summaries are the only record of Sub C''s failure, so both are kept'
+        @($Kept | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match [regex]::Escape($script:SubC.Id) }).Count | Should -Be 1 -Because 'stream 1''s summary holds Sub C''s failure'
+        foreach ($K in $Kept)
+        {
+            $Run.Console | Should -Match ([regex]::Escape(('The stream summary {0} that holds them is kept' -f $K.FullName))) -Because $Run.Console
+        }
+
+        # While it still cannot be opened, the next plain run stops at its
+        # start, before any subscription.
+        $Blocked = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ReuseHome $Run.Home
+        $Blocked.ExitCode | Should -Be 1 -Because $Blocked.Console
+        $Blocked.Console | Should -Not -Match 'Processing subscription' -Because $Blocked.Console
+        $Blocked.StateKept | Should -BeFalse -Because $Blocked.Console
+
+        # Its permissions are fixed. The plain run the stop named runs every
+        # subscription, Sub C too, and all work.
+        [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]'UserRead, UserWrite')
+        $Plain = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ReuseHome $Run.Home
+        $Plain.Console | Should -Match '(Processing subscription|done): Sub A' -Because $Plain.Console
+        $Plain.Console | Should -Match '(Processing subscription|done): Sub B' -Because $Plain.Console
+        $Plain.Console | Should -Match '(Processing subscription|done): Sub C' -Because $Plain.Console
+        $Plain.ExitCode | Should -Be 0 -Because $Plain.Console
+        $Plain.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter '.rda-stream-*-summary.json' -File -Force).Count | Should -Be 2 -Because 'no run reads or removes the kept summaries: the stop says to remove them'
+
+        # The run after that has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
     It '<Case>: a stream state file that opens but is not valid JSON is named once in a warning, by its path, saying its records were not read, and is kept' -ForEach @(
         @{ Case = 'sequential'; Streams = 1 }
         @{ Case = 'two streams'; Streams = 2 }

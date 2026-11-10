@@ -516,9 +516,14 @@ function Read-StreamResumeStateText
 # first (Select-StreamSummaryOnlyRows), so the stop loses none of them; the
 # file that could not be opened is kept, and the next run's start stops on
 # it again until it can be read, then reads it in.
+# -Unsaved: those rows could not be written to the resume state ({ Name;
+# Id; Outcome }), so the stop names each one: -ResumeFailedOnly does not
+# retry them, and no run reads the stream summaries kept at -KeptSummaries
+# (their names hold this run's id), so the way to run them again is a plain
+# run, which runs every subscription.
 function Stop-StreamResumeStateUnopened
 {
-    param([object[]]$Unopened, [string]$InventoryRoot = '', [switch]$SummarySaved)
+    param([object[]]$Unopened, [string]$InventoryRoot = '', [switch]$SummarySaved, [object[]]$Unsaved = @(), [string[]]$KeptSummaries = @())
 
     foreach ($U in @($Unopened | Where-Object { $_ }))
     {
@@ -530,8 +535,39 @@ function Stop-StreamResumeStateUnopened
         $Kept = if ($SummarySaved) { 'their records in their stream resume state files and in the resume state' } else { 'their records in their stream resume state files' }
         Write-Host ('  The streams'' reports are kept in their folders under {0} and {1}, but no consolidated zip was made.' -f $InventoryRoot, $Kept) -ForegroundColor Red
     }
+    $Unsaved = @($Unsaved | Where-Object { $_ })
+    if ($Unsaved.Count -gt 0)
+    {
+        Write-Host '  The resume state could not be written either, so the records of these subscriptions are in no stream resume state file and not in the resume state:' -ForegroundColor Red
+        foreach ($R in $Unsaved)
+        {
+            Write-Host ('    {0} ({1}): {2} in this run' -f $R.Name, $R.Id, $R.Outcome) -ForegroundColor Red
+        }
+        foreach ($P in @($KeptSummaries | Where-Object { $_ }))
+        {
+            Write-Host ('  The stream summary {0} that holds them is kept; no run reads it.' -f $P) -ForegroundColor Red
+        }
+        Write-Host '  -ResumeFailedOnly does not retry them, so once the file can be opened, run again without -Resume and -ResumeFailedOnly: a plain run runs every subscription, these too. Then remove the kept stream summaries.' -ForegroundColor Yellow
+    }
     Write-Host '  Fix its permissions (or close the program that holds it open), then run again. To drop its records instead, move the file away first.' -ForegroundColor Yellow
     Exit-Wrapper -Code 1
+}
+
+# Removes this run's stream summary files once their rows are held
+# elsewhere (the wrapper's totals, the stream resume state files or the
+# resume state). A summary that cannot be removed is left, with a verbose
+# note: its name holds this run's id, so no other run reads it.
+function Remove-StreamSummaryFiles
+{
+    param([object[]]$StreamSummaries)
+
+    foreach ($S in @($StreamSummaries | Where-Object { $_ }))
+    {
+        if (Test-Path -LiteralPath $S.SummaryPath)
+        {
+            try { Remove-Item -LiteralPath $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
+        }
+    }
 }
 
 # The rows of the stream summaries that no stream resume state file the run

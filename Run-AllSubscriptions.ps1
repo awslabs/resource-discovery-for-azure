@@ -738,9 +738,13 @@ $IdsWithoutReports = if (Test-ResumeStateWithoutReports -Path $ResumeStateFile -
 # Per-stream resume state files that could not be read, at the start or in the
 # end-of-run merge. Their records are not used, so the run is not clean while
 # one is there: it keeps the state and ends with exit 2, and it names each file
-# with what to do (fix or delete it; a run without -Resume or -ResumeFailedOnly
-# removes it).
+# with what to do: it is renamed aside to <name>.unreadable-<time>, out of reach
+# of every later run, to be fixed and renamed back, or deleted.
 $UnreadableStreamFiles = @()
+# Per-stream resume state files the end-of-run merge read and saved but could
+# not remove: a later -Resume would fold their records in again, so the run
+# keeps the state and ends with exit 2 too, and names each one.
+$LeftStreamFiles = @()
 # A parallel run persists each stream's Completed/FailedAttempts to its own
 # .resume-state-<tenant>-stream-<N>.json and only merges them into the unified
 # file at end-of-run. If that run was killed before the merge (Ctrl+C, SIGKILL,
@@ -779,7 +783,15 @@ if ($Resume -or $ResumeFailedOnly)
             }
             catch
             {
-                $UnreadableStreamFiles += (Move-UnreadableStreamFile -Path $StreamFile.FullName -Reason $_.Exception.Message -Interrupted)
+                $Aside = Move-UnreadableStreamFile -Path $StreamFile.FullName -Reason $_.Exception.Message -Interrupted
+                if ($Aside -eq $StreamFile.FullName)
+                {
+                    # Left under its own name, a stream of this run could write
+                    # over it, and every later run would try it again.
+                    Write-Host ("ERROR: Rename or delete {0}, then run again. Nothing was collected (exit 1)." -f $StreamFile.FullName) -ForegroundColor Red
+                    Exit-Wrapper -Code 1
+                }
+                $UnreadableStreamFiles += $Aside
             }
         }
         # A subscription a per-stream file lists as failed is not completed,
@@ -816,7 +828,13 @@ if ($Resume -or $ResumeFailedOnly)
             foreach ($StreamFile in $FoldedStreamFiles)
             {
                 try { Remove-Item -LiteralPath $StreamFile.FullName -Force -ErrorAction Stop }
-                catch { Write-Host ("WARNING: Could not remove the per-stream resume state file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+                catch
+                {
+                    # Left, every later run would fold its old records in again,
+                    # and its old failure would win over a newer completion.
+                    Write-Host ("ERROR: Could not remove the per-stream resume state file {0}: {1}. Its records are saved in {2}. Remove it, then run again. Nothing was collected (exit 1)." -f $StreamFile.FullName, $_.Exception.Message, $ResumeStateFile) -ForegroundColor Red
+                    Exit-Wrapper -Code 1
+                }
             }
         }
         else
@@ -831,7 +849,12 @@ else
     foreach ($StreamFile in @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID))
     {
         try { Remove-Item -LiteralPath $StreamFile.FullName -Force -ErrorAction Stop }
-        catch { Write-Host ("WARNING: Could not remove the per-stream resume state file {0} of an earlier run: {1}" -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+        catch
+        {
+            # Left, a later -Resume would fold its old records in.
+            Write-Host ("ERROR: Could not remove the per-stream resume state file {0} of an earlier run: {1}. Remove it, then run again. Nothing was collected (exit 1)." -f $StreamFile.FullName, $_.Exception.Message) -ForegroundColor Red
+            Exit-Wrapper -Code 1
+        }
     }
 }
 
@@ -905,6 +928,9 @@ if ($ResumeFailedOnly)
         # off relative to the prior run). Tell the user instead of silently
         # processing nothing.
         Write-Host "WARNING: FailedAttempts list contained IDs but none are visible in the current subscription set. Verify access and -IncludeDisabled flag matches the prior run." -ForegroundColor Yellow
+        # Nothing else takes such an entry off the list, so every later
+        # -ResumeFailedOnly run would end the same way: name the way out.
+        Write-Host ("  If they are gone for good, delete the resume state files .resume-state-{0}.json and .resume-state-{0}-stream-*.json in the inventory folder to start over with an empty retry list: the next run collects every subscription." -f $TenantID) -ForegroundColor Yellow
         Exit-Wrapper -Code 2
     }
 }
@@ -1601,6 +1627,9 @@ else
             # accumulators so the consolidated summary at end-of-run looks the
             # same shape as a sequential run.
             $StreamFailedIds = @()
+            # The same subs as given in the summaries (Id, Name, Reason), for the
+            # retry list when a stream's own state file cannot be read.
+            $StreamFailedEntries = @()
             $StreamNoReportIds = @()
             $StreamIncompleteIds = @()
             # The subs of a stream that did not start, for the retry list below.
@@ -1665,6 +1694,7 @@ else
                     if ($StreamSummary.Status -ne 'failed-to-start')
                     {
                         $StreamFailedIds += @($StreamSummary.Failed | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
+                        $StreamFailedEntries += @($StreamSummary.Failed | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) })
                     }
                     else
                     {
@@ -1801,7 +1831,9 @@ else
                 }
                 catch
                 {
-                    $UnreadableStreamFiles += (Move-UnreadableStreamFile -Path $PerStreamFile -Reason $_.Exception.Message)
+                    $Aside = Move-UnreadableStreamFile -Path $PerStreamFile -Reason $_.Exception.Message
+                    if ($Aside -eq $PerStreamFile) { Write-Host ("WARNING: This run keeps the resume state and ends with exit 2. Rename or delete {0} before the next run." -f $PerStreamFile) -ForegroundColor Yellow }
+                    $UnreadableStreamFiles += $Aside
                 }
             }
             if ($AllCompletedFromStreams.Count -gt 0)
@@ -1862,6 +1894,15 @@ else
             {
                 $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$Lost.Id) -Name ([string]$Lost.Name) -Reason 'its stream ended without a summary (see the stream lines above)'
             }
+            # A sub a stream's summary lists as failed that its stream's own file
+            # does not (that file could not be read) goes on the retry list here,
+            # so -ResumeFailedOnly retries it.
+            foreach ($FailedEntry in @($StreamFailedEntries | Where-Object { $null -ne $_ -and $StreamFileFailedIds -notcontains [string]$_.Id }))
+            {
+                $EntryName = if ($FailedEntry.PSObject.Properties['Name']) { [string]$FailedEntry.Name } else { '' }
+                $EntryReason = if ($FailedEntry.PSObject.Properties['Reason']) { [string]$FailedEntry.Reason } else { '' }
+                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$FailedEntry.Id) -Name $EntryName -Reason $EntryReason
+            }
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $NotCompletedThisRun.Count -gt 0)
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
@@ -1884,7 +1925,12 @@ else
                 foreach ($StreamFile in $MergedStreamFiles)
                 {
                     $PerStreamFile = $StreamFile.FullName
-                    try { Remove-Item -LiteralPath $PerStreamFile -Force -ErrorAction Stop } catch { Write-Host ("WARNING: Could not remove the per-stream resume state file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) -ForegroundColor Yellow }
+                    try { Remove-Item -LiteralPath $PerStreamFile -Force -ErrorAction Stop }
+                    catch
+                    {
+                        Write-Host ("WARNING: Could not remove the per-stream resume state file {0}: {1}. Its records are saved; this run keeps the resume state and ends with exit 2. Remove it before the next run." -f $PerStreamFile, $_.Exception.Message) -ForegroundColor Yellow
+                        $LeftStreamFiles += $PerStreamFile
+                    }
                 }
             }
             else
@@ -2139,9 +2185,9 @@ if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test
     {
         # A per-stream state file that could not be read may hold records
         # (named above): the state is kept while it is there.
-        if ($UnreadableStreamFiles.Count -gt 0)
+        if ($UnreadableStreamFiles.Count -gt 0 -or $LeftStreamFiles.Count -gt 0)
         {
-            Write-Host "Resume state kept: a per-stream resume state file could not be read (named above)." -ForegroundColor Yellow
+            Write-Host "Resume state kept: a per-stream resume state file could not be read or removed (named above)." -ForegroundColor Yellow
         }
         else
         {
@@ -2574,7 +2620,7 @@ if ($WrapperTranscriptStarted)
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing ((@($UncarriedSkipped).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing ((@($UncarriedSkipped).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0) -or (@($LeftStreamFiles).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
 if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode

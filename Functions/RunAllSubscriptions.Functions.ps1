@@ -532,8 +532,8 @@ function Read-StreamResumeStateFile
 # again with no end, so the run stops (Stop-WrongShapeStateNotMoved): the
 # result has NotMoved set and MovedTo $null, and this prints nothing at
 # startup, where the caller stops with exit 1 before any file is folded in;
-# with -AtRunEnd it prints the notice and the wrapper stops at the end of the
-# run under the exit-2 rule.
+# with -AtRunEnd it prints the notice and the wrapper ends the run with exit 1
+# in place of 0 and 3-5 (exit 2 keeps its code).
 # (The form of all-fixes-optimized 5f552f76.)
 function Move-UnreadableStreamStateFile
 {

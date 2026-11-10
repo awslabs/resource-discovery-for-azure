@@ -735,6 +735,9 @@ $FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
 # read here are deleted when the run clears the state.
 $FoldedStreamFiles = @()
 $UnreadableStreamFiles = @()
+# Per-stream files the end-of-run merge could not read and could not move
+# aside: the run ends with exit 1 in place of 0 and 3-5.
+$StreamStateNotMoved = @()
 if ($Resume -or $ResumeFailedOnly)
 {
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -742,15 +745,15 @@ if ($Resume -or $ResumeFailedOnly)
     {
         $StrandedCompleted = @()
         $StrandedFailed = @()
-        # A file that cannot be read (it cannot be parsed, or parses to nothing)
-        # is moved aside (Move-UnreadableStreamStateFile); when one cannot be
-        # moved aside the run stops after this loop with exit 1, before any
-        # record is saved.
+        # A file that cannot be read (it cannot be parsed, parses to nothing,
+        # or is not an object with a Completed list) is moved aside
+        # (Move-UnreadableStreamStateFile); when one cannot be moved aside the
+        # run stops after this loop with exit 1, before any record is saved.
         $UnreadableNotMoved = @()
         foreach ($StreamFile in $StrandedStreamFiles)
         {
             $Obj = Read-StreamResumeStateFile -Path $StreamFile.FullName
-            if ($null -eq $Obj)
+            if ($null -eq $Obj -or -not $Obj.PSObject.Properties['Completed'])
             {
                 Write-Verbose ("Could not read stranded stream resume file {0}" -f $StreamFile.FullName)
                 $Unreadable = Move-UnreadableStreamStateFile -File $StreamFile -ResumeFailedOnly:$ResumeFailedOnly
@@ -760,7 +763,8 @@ if ($Resume -or $ResumeFailedOnly)
             }
             $FoldedStreamFiles = @(@($FoldedStreamFiles | Where-Object { $null -ne $_ }) + $StreamFile)
             if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
-            if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+            # An older file has no FailedAttempts list (read under strict mode too).
+            if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
         }
         if ($UnreadableNotMoved.Count -gt 0) { Stop-WrongShapeStateNotMoved -Files $UnreadableNotMoved -ResumeFailedOnly:$ResumeFailedOnly }
         if ($StrandedCompleted.Count -gt 0)
@@ -1548,30 +1552,36 @@ else
             $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
             $AllCompletedFromStreams = @()
             $AllFailedFromStreams = @()
+            $ReadStreamFiles = @()
             foreach ($StreamFile in $AllStreamFiles)
             {
-                $PerStreamFile = $StreamFile.FullName
-                try
+                $Obj = Read-StreamResumeStateFile -Path $StreamFile.FullName
+                if ($null -eq $Obj -or -not $Obj.PSObject.Properties['Completed'])
                 {
-                    $Obj = Get-Content -Path $PerStreamFile -Raw | ConvertFrom-Json
-                    if ($null -ne $Obj.Completed)
-                    {
-                        $AllCompletedFromStreams += @($Obj.Completed)
-                    }
-                    # Per-stream files written by workers also carry their
-                    # FailedAttempts entries. Merge by Id so the unified
-                    # state file reflects every stream's failures, with the
-                    # most-recent attempt's Reason/LastFailedAt winning when
-                    # the same sub appears in multiple streams (which would
-                    # only happen across re-runs with different slicing).
-                    if ($null -ne $Obj.FailedAttempts)
-                    {
-                        $AllFailedFromStreams += @($Obj.FailedAttempts)
-                    }
+                    # Its records are not used, so none of the subscriptions it
+                    # lists counts as completed and a later -Resume collects
+                    # them. Moved aside with a warning, not deleted. One that
+                    # cannot be moved aside ends the run with exit 1 (below).
+                    $Unreadable = Move-UnreadableStreamStateFile -File $StreamFile -AtRunEnd
+                    $UnreadableStreamFiles = @(@($UnreadableStreamFiles | Where-Object { $null -ne $_ }) + $Unreadable)
+                    if ($Unreadable.NotMoved) { $StreamStateNotMoved += $Unreadable }
+                    continue
                 }
-                catch
+                $ReadStreamFiles += $StreamFile
+                if ($null -ne $Obj.Completed)
                 {
-                    Write-Verbose ("Could not read stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message)
+                    $AllCompletedFromStreams += @($Obj.Completed)
+                }
+                # Per-stream files written by workers also carry their
+                # FailedAttempts entries. Merge by Id so the unified
+                # state file reflects every stream's failures, with the
+                # most-recent attempt's Reason/LastFailedAt winning when
+                # the same sub appears in multiple streams (which would
+                # only happen across re-runs with different slicing).
+                # An older file has no FailedAttempts list.
+                if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts)
+                {
+                    $AllFailedFromStreams += @($Obj.FailedAttempts)
                 }
             }
             if ($AllCompletedFromStreams.Count -gt 0)
@@ -1587,11 +1597,10 @@ else
             }
             # Also delete per-stream resume files now that the unified file holds
             # the truth - this prevents drift if a future run uses a different
-            # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
-            # as the merge loop above, so every file that was just merged is also
-            # the one that gets cleaned up here - regardless of this run's
-            # -ParallelStreams value.
-            foreach ($StreamFile in $AllStreamFiles)
+            # stream count. Only the files the merge loop above read are
+            # deleted, whatever this run's -ParallelStreams value; one it could
+            # not read was moved aside (or, when it could not be, left alone).
+            foreach ($StreamFile in $ReadStreamFiles)
             {
                 $PerStreamFile = $StreamFile.FullName
                 try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
@@ -2208,6 +2217,14 @@ if (@($Global:CollectorFailures).Count -gt 0)
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
+# A per-stream state file the end-of-run merge could not move aside: the run
+# above is finished; the stop says what to do, and the exit code is set below
+# (exit 1 in place of 0 and 3-5; exit 2 keeps its code).
+if ($StreamStateNotMoved.Count -gt 0)
+{
+    Stop-WrongShapeStateNotMoved -Files $StreamStateNotMoved -AfterCollection -NoExit -ResumeFailedOnly:$ResumeFailedOnly
+}
+
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
 if ($WrapperTranscriptStarted)
@@ -2220,6 +2237,13 @@ if ($WrapperTranscriptStarted)
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+# A per-stream state file the merge could not move aside stops the next run at
+# its start: exit 1, in place of 0 and 3-5, so a caller acts on it. Exit 2
+# keeps its code; the stop above names the file either way.
+if ($StreamStateNotMoved.Count -gt 0 -and $WrapperExitCode -ne 2)
+{
+    exit 1
+}
 if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode

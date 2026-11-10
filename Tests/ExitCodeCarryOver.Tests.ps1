@@ -1552,8 +1552,11 @@ function Get-UsageAggregates
         @($Kept | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match [regex]::Escape($script:SubC.Id) }).Count | Should -Be 1 -Because 'stream 1''s summary holds Sub C''s failure'
         foreach ($K in $Kept)
         {
-            $Run.Console | Should -Match ([regex]::Escape(('The stream summary {0} that holds them is kept' -f $K.FullName))) -Because $Run.Console
+            # Each kept summary is named, also one that holds none of the
+            # unsaved rows (stream 0's), so none is said to hold them.
+            $Run.Console | Should -Match ([regex]::Escape(('The stream summary {0} is kept; no run reads it.' -f $K.FullName))) -Because $Run.Console
         }
+        $Run.Console | Should -Not -Match 'that holds them' -Because 'stream 0''s summary holds none of the unsaved rows'
 
         # While it still cannot be opened, the next plain run stops at its
         # start, before any subscription.
@@ -1664,8 +1667,11 @@ function Get-UsageAggregates
         $Kept.Count | Should -Be 2 -Because 'the stream summaries are the only record of Sub C''s failure, so both are kept'
         foreach ($K in $Kept)
         {
-            $Run.Console | Should -Match ([regex]::Escape(('The stream summary {0} that holds them is kept' -f $K.FullName))) -Because $Run.Console
+            # Each kept summary is named, also one that holds none of the
+            # unsaved rows (stream 0's), so none is said to hold them.
+            $Run.Console | Should -Match ([regex]::Escape(('The stream summary {0} is kept; no run reads it.' -f $K.FullName))) -Because $Run.Console
         }
+        $Run.Console | Should -Not -Match 'that holds them' -Because 'stream 0''s summary holds none of the unsaved rows'
 
         # The plain run the warning named runs every subscription, Sub C too.
         $Plain = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams 2 -ReuseHome $Run.Home

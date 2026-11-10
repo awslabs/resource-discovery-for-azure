@@ -575,7 +575,9 @@ function Write-StreamSummaryUnsaved
     }
     foreach ($P in @($KeptSummaries | Where-Object { $_ }))
     {
-        Write-Host ('  The stream summary {0} that holds them is kept; no run reads it.' -f $P) -ForegroundColor $Colour
+        # Every summary is kept, also one that holds none of these rows, so
+        # none is said to hold them.
+        Write-Host ('  The stream summary {0} is kept; no run reads it.' -f $P) -ForegroundColor $Colour
     }
     Write-Host ('  -ResumeFailedOnly does not retry them, {0} without -Resume and -ResumeFailedOnly: a plain run runs every subscription, these too. Then remove the kept stream summaries.' -f $Then) -ForegroundColor Yellow
 }

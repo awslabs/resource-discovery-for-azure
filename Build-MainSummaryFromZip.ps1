@@ -36,7 +36,9 @@
     anything, saying another rebuild is writing there. Run it again when the
     first has finished. The empty file stays in the folder (it is never in
     the summary or the bundle); a failed rebuild into a folder it made
-    removes the folder with it.
+    removes the folder with it, except on macOS, where that folder stays
+    holding only this file (removing it there could let two rebuilds hold
+    the lock at once).
 
 .PARAMETER InputZip
     Path to the consolidated AllSubscriptions_ResourcesReport_*.zip.

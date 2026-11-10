@@ -839,7 +839,10 @@ if ($Resume -or $ResumeFailedOnly)
         }
         else
         {
-            Write-Host ("WARNING: The resume state file {0} does not hold every record of the per-stream files of the interrupted run, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($FoldedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow
+            # Left under their names, a stream of this run would write over the
+            # only copy of what they hold, so the run stops before any stream.
+            Write-Host ("ERROR: The resume state file {0} could not be written with every record of the per-stream files of the interrupted run, so they are kept: {1}. Free disk space or fix the folder, then run again. Nothing was collected (exit 1)." -f $ResumeStateFile, (@($FoldedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Red
+            Exit-Wrapper -Code 1
         }
     }
 }
@@ -2179,7 +2182,7 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
 {
     try
     {
@@ -2191,7 +2194,7 @@ if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test
         }
         else
         {
-            Remove-Item -Path $ResumeStateFile -Force
+            Remove-Item -LiteralPath $ResumeStateFile -Force
             Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
         }
     }

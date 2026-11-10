@@ -89,12 +89,14 @@ Describe 'The per-stream resume state files at the start of a run' {
         @($R2.Lines | Where-Object { $_ -like 'Recovered per-stream state*' }) | Should -BeNullOrEmpty
     }
 
-    It 'are kept and named when the unified file does not hold their records afterwards' {
+    It 'are kept and named, and the run stops before any stream could write over them, when the unified file does not hold their records afterwards' {
         $Path = script:New-StreamFile -Root $script:Root -N 0 -Completed @('sub-a')
         Mock Save-CompletedSubscriptionIds { }
-        $R = script:Invoke-Fold -Root $script:Root -Resume $true
+        Mock Exit-Wrapper { throw ('Exit-Wrapper ' + $Code) }
+        $script:Out = @()
+        { & { $InventoryRoot = $script:Root; $TenantID = 't'; $ResumeStateFile = Join-Path $script:Root '.resume-state-t.json'; $CompletedIds = @(); $FailedAttempts = @(); $CompletedReports = @(); $Resume = $true; $ResumeFailedOnly = $false; $UnreadableStreamFiles = @(); $null = $InventoryRoot, $TenantID, $ResumeStateFile, $CompletedIds, $FailedAttempts, $CompletedReports, $Resume, $ResumeFailedOnly, $UnreadableStreamFiles; . $script:FoldBlock 6>&1 | ForEach-Object { $script:Out += [string]$_ } } } | Should -Throw 'Exit-Wrapper 1'
         Test-Path -LiteralPath $Path | Should -BeTrue
-        @($R.Lines | Where-Object { $_ -like 'WARNING: The resume state file * does not hold every record of the per-stream files*' }).Count | Should -Be 1
+        @($script:Out | Where-Object { $_ -like 'ERROR: The resume state file * could not be written with every record of the per-stream files*Nothing was collected (exit 1).' }).Count | Should -Be 1
     }
 
     It 'that cannot be read are renamed aside, named and recorded as unread, so the run is not clean and no stream writes over them' {
@@ -127,7 +129,8 @@ Describe 'The per-stream resume state files at the start of a run' {
         $Path = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'newer'; Attempts = 3 })
         Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'older'; Attempts = 1 }) -Reports @()
         Mock Save-CompletedSubscriptionIds { }
-        $null = script:Invoke-Fold -Root $script:Root -Resume $true
+        Mock Exit-Wrapper { throw ('Exit-Wrapper ' + $Code) }
+        { script:Invoke-Fold -Root $script:Root -Resume $true } | Should -Throw 'Exit-Wrapper 1'
         Test-Path -LiteralPath $Path | Should -BeTrue -Because 'the file on disk still holds the older entry'
     }
 
@@ -238,6 +241,30 @@ Describe 'Resume state helpers with a folder whose path holds brackets' {
         @(Get-CompletedSubscriptionIds -Path $State -Tenant 't') | Should -Be @('sub-a')
         @(Get-FailedAttempts -Path $State -Tenant 't' | ForEach-Object Id) | Should -Be @('sub-x')
         Test-ResumeStateSaved -Path $State -Tenant 't' -Ids @('sub-a') -FailedAttempts $Failed -Reports @() | Should -BeTrue
+    }
+
+    It 'find, write and read back the per-stream files through literal paths' {
+        $Dir = Join-Path $script:TestBase 'streams[2]'
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        $Path = Join-Path $Dir '.resume-state-t-stream-0.json'
+        Write-StreamState -Path $Path -Completed @('sub-a') -FailedAttempts @() -Reports @() 6>$null
+        @(Get-StreamResumeStateFiles -InventoryRoot $Dir -Tenant 't' | ForEach-Object { $_.FullName }) | Should -Be @($Path)
+        @((Read-StreamState -Path $Path).Completed) | Should -Be @('sub-a')
+    }
+}
+
+Describe 'Write-StreamState' {
+    It 'leaves the file it had when the write is stopped, never one cut short' {
+        $Dir = Join-Path $script:TestBase ('ws-' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        $Path = Join-Path $Dir '.resume-state-t-stream-0.json'
+        Write-StreamState -Path $Path -Completed @('sub-a') -FailedAttempts @() -Reports @() 6>$null
+        $Before = Get-Content -LiteralPath $Path -Raw
+        # The write stops part-way, as when the stream is killed during it.
+        Mock Set-Content { $Target = if ($LiteralPath) { $LiteralPath } else { $Path }; [System.IO.File]::WriteAllText([string]$Target, '{ "Tena'); throw 'stand-in: stopped during the write' }
+        Write-StreamState -Path $Path -Completed @('sub-a', 'sub-b') -FailedAttempts @() -Reports @() 6>$null
+        Get-Content -LiteralPath $Path -Raw | Should -Be $Before
+        @(Get-StreamResumeStateFiles -InventoryRoot $Dir -Tenant 't').Count | Should -Be 1
     }
 }
 

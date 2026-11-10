@@ -1367,6 +1367,7 @@ function Get-UsageAggregates
         @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).FullName | Should -Be @($Stream7) -Because 'only the file the run could not read is left'
         $Run.Console | Should -Match ([regex]::Escape(('WARNING: kept 1 stream resume state file(s) in {0}' -f $Run.Root))) -Because $Run.Console
         $Run.Console | Should -Not -Match 'WARNING: kept [02-9]\d* stream resume state file' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'as the resume state could not be written' -Because 'this file was kept because it could not be parsed, not because a save failed'
         $Run.Console | Should -Not -Match 'were written to the stream resume state file' -Because 'the clean-up removed the summary-only file'
     }
 

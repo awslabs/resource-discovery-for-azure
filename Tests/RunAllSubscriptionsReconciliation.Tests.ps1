@@ -941,6 +941,7 @@ Describe 'The wrapper keeps a resume state with one entry as a list' {
         Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids @('sub-a', 'sub-b') -FailedAttempts $FailedAttempts
         foreach ($Read in $script:StateReads) { . $Read }
         $FailedAttempts.Count | Should -Be 0 -Because 'the wrapper counts it so to call a run clean'
+        (Get-Content -LiteralPath $ResumeStateFile -Raw | ConvertFrom-Json).FailedAttempts.Count | Should -Be 0 -Because 'the file holds an empty list, not [null], for any other reader'
         @($CompletedIds) | Should -Be @('sub-a', 'sub-b')
     }
 }

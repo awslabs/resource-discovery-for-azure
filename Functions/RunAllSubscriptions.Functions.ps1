@@ -587,17 +587,25 @@ function Write-StreamSummaryUnsaved
 # rows only the stream summaries held (-SummaryStateFile). Only the files
 # still there are named: on a clean run the clean-up at the end removes the
 # ones it read, so the caller then warns after that clean-up, or before a
-# stop that comes first. The console can be gone, so it never throws.
+# stop that comes first. A file this run could not parse (-UnreadFiles) is
+# kept for that reason, not for the failed write, so it is named apart.
+# The console can be gone, so it never throws.
 function Write-StreamStateKept
 {
-    param([string[]]$StreamFiles = @(), [string]$SummaryStateFile = '', [string]$InventoryRoot = '')
+    param([string[]]$StreamFiles = @(), [string]$SummaryStateFile = '', [string]$InventoryRoot = '', [string[]]$UnreadFiles = @())
 
     try
     {
         $Kept = @($StreamFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
-        if ($Kept.Count -gt 0)
+        $KeptUnread = @($Kept | Where-Object { $UnreadFiles -contains $_ })
+        $KeptUnsaved = @($Kept | Where-Object { $UnreadFiles -notcontains $_ })
+        if ($KeptUnsaved.Count -gt 0)
         {
-            Write-Host ("WARNING: kept {0} stream resume state file(s) in {1}, as the resume state could not be written; the next run reads them at its start." -f $Kept.Count, $InventoryRoot) -ForegroundColor Yellow
+            Write-Host ("WARNING: kept {0} stream resume state file(s) in {1}, as the resume state could not be written; the next run reads them at its start." -f $KeptUnsaved.Count, $InventoryRoot) -ForegroundColor Yellow
+        }
+        if ($KeptUnread.Count -gt 0)
+        {
+            Write-Host ("WARNING: kept {0} stream resume state file(s) in {1} that this run could not read; the next run tries them again at its start." -f $KeptUnread.Count, $InventoryRoot) -ForegroundColor Yellow
         }
         if ($SummaryStateFile -and (Test-Path -LiteralPath $SummaryStateFile -PathType Leaf))
         {
@@ -759,8 +767,9 @@ function Save-CompletedSubscriptionIds
         # appends/refreshes entries on every catch and removes them on the
         # next successful attempt for the same sub, so the file is always
         # an accurate snapshot of "subs that failed at least once and have
-        # not yet succeeded since".
-        FailedAttempts            = @($FailedAttempts)
+        # not yet succeeded since". A $null (an empty list passed through
+        # the pipeline) is dropped, so the file holds [] and never [null].
+        FailedAttempts            = @($FailedAttempts | Where-Object { $null -ne $_ })
         LastUpdated               = (Get-Date).ToString('o')
     }
     try

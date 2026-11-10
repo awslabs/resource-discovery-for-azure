@@ -1786,7 +1786,7 @@ else
                 }
                 else
                 {
-                    Write-StreamStateKept -StreamFiles $KeptStreamState.StreamFiles -SummaryStateFile $KeptStreamState.SummaryStateFile -InventoryRoot $InventoryRoot
+                    Write-StreamStateKept -StreamFiles $KeptStreamState.StreamFiles -SummaryStateFile $KeptStreamState.SummaryStateFile -InventoryRoot $InventoryRoot -UnreadFiles $UnreadStreamStateFiles
                 }
             }
         }
@@ -1946,7 +1946,7 @@ if ($ExpectedZipCount -gt 0)
         # resume state files a clean run kept all stay.
         if ($DeferredStreamStateKept)
         {
-            Write-StreamStateKept -StreamFiles $DeferredStreamStateKept.StreamFiles -SummaryStateFile $DeferredStreamStateKept.SummaryStateFile -InventoryRoot $InventoryRoot
+            Write-StreamStateKept -StreamFiles $DeferredStreamStateKept.StreamFiles -SummaryStateFile $DeferredStreamStateKept.SummaryStateFile -InventoryRoot $InventoryRoot -UnreadFiles $UnreadStreamStateFiles
         }
         Exit-Wrapper -Code 2
     }
@@ -2084,7 +2084,7 @@ if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0
 # there after that clean-up (ones it did not read, or could not remove).
 if ($DeferredStreamStateKept)
 {
-    Write-StreamStateKept -StreamFiles $DeferredStreamStateKept.StreamFiles -SummaryStateFile $DeferredStreamStateKept.SummaryStateFile -InventoryRoot $InventoryRoot
+    Write-StreamStateKept -StreamFiles $DeferredStreamStateKept.StreamFiles -SummaryStateFile $DeferredStreamStateKept.SummaryStateFile -InventoryRoot $InventoryRoot -UnreadFiles $UnreadStreamStateFiles
 }
 
 # Final summary

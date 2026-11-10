@@ -344,7 +344,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @())
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -385,6 +385,15 @@ function Get-UsageAggregates
                     FailedAttempts           = @(@($SeedState.Failed) | ForEach-Object { [pscustomobject]@{ Id = $_; Name = 'earlier'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier failure'; Attempts = 1 } })
                     LastUpdated              = '2026-01-01T00:00:00Z'
                 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Reports.FullName ('.resume-state-{0}.json' -f $script:Tenant)) -Encoding utf8
+            }
+            # UnifiedStateUnreadable: the unified resume state is there but
+            # cannot be read (mode 000, as when it is locked). Its mode is put
+            # back once the run ends, as when the lock is gone, so the state
+            # the run left can be checked and the next run can read it.
+            $UnifiedState = Join-Path $CaseHome ('InventoryReports/.resume-state-{0}.json' -f $script:Tenant)
+            if ($UnifiedStateUnreadable)
+            {
+                [System.IO.File]::SetUnixFileMode($UnifiedState, [System.IO.UnixFileMode]::None)
             }
             # What the streams' summary files hold once the wrapper has
             # started the streams (see Import-AzContext in the stand-in).
@@ -522,6 +531,10 @@ function Get-UsageAggregates
                 throw 'The wrapper run did not end within 300 seconds.'
             }
             $Proc.WaitForExit()
+            if ($UnifiedStateUnreadable -and (Test-Path -LiteralPath $UnifiedState -PathType Leaf))
+            {
+                [System.IO.File]::SetUnixFileMode($UnifiedState, [System.IO.UnixFileMode]'UserRead, UserWrite')
+            }
             $StateFile = Join-Path $CaseHome ('InventoryReports/.resume-state-{0}.json' -f $script:Tenant)
             $State = if (Test-Path -LiteralPath $StateFile) { Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json } else { $null }
             # RunSummary.log from the consolidated zip, when one was made.
@@ -1301,6 +1314,39 @@ function Get-UsageAggregates
 
         # The run after that has nothing to retry.
         $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
+    It '<Case>: a resume state file the run cannot read stops the run with the read failure and is not written over, so once it can be read the next -ResumeFailedOnly retries its failure, and the run after has nothing to retry' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
+        # An earlier run left the failure of Sub A in the resume state, which
+        # this run cannot read (locked, no access). This plain run does not
+        # see Sub A.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams $Streams -SeedState ([pscustomobject]@{ Completed = @(); Failed = @($script:SubA.Id) }) -UnifiedStateUnreadable
+        $StatePath = Join-Path $Run.Root ('.resume-state-{0}.json' -f $script:Tenant)
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape(('The resume state file {0} exists but could not be read: ' -f $StatePath))) -Because $Run.Console
+        $Run.Console | Should -Match '(?i)denied' -Because 'the real read failure is named'
+        $Run.Console | Should -Not -Match 'different tenant' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'Processing subscription' -Because 'the run stops before any subscription'
+        $Run.Console | Should -Not -Match '\[stream-\d\]' -Because 'the run stops before any stream'
+        $Run.FailedIds | Should -Be @($script:SubA.Id) -Because 'the saved failure is not written over'
+
+        # The file can be read again (the lock is gone). The next run retries
+        # Sub A only, and it works.
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams $Streams -ResumeFailedOnly -ReuseHome $Run.Home
+        $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 1 previously-failed subscription' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match '(Processing subscription|done): Sub B' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match '(Processing subscription|done): Sub C' -Because $Retry.Console
+        $Retry.Console | Should -Match '(Processing subscription|done): Sub A' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+        $Retry.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+
+        # The run after that has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams $Streams -ResumeFailedOnly -ReuseHome $Run.Home
         $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
         $After.ExitCode | Should -Be 0
     }

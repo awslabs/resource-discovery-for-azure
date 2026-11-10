@@ -177,7 +177,7 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         @(Get-ChildItem -LiteralPath $Root -File -Force | ForEach-Object { $_.Name }) | Should -BeNullOrEmpty
     }
 
-    It 'a report zip the output check found that is gone by the build stops the run with exit 2, not a consolidated zip without it' {
+    It 'a report zip the output check found that is gone by the build means no consolidated zip and exit 2, not a zip without it' {
         $Root = Join-Path $TestDrive 'gone-between'
         $Kept = New-SubReport -Root $Root -Stamp 'G1'
         $Gone = New-SubReport -Root $Root -Stamp 'G2'
@@ -186,9 +186,14 @@ Describe 'Run-AllSubscriptions.ps1: building the consolidated zip' {
         $ActualSubZips.Count | Should -Be 2
         $null = $ActualSubZips, $Kept
         Remove-Item -LiteralPath $Gone -Force
-        Mock Exit-Wrapper { throw ('Exit-Wrapper ' + $Code) }
-        { Invoke-BundleBlock -Root $Root -NoLastCheck } | Should -Throw 'Exit-Wrapper 2'
-        @(Get-ChildItem -LiteralPath $Root -File -Filter 'AllSubscriptions_*' -Force) | Should -BeNullOrEmpty
+        $R = Invoke-BundleBlock -Root $Root
+        $R.BundleBuildError | Should -BeLike ('*1 report zip(s) found by the output check are gone now: {0}*' -f $Gone)
+        $R.OuterZipFile | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $Root -File -Force | Where-Object { $_.Name -like 'AllSubscriptions_*' -or $_.Name -like 'rda-build-*' }) | Should -BeNullOrEmpty
+        # Every zip gone: no consolidated zip, and the run says so with exit 2 too.
+        Remove-Item -LiteralPath $Kept -Force
+        $R2 = Invoke-BundleBlock -Root $Root
+        $R2.BundleBuildError | Should -BeLike '*report zip(s) found by the output check are all gone now*'
     }
 
     It 'a build that fails part-way and whose part cannot be removed names it: delete it, do not share it' {

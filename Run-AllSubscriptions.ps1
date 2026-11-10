@@ -975,14 +975,14 @@ if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = 
 # Loop through each subscription and run ResourceInventory
 $SkippedCount = 0
 $DiagFile = $null
+# The report zips the output check finds after the collection; the
+# consolidated zip build reads them, also when that check does not run.
+$ActualSubZips = @()
 # Per-subscription resource counts collected for the final summary so the user
 # can see at a glance which subscriptions came back empty (the most common
 # explanation is that the signed-in identity does not have Reader on the
 # subscription, but it can also legitimately mean the subscription is empty).
 $SubResourceCounts = @()
-# The report zips the output check finds after the collection; the
-# consolidated zip build reads them, also when that check does not run.
-$ActualSubZips = @()
 
 if ($ParallelStreams -le 1)
 {

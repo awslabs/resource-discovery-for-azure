@@ -587,8 +587,13 @@ function Save-CompletedSubscriptionIds
     # id that is not completed. See New-CompletedReportRecord for the shape.
     $LatestReports = Get-LatestCompletedReports -Reports $Reports
     # Only the access check passes -NotReadable; every other save keeps the list
-    # the file already holds.
-    if (-not $PSBoundParameters.ContainsKey('NotReadable')) { $NotReadable = Get-NotReadableSubscriptionIds -Path $Path -Tenant $Tenant }
+    # this run gave for the same file (so a later save puts it right when the
+    # access check's own save did not reach the disk), else the list the file
+    # already holds.
+    $Given = Get-Variable -Name RdaNotReadableForState -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($PSBoundParameters.ContainsKey('NotReadable')) { $script:RdaNotReadableForState = @{ Path = $Path; Ids = @($NotReadable) } }
+    elseif ($null -ne $Given -and $Given.Path -eq $Path) { $NotReadable = @($Given.Ids) }
+    else { $NotReadable = Get-NotReadableSubscriptionIds -Path $Path -Tenant $Tenant }
     $State = [pscustomobject]@{
         TenantID                  = $Tenant
         CompletedSubscriptionIds  = @($Ids)

@@ -619,18 +619,57 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
         $script:Src | Should -Match ([regex]::Escape('-ReportsMissing (($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)) -or ('))
     }
 
-    It 'removes a stream summary an earlier run left before the stream starts, and stops when it cannot' {
-        $Loop = @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text.Contains('.rda-stream-{0}-summary.json') -and $args[0].Body.Extent.Text.Contains('Start-Job') }, $true))
-        $Loop.Count | Should -Be 1
-        $Body = $Loop[0].Body.Extent.Text
-        $Remove = $Body.IndexOf('Remove-Item -LiteralPath $SummaryPath -Force -ErrorAction Stop')
-        $Remove | Should -BeGreaterThan -1
-        $Remove | Should -BeLessThan $Body.IndexOf('Start-Job')
-        $Body | Should -Match ([regex]::Escape('Exit-Wrapper -Code 1'))
+    It 'removes every stream summary an earlier run left before the sign-in snapshot and the first stream' {
+        $Pre = @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text.Contains('$StaleSummary = Join-Path $InventoryRoot') }, $true))
+        $Pre.Count | Should -Be 1
+        $Launch = @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text.Contains('Start-Job') }, $true))
+        $Snapshot = @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq 'Save-AzContext' }, $true))
+        $Pre[0].Extent.StartOffset | Should -BeLessThan $Snapshot[0].Extent.StartOffset
+        $Pre[0].Extent.StartOffset | Should -BeLessThan $Launch[0].Extent.StartOffset
+        @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text.Contains('Start-Job') -and $args[0].Body.Extent.Text.Contains('Remove-Item -LiteralPath $SummaryPath') }, $true)) | Should -BeNullOrEmpty -Because 'no removal is left inside the launch loop'
+        $script:PreBlock = [scriptblock]::Create("param(`$InventoryRoot, `$StreamCount)`n" + $Pre[0].Extent.Text)
+    }
+
+    It 'leaves no stream summary of an earlier run, and stops with exit 1 before any stream when one cannot be removed' {
+        function Exit-Wrapper { param([int]$Code) throw ('EXIT ' + $Code) }
+        Mock Write-Host { }
+        $Dir = Join-Path $script:TestBase ('stale-' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+        foreach ($N in 0, 1) { Set-Content -LiteralPath (Join-Path $Dir ('.rda-stream-{0}-summary.json' -f $N)) -Value '{}' }
+        & $script:PreBlock $Dir 2
+        @(Get-ChildItem -LiteralPath $Dir -Force -Filter '.rda-stream-*-summary.json') | Should -BeNullOrEmpty
+        foreach ($N in 0, 1) { Set-Content -LiteralPath (Join-Path $Dir ('.rda-stream-{0}-summary.json' -f $N)) -Value '{}' }
+        Mock Remove-Item -ParameterFilter { [string]$LiteralPath -like '*.rda-stream-1-summary.json' } -MockWith { throw 'stand-in: denied' }
+        { & $script:PreBlock $Dir 2 } | Should -Throw 'EXIT 1'
+    }
+
+    It 'says the state was cleared at the end of a clean run only when its removal worked' {
+        $script:Src | Should -Match ([regex]::Escape('Remove-Item -LiteralPath $ResumeStateFile -Force -ErrorAction Stop'))
+        $script:Src | Should -Match ([regex]::Escape('if (-not (Test-Path -LiteralPath $ResumeStateFile)) { Write-Host "Resume state cleared (clean run)." -ForegroundColor Green }'))
     }
 
     It 'removes the stream summaries by literal path' {
         $script:Src | Should -Not -Match ([regex]::Escape('Test-Path -Path $S.SummaryPath'))
         $script:Src | Should -Not -Match ([regex]::Escape('Remove-Item -Path $S.SummaryPath'))
+    }
+}
+
+Describe 'A save after the access check''s own save did not reach the disk' {
+    It 'writes the not-readable list this run gave, so clearing the failed-save flag is right' {
+        Mock Write-Host { }
+        $Root = Join-Path $script:TestBase ('notreadable-' + [guid]::NewGuid().ToString().Substring(0, 8))
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        $Path = Join-Path $Root '.resume-state-t.json'
+        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @() -NotReadable @()
+        $script:FailWrites = $true
+        Mock Set-Content -ParameterFilter { $script:FailWrites -and [string]$LiteralPath -like '*.tmp' } -MockWith { throw 'stand-in: disk full' }
+        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @() -NotReadable @('sub-x')
+        @(Get-NotReadableSubscriptionIds -Path $Path -Tenant 't') | Should -BeNullOrEmpty -Because 'that save did not reach the disk'
+        $script:FailWrites = $false
+        $script:ResumeStateSaveFailed = $true
+        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @() -Reports @()
+        @(Get-NotReadableSubscriptionIds -Path $Path -Tenant 't') | Should -Be @('sub-x')
+        $script:ResumeStateSaveFailed | Should -BeFalse
+        Remove-Variable -Name RdaNotReadableForState -Scope Script -ErrorAction SilentlyContinue
     }
 }

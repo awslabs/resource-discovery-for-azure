@@ -1672,6 +1672,25 @@ else
     }
     if ($StreamCount -ge 2)
     {
+        # A stream summary an interrupted earlier run left
+        # (.rda-stream-<N>-summary.json) would be read as this run's when the
+        # new stream ends without writing one. Every one this run uses is
+        # removed here, before the sign-in snapshot is written and before any
+        # stream starts; one that cannot be removed stops the run here, before
+        # it collects anything (exit 1).
+        for ($S = 0; $S -lt $StreamCount; $S++)
+        {
+            $StaleSummary = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+            if (Test-Path -LiteralPath $StaleSummary -PathType Leaf)
+            {
+                try { Remove-Item -LiteralPath $StaleSummary -Force -ErrorAction Stop }
+                catch
+                {
+                    Write-Host ("ERROR: Could not remove the stream summary {0} an earlier run left: {1}. Remove it, then run again. Nothing was collected (exit 1)." -f $StaleSummary, $_.Exception.Message) -ForegroundColor Red
+                    Exit-Wrapper -Code 1
+                }
+            }
+        }
 
         # Snapshot the parent's Az context to a shared file so each stream can
         # Import-AzContext without prompting. Save-AzContext writes a JSON file
@@ -1738,18 +1757,6 @@ else
                 $SliceNames = @($SliceList | ForEach-Object { $_.Name })
 
                 $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
-                # A summary an interrupted earlier run left under this name would
-                # be read as this run's, so it is removed before the stream starts;
-                # one that cannot be removed stops the run before any stream.
-                if (Test-Path -LiteralPath $SummaryPath -PathType Leaf)
-                {
-                    try { Remove-Item -LiteralPath $SummaryPath -Force -ErrorAction Stop }
-                    catch
-                    {
-                        Write-Host ("ERROR: Could not remove the stream summary {0} an earlier run left: {1}. Remove it, then run again. Nothing was collected (exit 1)." -f $SummaryPath, $_.Exception.Message) -ForegroundColor Red
-                        Exit-Wrapper -Code 1
-                    }
-                }
                 $FailuresPath = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $S)
 
                 $StreamSummaries += [pscustomobject]@{
@@ -2408,8 +2415,9 @@ if ($FailedSubscriptions.Count -eq 0 -and $RetryOwedCount -eq 0 -and $NotCollect
 {
     try
     {
-        Remove-Item -LiteralPath $ResumeStateFile -Force
-        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        Remove-Item -LiteralPath $ResumeStateFile -Force -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $ResumeStateFile)) { Write-Host "Resume state cleared (clean run)." -ForegroundColor Green }
+        else { Write-Host ("WARNING: Could not remove resume state file {0}: it is still there after the removal." -f $ResumeStateFile) -ForegroundColor Yellow }
     }
     catch
     {

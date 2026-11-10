@@ -580,6 +580,9 @@ function Save-CompletedSubscriptionIds
     }
     try
     {
+        # Every error stops here: a write error of Set-Content (a full disk)
+        # does not stop by default, and must not reach the move below.
+        $ErrorActionPreference = 'Stop'
         # Atomic write: serialize to a sibling temp file, then swap it into place
         # with File.Move(overwrite). A move within the same volume is a rename,
         # which is atomic - so a crash / SIGKILL / disk-full DURING the write can
@@ -590,8 +593,7 @@ function Save-CompletedSubscriptionIds
         # a large tenant / Cloud Shell run that gets killed). The temp file shares
         # the target directory so the move stays on the same volume.
         $TmpPath = "$Path.tmp"
-        # -ErrorAction Stop: a write error (a full disk) must not reach the move.
-        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8 -ErrorAction Stop
+        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
     }
     catch

@@ -2182,8 +2182,6 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-# (Test-Path -Path, as on main: PR #62 rewrites this line. A folder whose path
-# holds [ or ] is stopped at the start once sync/pr-63's check is in.)
 if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try

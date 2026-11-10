@@ -41,10 +41,10 @@ function Get-RdaAzAccountsInstallCommand
 #   LoadedTooOld - an older Az.Accounts is already loaded in this session.
 #                  It cannot be replaced in a running session (its assemblies
 #                  stay loaded), so only a new session gets past it.
-#   SubModulePinned - Az.Accounts is fine, but the copy of a -SubModule
-#                  module that loads (or is loaded) pins an Az.Accounts older
-#                  than the minimum in its manifest, so loading it would load
-#                  that older copy.
+#   SubModulePinned - Az.Accounts is fine, but a copy of a -SubModule
+#                  module that is loaded, or that a new session loads, pins
+#                  an Az.Accounts older than the minimum in its manifest, so
+#                  loading it would load that older copy.
 # Messages holds the lines to print when Status is not Ok: the found version,
 # the needed version and the command that fixes it. Running that command (and,
 # for LoadedTooOld, starting a new session) makes the next check pass, so a
@@ -90,23 +90,10 @@ function Test-RdaAzAccountsVersion
             $Messages += 'Install a supported version first:'
             $Messages += ('  ' + $InstallCommand)
         }
-        # The submodules whose manifest pins an older Az.Accounts: the loaded
-        # copies, and also the copy a plain Import-Module takes in the new
-        # session, where nothing is loaded (a loaded copy can hide a pinning
-        # one found first on disk). PowerShell loads that older Az.Accounts
-        # for them in every new session, so the new session alone would stop
-        # again.
-        $Pinning = @(foreach ($Name in @($SubModule | Where-Object { $_ -and $_ -ne 'Az.Accounts' }))
-            {
-                $Copies = @(@(Get-RdaModuleCopyToLoad -Name $Name) + @(Get-RdaModuleCopyToLoad -Name $Name -OnDisk) |
-                        Where-Object { $_ } |
-                        Sort-Object -Property { [string]$_.ModuleBase } -Unique)
-                foreach ($Copy in $Copies)
-                {
-                    $Pin = Get-RdaAzAccountsPin -Module $Copy -Minimum $Required
-                    if ($Pin) { [pscustomobject]@{ Name = [string]$Copy.Name; Version = [version]$Copy.Version; Accounts = $Pin } }
-                }
-            })
+        # The submodules whose manifest pins an older Az.Accounts.
+        # PowerShell loads that older Az.Accounts for them in every new
+        # session, so the new session alone would stop again.
+        $Pinning = @(Get-RdaAzAccountsPinning -SubModule $SubModule -Minimum $Required)
         $Messages += @(Get-RdaAzAccountsPinMessage -Pinning $Pinning)
         $Messages += 'Then open a new PowerShell session and run again.'
         $Messages += 'If your PowerShell profile loads Az.Accounts, start the new session with: pwsh -NoProfile'
@@ -129,18 +116,10 @@ function Test-RdaAzAccountsVersion
     }
     else
     {
-        # Az.Accounts is fine. The copy of each submodule that a plain
-        # Import-Module takes (the one loaded, or else the highest version in
-        # the first PSModulePath folder that holds it) must not pin an older
-        # one, or loading it would stop every subscription's run.
-        $Pinning = @(foreach ($Name in @($SubModule | Where-Object { $_ -and $_ -ne 'Az.Accounts' }))
-            {
-                foreach ($Copy in @(Get-RdaModuleCopyToLoad -Name $Name))
-                {
-                    $Pin = Get-RdaAzAccountsPin -Module $Copy -Minimum $Required
-                    if ($Pin) { [pscustomobject]@{ Name = [string]$Copy.Name; Version = [version]$Copy.Version; Accounts = $Pin } }
-                }
-            })
+        # Az.Accounts is fine. No copy of a submodule that this session or a
+        # new one (a stream worker, the next run) loads may pin an older one,
+        # or loading it would stop every subscription's run.
+        $Pinning = @(Get-RdaAzAccountsPinning -SubModule $SubModule -Minimum $Required)
         if ($Pinning.Count -gt 0)
         {
             $Status = 'SubModulePinned'
@@ -190,6 +169,32 @@ function Get-RdaAzAccountsPin
         }
     }
     return $null
+}
+
+# The copies of the -SubModule modules whose manifest pins an Az.Accounts
+# older than -Minimum, as Name, Version and Accounts (the pinned version).
+# Each module's copies are the ones loaded in this session and the one a new
+# session, where nothing is loaded, takes: a stream worker is its own process,
+# and so is the next run, so a loaded copy that is fine can hide a pinning one
+# found first on disk. Every branch of Test-RdaAzAccountsVersion uses this, so
+# none looks at one copy only.
+function Get-RdaAzAccountsPinning
+{
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param([string[]]$SubModule = @(), [version]$Minimum)
+
+    return @(foreach ($Name in @($SubModule | Where-Object { $_ -and $_ -ne 'Az.Accounts' }))
+        {
+            $Copies = @(@(Get-RdaModuleCopyToLoad -Name $Name) + @(Get-RdaModuleCopyToLoad -Name $Name -OnDisk) |
+                    Where-Object { $_ } |
+                    Sort-Object -Property { [string]$_.ModuleBase } -Unique)
+            foreach ($Copy in $Copies)
+            {
+                $Pin = Get-RdaAzAccountsPin -Module $Copy -Minimum $Minimum
+                if ($Pin) { [pscustomobject]@{ Name = [string]$Copy.Name; Version = [version]$Copy.Version; Accounts = $Pin } }
+            }
+        })
 }
 
 # The copies of a module a plain Import-Module -Name uses: the loaded ones

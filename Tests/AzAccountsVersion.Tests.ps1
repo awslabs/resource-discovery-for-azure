@@ -537,7 +537,7 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         }
     }
 
-    It '<Status>: with a pinning submodule, the advice names it and its update comes first, then the Az.Accounts step, then "Then run again."' -ForEach @(
+    It '<Status>: with a pinning submodule, the advice names it and its update comes first, then the Az.Accounts step, then "Then run again.", and only after that how to remove an old copy if it stops again' -ForEach @(
         @{ Status = 'Missing'; Accounts = @(); Step = 'Then install Az.Accounts:' }
         @{ Status = 'TooOld'; Accounts = @('5.5.3'); Step = 'Then update Az.Accounts:' }
     ) {
@@ -557,9 +557,29 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         $SubCommand | Should -Be ($SubStep + 1) -Because $Stop.Text
         $AccountsStep | Should -BeGreaterThan $SubCommand -Because $Stop.Text
         $AccountsCommand | Should -Be ($AccountsStep + 1) -Because $Stop.Text
-        $Lines[-1] | Should -Be 'Then run again.' -Because $Stop.Text
-        $AccountsCommand | Should -Be ($Lines.Count - 2) -Because $Stop.Text
+        $Lines[$AccountsCommand + 1] | Should -Be 'Then run again.' -Because $Stop.Text
+        # What to do when a re-run stops again comes after the last step, and
+        # last; it is not between the two install steps.
+        $Retry = & $Index 'If this stops again with the same Az.Compute 1.0.0*'
+        $Retry | Should -Be ($AccountsCommand + 2) -Because $Stop.Text
+        $Retry | Should -Be ($Lines.Count - 1) -Because $Stop.Text
         $Stop.Text | Should -Not -Match '(?m)^(Install|Update) it\b' -Because 'each step names its module'
+    }
+
+    It 'SubModulePinned: how to remove an old copy if it stops again comes after "Then run again.", and last' {
+        $Root = Join-Path $script:PinDir 'order-pinned'
+        New-PinModule -Root $Root -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $Root -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($Root) -CheckOnly
+        $Stop.Status | Should -Be 'SubModulePinned' -Because $Stop.Text
+        $Lines = @($Stop.Text -split "`n")
+        $Index = { param([string]$Like) [array]::FindIndex([string[]]$Lines, [Predicate[string]] { param($L) $L -like $Like }) }
+        $SubCommand = & $Index '  Install-Module -Name Az.Compute *'
+        $Lines[$SubCommand + 1] | Should -Be 'Then run again.' -Because $Stop.Text
+        $Retry = & $Index 'If this stops again with the same Az.Compute 1.0.0*'
+        $Retry | Should -Be ($SubCommand + 2) -Because $Stop.Text
+        $Retry | Should -Be ($Lines.Count - 1) -Because $Stop.Text
     }
 
     It 'LoadedTooOld with no supported Az.Accounts installed and a pinning submodule: the submodule update comes first, then the Az.Accounts install, each naming its module' {
@@ -578,6 +598,14 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         $AccountsStep | Should -BeGreaterThan $SubStep -Because $Stop.Text
         $AccountsCommand | Should -Be ($AccountsStep + 1) -Because $Stop.Text
         @($Lines | Where-Object { $_ -like '*first:' }).Count | Should -Be 1 -Because 'one step is the first'
+        # What to do when a re-run stops again comes after the last step (the
+        # new-session lines), and last; it is not between the two install
+        # steps.
+        $SignIn = & $Index 'In that new session, sign in first*'
+        $SignIn | Should -BeGreaterThan $AccountsCommand -Because $Stop.Text
+        $Retry = & $Index 'If this stops again with the same Az.Compute 1.0.0*'
+        $Retry | Should -Be ($SignIn + 1) -Because $Stop.Text
+        $Retry | Should -Be ($Lines.Count - 1) -Because $Stop.Text
     }
 }
 

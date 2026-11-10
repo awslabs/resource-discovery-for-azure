@@ -530,6 +530,34 @@ Describe 'New-RunOutputFile: a new file, never one that is there' {
         { New-RunOutputFile -Directory $Dir -Stem 'z' -Extension '.zip' } | Should -Throw 'every name from z.zip to z-100.zip is taken'
         @(Get-ChildItem -LiteralPath $Dir -File).Count | Should -Be 100
     }
+
+    It 'takes -2 when a link whose target is gone holds the name, and leaves the link as it was' -Skip:($IsWindows) {
+        $Dir = Join-Path $TestDrive 'dangling-new'
+        $null = New-Item -ItemType Directory -Path $Dir
+        $Link = Join-Path $Dir 'z.txt'
+        $null = New-Item -ItemType SymbolicLink -Path $Link -Target (Join-Path $Dir 'gone')
+        (New-RunOutputFile -Directory $Dir -Stem 'z' -Extension '.txt') | Should -Be (Join-Path $Dir 'z-2.txt')
+        (Get-Item -LiteralPath $Link -Force).LinkType | Should -Be 'SymbolicLink'
+        Test-Path -LiteralPath (Join-Path $Dir 'gone') | Should -BeFalse
+    }
+}
+
+Describe 'Test-RunOutputNameTaken' {
+    It 'is true for a file and a folder, false for a free name' {
+        $Dir = Join-Path $TestDrive 'taken-check'
+        $null = New-Item -ItemType Directory -Path (Join-Path $Dir 'd') -Force
+        $null = New-Item -ItemType File -Path (Join-Path $Dir 'f')
+        Test-RunOutputNameTaken -Path (Join-Path $Dir 'f') | Should -BeTrue
+        Test-RunOutputNameTaken -Path (Join-Path $Dir 'd') | Should -BeTrue
+        Test-RunOutputNameTaken -Path (Join-Path $Dir 'free') | Should -BeFalse
+    }
+
+    It 'is true for a link whose target is gone' -Skip:($IsWindows) {
+        $Dir = Join-Path $TestDrive 'taken-link'
+        $null = New-Item -ItemType Directory -Path $Dir
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $Dir 'l') -Target (Join-Path $Dir 'gone')
+        Test-RunOutputNameTaken -Path (Join-Path $Dir 'l') | Should -BeTrue
+    }
 }
 
 Describe 'Run-AllSubscriptions.ps1: the transcript and the main summary of the same second' {
@@ -669,6 +697,17 @@ Describe 'Move-RunOutputFile: moves a file to a free name, never over one that i
         Set-Content -LiteralPath $Src -Value 'mine' -NoNewline
         { Move-RunOutputFile -Source $Src -Directory $Dir -Stem 'z' -Extension '.zip' } | Should -Throw 'every name from z.zip to z-100.zip is taken'
         Test-Path -LiteralPath $Src | Should -BeTrue
+    }
+
+    It 'takes -2 when a link whose target is gone holds the name, and does not follow it' -Skip:($IsWindows) {
+        $Dir = Join-Path $TestDrive 'move-dangling'
+        $null = New-Item -ItemType Directory -Path $Dir
+        $null = New-Item -ItemType SymbolicLink -Path (Join-Path $Dir 'z.zip') -Target (Join-Path $Dir 'gone')
+        $Src = Join-Path $Dir '.rda-l.partial'
+        Set-Content -LiteralPath $Src -Value 'mine' -NoNewline
+        Move-RunOutputFile -Source $Src -Directory $Dir -Stem 'z' -Extension '.zip' | Should -Be (Join-Path $Dir 'z-2.zip')
+        Get-Content -LiteralPath (Join-Path $Dir 'z-2.zip') -Raw | Should -Be 'mine'
+        Test-Path -LiteralPath (Join-Path $Dir 'gone') | Should -BeFalse
     }
 }
 

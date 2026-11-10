@@ -1616,6 +1616,30 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip with two rebuilds into one folder at o
         Test-Path -LiteralPath $Out | Should -BeFalse
     }
 
+    It 'refuses the rebuild when the lock file is gone once the lock is taken (it locked a file its holder had just removed)' {
+        $Out = Join-Path $script:TmpRoot 'lock-file-gone'
+        New-Item -ItemType Directory -Path $Out -Force | Out-Null
+        Mock Test-Path -ParameterFilter { $LiteralPath -like '*.rda-rebuild.lock' } -MockWith { $false }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null } | Should -Throw '*another rebuild is writing into*'
+        @(Get-ChildItem -LiteralPath $Out -Directory) | Should -BeNullOrEmpty
+    }
+
+    It 'leaves a folder it made, with no warning, when another rebuild has started to use it by the time it is removed' -Skip:($IsWindows) {
+        $Out = Join-Path $script:TmpRoot 'made-then-taken'
+        $script:W = @()
+        Mock Move-RdaFile { throw 'disk full' }
+        # Right after this rebuild removes its lock file, another rebuild's file
+        # lands in the folder, while an emptiness check would still see it empty.
+        Mock Clear-RdaLeftover -ParameterFilter { $Path -like '*.rda-rebuild.lock' } -MockWith {
+            Remove-Item -LiteralPath $Path -Force
+            Set-Content -LiteralPath (Join-Path (Split-Path $Path -Parent) 'other.lock') -Value '' -NoNewline
+        }
+        Mock Get-ChildItem -ParameterFilter { $LiteralPath -eq $Out -and $Force } -MockWith { @() }
+        { New-RdaAllSubHtmlSummaryFromZip -InputZip $script:InputZip -OutputDirectory $Out -KeepOriginalReports 6>$null 3>&1 | ForEach-Object { $script:W += @($_) } } | Should -Throw '*disk full*'
+        @($script:W | Where-Object { [string]$_ -like '*Could not remove*' }) | Should -BeNullOrEmpty
+        Test-Path -LiteralPath (Join-Path $Out 'other.lock') | Should -BeTrue
+    }
+
     It 'removes a folder it made, lock file included, when the rebuild fails' {
         $Out = Join-Path $script:TmpRoot 'made-then-failed'
         Mock Move-RdaFile { throw 'disk full' }

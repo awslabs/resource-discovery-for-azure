@@ -317,7 +317,23 @@ function Lock-RdaOutputDirectory
 {
     param([Parameter(Mandatory = $true)][string]$Path)
     $LockFile = Join-Path $Path '.rda-rebuild.lock'
-    try { return [System.IO.File]::Open($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None) }
+    try
+    {
+        $Lock = [System.IO.File]::Open($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        # On Linux and macOS the open and the lock are two steps: a caller that
+        # opened the file just before its holder removed it (a failed rebuild
+        # into a folder it made) locks a file no longer in the folder. That is
+        # seen here, and the rebuild is refused as if the lock were held.
+        # shortcut: a third caller that makes a new lock file in the moment
+        # between that removal and this check is not seen; compare the file
+        # ids (inode) if rebuilds into one new folder must be safe in that case.
+        if (-not (Test-Path -LiteralPath $LockFile -PathType Leaf))
+        {
+            $Lock.Dispose()
+            throw [System.IO.IOException]::new('the lock file was removed by the rebuild that held it', 11)
+        }
+        return $Lock
+    }
     catch
     {
         $Inner = $_.Exception
@@ -878,9 +894,10 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
         {
             $LockFile = Join-Path $OutputDirectory '.rda-rebuild.lock'
             # On Linux and macOS the file is removed while the lock is still
-            # held, so no caller can lock it after it is let go and then hold a
-            # removed file: one that opens the path afterwards makes a new one
-            # (and the folder is then not empty, so it stays). Windows does not
+            # held: a caller that opens the path afterwards makes a new one (and
+            # the folder is then not empty, so it stays), and one that opened
+            # it just before locks a removed file, which Lock-RdaOutputDirectory
+            # sees and refuses. Windows does not
             # remove a file that is open, and no caller can open it while it is
             # held, so there it is let go first; if another rebuild takes it in
             # between, the file and the folder stay for that rebuild.
@@ -891,7 +908,9 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
         }
         foreach ($Dir in @($MadeDirs))
         {
-            if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Clear-RdaLeftover -Path $Dir }
+            # Only if empty, in one step that never prompts: a folder another
+            # rebuild has just started to use is left to it.
+            if ($Dir -and [System.IO.Directory]::Exists($Dir)) { try { [System.IO.Directory]::Delete($Dir, $false) } catch { Write-Verbose ('Left the folder {0}: {1}' -f $Dir, $_.Exception.Message) } }
         }
     }
     # One rebuild at a time into this folder, from here on: every check below
@@ -1162,7 +1181,9 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
         # The report folders this call made go first, while the lock is held.
         foreach ($Dir in @($MadeReportDirs))
         {
-            if ($Dir -and (Test-Path -LiteralPath $Dir -PathType Container) -and @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue).Count -eq 0) { Clear-RdaLeftover -Path $Dir }
+            # Only if empty, in one step that never prompts: a folder another
+            # rebuild has just started to use is left to it.
+            if ($Dir -and [System.IO.Directory]::Exists($Dir)) { try { [System.IO.Directory]::Delete($Dir, $false) } catch { Write-Verbose ('Left the folder {0}: {1}' -f $Dir, $_.Exception.Message) } }
         }
         # A -OutputDirectory this call made goes too, with its lock file, so the
         # lock is let go and its file removed first.

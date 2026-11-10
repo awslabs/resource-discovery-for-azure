@@ -93,19 +93,29 @@ $Tag = "[stream-$StreamId]"
 if ($SubscriptionIds.Count -eq 0)
 {
     Write-Stream "no subscriptions in slice; exiting cleanly" 'Yellow'
-    @{
-        RunId                 = $RunId
-        StreamId              = $StreamId
-        Tenant                = $TenantID
-        Status                = 'ok'
-        SubsProcessed         = 0
-        Completed             = @()
-        Failed                = @()
-        ResourceCounts        = @()
-        ConsumptionRecords    = 0
-        ConsumptionFailedSubs = @()
-        MetricsFailedSubs     = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
+    # -ErrorAction Stop: a failed write is otherwise a non-terminating error,
+    # and the worker would end with exit 0 and no summary.
+    try
+    {
+        @{
+            RunId                 = $RunId
+            StreamId              = $StreamId
+            Tenant                = $TenantID
+            Status                = 'ok'
+            SubsProcessed         = 0
+            Completed             = @()
+            Failed                = @()
+            ResourceCounts        = @()
+            ConsumptionRecords    = 0
+            ConsumptionFailedSubs = @()
+            MetricsFailedSubs     = @()
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8 -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Stream ("FATAL: could not write stream summary to {0}: {1}" -f $StreamSummaryPath, $_.Exception.Message) 'Red'
+        exit 1
+    }
     exit 0
 }
 
@@ -145,21 +155,28 @@ catch
         $PriorDone = @((Read-StreamState -Path (Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId))).Completed)
     }
     # Write a minimum stream summary so the parent doesn't think the stream
-    # disappeared silently.
-    @{
-        RunId         = $RunId
-        StreamId      = $StreamId
-        Tenant        = $TenantID
-        Status        = 'failed-to-start'
-        Reason        = $ImportError
-        Completed     = @()
-        Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
-                $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
-                $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
-                [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
-            } | Where-Object { $PriorDone -notcontains $_.Id })
-        ResourceCounts = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
+    # disappeared silently. -ErrorAction Stop, so a failed write is named.
+    try
+    {
+        @{
+            RunId         = $RunId
+            StreamId      = $StreamId
+            Tenant        = $TenantID
+            Status        = 'failed-to-start'
+            Reason        = $ImportError
+            Completed     = @()
+            Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
+                    $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
+                    $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
+                    [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
+                } | Where-Object { $PriorDone -notcontains $_.Id })
+            ResourceCounts = @()
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8 -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Stream ("FATAL: could not write stream summary to {0}: {1}" -f $StreamSummaryPath, $_.Exception.Message) 'Red'
+    }
     exit 1
 }
 
@@ -390,7 +407,9 @@ $Summary = [pscustomobject]@{
 }
 try
 {
-    $Summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
+    # -ErrorAction Stop: a failed write is otherwise a non-terminating error
+    # that skips this catch, and the worker said "complete" with exit 0.
+    $Summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8 -ErrorAction Stop
 }
 catch
 {

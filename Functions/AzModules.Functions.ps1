@@ -239,15 +239,28 @@ function Get-RdaModuleCopyToLoad
     }
     $Copies = @(Get-Module -Name $Name -ListAvailable -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Version -and $_.ModuleBase })
     if ($Copies.Count -eq 0) { return @() }
+    # PowerShell finds a module only right under a folder
+    # (<folder>/<Name>/<version>, or <folder>/<Name>), so a copy belongs to
+    # the folder above its <Name> folder, not to every folder its path
+    # starts with: with one module folder inside another, a copy in the
+    # inner one is not loaded from the outer one.
+    $Placed = @(foreach ($Copy in $Copies)
+        {
+            $NameFolder = [System.IO.Path]::TrimEndingDirectorySeparator([string]$Copy.ModuleBase)
+            if (-not [string]::Equals([System.IO.Path]::GetFileName($NameFolder), [string]$Copy.Name, [System.StringComparison]::OrdinalIgnoreCase))
+            {
+                $NameFolder = [System.IO.Path]::GetDirectoryName($NameFolder)
+            }
+            [pscustomobject]@{ Copy = $Copy; Root = $(if ($NameFolder) { [string][System.IO.Path]::GetDirectoryName($NameFolder) } else { '' }) }
+        })
     # PowerShell finds a relative folder (or one with '..') from the current
     # location, and ModuleBase is the full path, so match on the full path.
     $Base = (Get-Location -PSProvider FileSystem).ProviderPath
     foreach ($Folder in @($env:PSModulePath -split [System.IO.Path]::PathSeparator | Where-Object { $_ }))
     {
-        try { $Full = [System.IO.Path]::GetFullPath($Folder, $Base) }
+        try { $Full = [System.IO.Path]::TrimEndingDirectorySeparator([System.IO.Path]::GetFullPath($Folder, $Base)) }
         catch { continue }
-        $Prefix = $Full.TrimEnd('/', '\') + [System.IO.Path]::DirectorySeparatorChar
-        $Here = @($Copies | Where-Object { ([string]$_.ModuleBase).StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) })
+        $Here = @($Placed | Where-Object { [string]::Equals($_.Root, $Full, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.Copy })
         if ($Here.Count -gt 0) { return @($Here | Sort-Object -Property { [version]$_.Version } -Descending | Select-Object -First 1) }
     }
     return @($Copies | Sort-Object -Property { [version]$_.Version } -Descending | Select-Object -First 1)

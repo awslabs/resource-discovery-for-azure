@@ -1574,14 +1574,47 @@ else
             $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
             $AllCompletedFromStreams = @()
             $AllFailedFromStreams = @()
+            # As at the start: a file that cannot be opened stops the run,
+            # before the stream resume state files are merged and before any
+            # of them is removed (the finally below still removes the context
+            # snapshot and the jobs). The stream summaries are already
+            # removed, and some of their rows are held nowhere else (a stream
+            # that failed to start, or whose state write failed), so those
+            # rows are first written to the resume state: the next run's
+            # -ResumeFailedOnly retries those failures too. The file that
+            # could not be opened is kept, and the next run's start stops on
+            # it until it can be read.
+            $StreamTexts = [hashtable]::new([System.StringComparer]::Ordinal)
+            $UnopenedStreamFiles = @()
+            foreach ($StreamFile in $AllStreamFiles)
+            {
+                try { $StreamTexts[$StreamFile.FullName] = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop }
+                catch { $UnopenedStreamFiles += [pscustomobject]@{ Path = $StreamFile.FullName; Reason = $_.Exception.Message } }
+            }
+            if ($UnopenedStreamFiles.Count -gt 0)
+            {
+                $SummaryOnly = Select-StreamSummaryOnlyRows -StreamTexts @($StreamTexts.Values) -SummaryCompletedIds $StreamSummaryCompletedIds -SummaryFailed $StreamSummaryFailed
+                $SummarySaved = $false
+                if ($SummaryOnly.CompletedIds.Count -gt 0 -or $SummaryOnly.Failed.Count -gt 0)
+                {
+                    if ($SummaryOnly.CompletedIds.Count -gt 0)
+                    {
+                        $CompletedIds = @($CompletedIds + $SummaryOnly.CompletedIds | Sort-Object -Unique)
+                    }
+                    $SummaryFailedAttempts = @()
+                    foreach ($f in $SummaryOnly.Failed)
+                    {
+                        $SummaryFailedAttempts += @(Add-FailedAttempt -Existing @($FailedAttempts | Where-Object { $_ -and $_.Id -eq $f.Id }) -Id $f.Id -Name $f.Name -Reason $f.Reason)
+                    }
+                    $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $SummaryFailedAttempts -CompletedIds $CompletedIds
+                    $SummarySaved = Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -PassThru
+                }
+                Stop-StreamResumeStateUnopened -Unopened $UnopenedStreamFiles -InventoryRoot $InventoryRoot -SummarySaved:$SummarySaved
+            }
             foreach ($StreamFile in $AllStreamFiles)
             {
                 $PerStreamFile = $StreamFile.FullName
-                # As at the start: a file that cannot be opened stops the run
-                # here, before the resume state is written and before any
-                # stream resume state file is removed (the finally below
-                # still removes the context snapshot and the jobs).
-                $StreamText = Read-StreamResumeStateText -Path $PerStreamFile -InventoryRoot $InventoryRoot -AfterStreams
+                $StreamText = $StreamTexts[$PerStreamFile]
                 try
                 {
                     $Obj = $StreamText | ConvertFrom-Json -ErrorAction Stop

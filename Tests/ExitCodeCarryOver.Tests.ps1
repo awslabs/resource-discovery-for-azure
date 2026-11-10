@@ -1440,6 +1440,47 @@ function Get-UsageAggregates
         $After.ExitCode | Should -Be 0
     }
 
+    It 'two streams: when a stream state file cannot be opened when the streams are done, the failure of a stream that could not start (held only in its summary) is written to the resume state before the stop, so the next -ResumeFailedOnly retries it, and the run after has nothing to retry' {
+        # Stream 1 (Sub C) cannot import the context, so Sub C's failure is
+        # only in stream 1's summary: it writes no stream state file. Stream
+        # 7's state file, holding Sub A's failure, appears while the streams
+        # run and cannot be opened.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubB, $script:SubC) -Streams 2 -ImportFailStream '1' -Stream7LockedDuringRun $script:SubA.Id
+        $Stream7 = Join-Path $Run.Root ('.resume-state-{0}-stream-7.json' -f $script:Tenant)
+        $Run.Console | Should -Match '\[stream-0\] done: Sub B' -Because $Run.Console
+        $Run.ExitCode | Should -Be 1 -Because $Run.Console
+        @([regex]::Matches($Run.Console, [regex]::Escape(('ERROR: The stream resume state file {0} exists but could not be read: ' -f $Stream7)))).Count | Should -Be 1 -Because $Run.Console
+        $Run.Console | Should -Match ([regex]::Escape('and in the resume state, but no consolidated zip was made')) -Because $Run.Console
+        $Run.ZipCount | Should -Be 0 -Because $Run.Console
+        $Run.StateKept | Should -BeTrue -Because 'the rows only a stream summary held are written before the stop'
+        $Run.FailedIds | Should -Be @($script:SubC.Id) -Because 'the failure of the stream that could not start is not lost'
+        Test-Path -LiteralPath $Stream7 -PathType Leaf | Should -BeTrue -Because 'the file that could not be opened is kept'
+
+        # While it still cannot be opened, the next run stops at its start
+        # and writes nothing over the saved failure.
+        $Blocked = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $Blocked.ExitCode | Should -Be 1 -Because $Blocked.Console
+        $Blocked.Console | Should -Not -Match 'Processing subscription' -Because $Blocked.Console
+        $Blocked.FailedIds | Should -Be @($script:SubC.Id) -Because $Blocked.Console
+
+        # Its permissions are fixed. The next run reads it at its start and
+        # retries Sub A and Sub C only, and both work.
+        [System.IO.File]::SetUnixFileMode($Stream7, [System.IO.UnixFileMode]'UserRead, UserWrite')
+        $Retry = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $Retry.Console | Should -Match 'ResumeFailedOnly: filtered to 2 previously-failed subscription' -Because $Retry.Console
+        $Retry.Console | Should -Match '(Processing subscription|done): Sub A' -Because $Retry.Console
+        $Retry.Console | Should -Match '(Processing subscription|done): Sub C' -Because $Retry.Console
+        $Retry.Console | Should -Not -Match '(Processing subscription|done): Sub B' -Because $Retry.Console
+        $Retry.ExitCode | Should -Be 0 -Because $Retry.Console
+        $Retry.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0
+
+        # The run after that has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -ResumeFailedOnly -ReuseHome $Run.Home
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0
+    }
+
     It '<Case>: a stream state file that opens but is not valid JSON is named once in a warning, by its path, saying its records were not read, and is kept' -ForEach @(
         @{ Case = 'sequential'; Streams = 1 }
         @{ Case = 'two streams'; Streams = 2 }

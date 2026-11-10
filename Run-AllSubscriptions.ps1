@@ -791,7 +791,10 @@ if ($Resume -or $ResumeFailedOnly)
         {
             try
             {
-                $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw | ConvertFrom-Json
+                # Stop on any read error, and on an empty file: either one would
+                # otherwise read as a file with no record, and be removed.
+                $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ($null -eq $Obj) { throw 'the file is empty' }
                 if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
                 if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
@@ -1971,7 +1974,9 @@ else
                 $PerStreamFile = $StreamFile.FullName
                 try
                 {
-                    $Obj = Get-Content -LiteralPath $PerStreamFile -Raw | ConvertFrom-Json
+                    # As at the start: a read error or an empty file is unreadable.
+                    $Obj = Get-Content -LiteralPath $PerStreamFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    if ($null -eq $Obj) { throw 'the file is empty' }
                     $MergedStreamFiles += $StreamFile
                     if ($null -ne $Obj.Completed)
                     {
@@ -2123,12 +2128,21 @@ else
 # (before this run, or by its start) holds nothing newer than this run's own
 # records: it is removed, so no later -Resume names it again or folds it in.
 # One this run's own merge put aside holds this run's records and is kept (it
-# is named, with exit 2). One that cannot be removed is named, with the advice
-# to delete it, not to rename it back.
+# is named, with exit 2). All are kept when this run left out a listed
+# subscription (disabled without -IncludeDisabled, or skipped as not readable):
+# a file can hold a failure of one, which a later -Resume would otherwise skip
+# as completed. One that cannot be removed is named, with the advice to delete
+# it, not to rename it back.
 if (-not ($Resume -or $ResumeFailedOnly))
 {
+    $LeftOutOfRun = @($AllSubscriptions | Where-Object { $null -ne $_ -and $RunSubscriptionIds -notcontains [string]$_.Id })
     foreach ($Aside in @($StaleAsideFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
     {
+        if ($LeftOutOfRun.Count -gt 0)
+        {
+            Write-Host ("Kept: {0}, a per-stream resume state file put aside as unreadable. This run left out {1} listed subscription(s), whose failures it may hold, so every -Resume names it until it is fixed and renamed back, or deleted." -f $Aside, $LeftOutOfRun.Count) -ForegroundColor Yellow
+            continue
+        }
         try { Remove-Item -LiteralPath $Aside -Force -ErrorAction Stop }
         catch { Write-Host ("WARNING: Could not remove {0}, a per-stream resume state file put aside as unreadable that this run makes stale: {1}. Delete it; do not rename it back." -f $Aside, $_.Exception.Message) -ForegroundColor Yellow }
     }

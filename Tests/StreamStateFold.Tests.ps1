@@ -143,6 +143,34 @@ Describe 'The per-stream resume state files at the start of a run' {
         Test-Path -LiteralPath $Path | Should -BeTrue -Because 'the file on disk still holds the older entry'
     }
 
+    It 'are kept when the saved retry entry differs only in its time' {
+        $State = Join-Path $script:Root '.resume-state-t.json'
+        $Path = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'same'; Attempts = 2 })
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'same'; Attempts = 2 }) -Reports @()
+        Mock Save-CompletedSubscriptionIds { }
+        Mock Exit-Wrapper { throw ('Exit-Wrapper ' + $Code) }
+        { script:Invoke-Fold -Root $script:Root -Resume $true } | Should -Throw 'Exit-Wrapper 1'
+        Test-Path -LiteralPath $Path | Should -BeTrue -Because 'the file on disk holds the older time'
+    }
+
+    It 'read back a retry entry whole: one that differs only in its name or the case of its reason is not saved, the same one read back is' {
+        $State = Join-Path $script:Root '.resume-state-t.json'
+        $Entry = [pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = (Get-Date '2026-02-01T00:00:00Z').ToString('o'); Reason = 'Same'; Attempts = 2 }
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @() -FailedAttempts @($Entry) -Reports @()
+        Test-ResumeStateSaved -Path $State -Tenant 't' -Ids @() -FailedAttempts @($Entry) -Reports @() | Should -BeTrue
+        Test-ResumeStateSaved -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X new'; LastFailedAt = $Entry.LastFailedAt; Reason = 'Same'; Attempts = 2 }) -Reports @() | Should -BeFalse
+        Test-ResumeStateSaved -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = $Entry.LastFailedAt; Reason = 'same'; Attempts = 2 }) -Reports @() | Should -BeFalse
+    }
+
+    It 'put an empty file aside on -Resume, not read it as a file with no record and remove it' {
+        $Empty = Join-Path $script:Root '.resume-state-t-stream-6.json'
+        New-Item -ItemType File -Path $Empty -Force | Out-Null
+        $R = script:Invoke-Fold -Root $script:Root -Resume $true
+        Test-Path -LiteralPath $Empty | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-6.json.unreadable-*').Count | Should -Be 1
+        @($R.Unreadable).Count | Should -Be 1
+    }
+
     It 'end, in a run without -Resume, the older completion of a subscription they list as failed before they are removed' {
         $State = Join-Path $script:Root '.resume-state-t.json'
         Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @() -Reports @()
@@ -253,6 +281,16 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
         $Entry.Count | Should -Be 1 -Because 'otherwise -ResumeFailedOnly finds nothing to retry'
         $Entry[0].Name | Should -Be 'Sub B'
         $Entry[0].Reason | Should -Be 'stand-in failure'
+    }
+
+    It 'puts an empty stream file aside, so the subscription the summary lists as failed is on the retry list' {
+        $Empty = Join-Path $script:Root '.resume-state-t-stream-0.json'
+        New-Item -ItemType File -Path $Empty -Force | Out-Null
+        $UnreadableStreamFiles = @()
+        $LeftStreamFiles = @()
+        $Unread = @(& { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @(); $UnreadableStreamFiles } 6>$null)
+        @($Unread | Where-Object { $_ -like '*.resume-state-t-stream-0.json.unreadable-*' }).Count | Should -Be 1
+        @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ -and $_.Id -eq 'sub-b' }).Count | Should -Be 1
     }
 
     It 'counts a failure the stream''s own file recorded once, not again from the summary' {
@@ -464,6 +502,12 @@ Describe 'A per-stream file an earlier run put aside as unreadable' {
         Test-Path -LiteralPath $Aside | Should -BeFalse
         Test-Path -LiteralPath $OwnAside | Should -BeTrue -Because 'the file this run put aside in its own merge is named with exit 2, to be fixed and renamed back'
         Remove-Item -LiteralPath $OwnAside -Force
+        # A run that left out a listed subscription keeps the file: it may hold that one's failure.
+        Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
+        $Out = @(& { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = @($Aside); $AllSubscriptions = @([pscustomobject]@{ Id = 'sub-a' }, [pscustomobject]@{ Id = 'sub-off' }); $RunSubscriptionIds = @('sub-a'); $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles, $AllSubscriptions, $RunSubscriptionIds; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>&1 | ForEach-Object { [string]$_ })
+        Test-Path -LiteralPath $Aside | Should -BeTrue
+        @($Out | Where-Object { $_ -like ('Kept: {0}, *left out 1 listed subscription(s)*' -f $Aside) }).Count | Should -Be 1
+        Remove-Item -LiteralPath $Aside -Force
         (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
     }
 }

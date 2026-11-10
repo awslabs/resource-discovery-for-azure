@@ -848,13 +848,10 @@ Describe 'A subscription past the retry limit that is no longer listed' {
     }
     BeforeEach { script:New-Case }
 
-    # A run without -Resume reads and writes the same retry list, so it drops the
-    # entry of a subscription a complete listing no longer has; else that entry
-    # would end every such run with exit 2 and advise the same run again.
     # A -ResumeFailedOnly run that drops the last gone entry while the state can
     # be neither written nor removed leaves the entry for the next run: exit 2
     # with the way out, not a success that repeats.
-    It 'drops the last gone entry while the state can be neither written nor removed: exit 2 and the way out; the next run that can write ends it' {
+    It 'drops the last gone entry while the state can be neither written nor removed: exit 2 and the way out, on this run and the next' {
         $Global:RdaRlFailIds = @('sub-x')
         $null = script:Invoke-Run -Subs @($script:A, $script:B, $script:X)
         $Global:RdaRlFailIds = @()
@@ -879,6 +876,9 @@ Describe 'A subscription past the retry limit that is no longer listed' {
         Test-Path -LiteralPath $script:State | Should -BeFalse
     }
 
+    # A run without -Resume reads and writes the same retry list, so it drops the
+    # entry of a subscription a complete listing no longer has; else that entry
+    # would end every such run with exit 2 and advise the same run again.
     It 'is dropped by the next run without -Resume, which exits 0, and the run after it starts clean (<Streams> stream(s))' -ForEach @(@{ Streams = 1 }, @{ Streams = 2 }) {
         $Global:RdaRlFailIds = @('sub-x')
         $Subs = @($script:A, $script:B, $script:X)

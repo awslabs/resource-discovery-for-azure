@@ -1738,6 +1738,18 @@ else
                 $SliceNames = @($SliceList | ForEach-Object { $_.Name })
 
                 $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+                # A summary an interrupted earlier run left under this name would
+                # be read as this run's, so it is removed before the stream starts;
+                # one that cannot be removed stops the run before any stream.
+                if (Test-Path -LiteralPath $SummaryPath -PathType Leaf)
+                {
+                    try { Remove-Item -LiteralPath $SummaryPath -Force -ErrorAction Stop }
+                    catch
+                    {
+                        Write-Host ("ERROR: Could not remove the stream summary {0} an earlier run left: {1}. Remove it, then run again. Nothing was collected (exit 1)." -f $SummaryPath, $_.Exception.Message) -ForegroundColor Red
+                        Exit-Wrapper -Code 1
+                    }
+                }
                 $FailuresPath = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $S)
 
                 $StreamSummaries += [pscustomobject]@{
@@ -1961,9 +1973,9 @@ else
             # runs even on failure paths.
             foreach ($S in $StreamSummaries)
             {
-                if (Test-Path -Path $S.SummaryPath)
+                if (Test-Path -LiteralPath $S.SummaryPath)
                 {
-                    try { Remove-Item -Path $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
+                    try { Remove-Item -LiteralPath $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
                 }
             }
 
@@ -2852,7 +2864,7 @@ if (@($UncarriedSkipped).Count -gt 0)
 # warned), with no later save that reached the disk, can leave the file listing
 # a subscription this run failed as completed, so a -Resume run would skip it
 # and carry its old report: say so, and how to run instead, while the file is
-# there. A failed subscription already sets exit 2.
+# there; the run then ends with exit 2 (see the exit code below).
 if ($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
 {
     Write-Host ""
@@ -2873,7 +2885,7 @@ if ($WrapperTranscriptStarted)
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
-$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing ((@($UncarriedSkipped).Count -gt 0) -or (@($RetryLimitedOwed).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0) -or (@($LeftStreamFiles).Count -gt 0) -or (@($RetryOwedNotInRun).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
+$WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing (($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)) -or (@($UncarriedSkipped).Count -gt 0) -or (@($RetryLimitedOwed).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0) -or (@($LeftStreamFiles).Count -gt 0) -or (@($RetryOwedNotInRun).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)
 if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode

@@ -743,7 +743,7 @@ function Get-StreamResumeStateFiles
         [Parameter(Mandatory = $true)][string]$InventoryRoot,
         [Parameter(Mandatory = $true)][string]$Tenant
     )
-    return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+    return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
 }
 
 # Reconcile FailedAttempts entries gathered from multiple streams (plus any
@@ -1200,10 +1200,10 @@ function Write-Stream
 function Read-StreamState
 {
     param([string]$Path)
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @(); Reports = @() } }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @(); Reports = @() } }
     try
     {
-        $Obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $Obj = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
@@ -1231,7 +1231,12 @@ function Write-StreamState
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
             Reports        = @($Reports)
-        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$Path.tmp" -Encoding utf8
+        # Swapped into place in one rename, as Save-CompletedSubscriptionIds
+        # does: a stream stopped during the write (Ctrl+C, a killed process)
+        # leaves the file it had, never one cut short, which the next run could
+        # not read and would put aside with the failures it holds.
+        [System.IO.File]::Move("$Path.tmp", $Path, $true)
     }
     catch
     {

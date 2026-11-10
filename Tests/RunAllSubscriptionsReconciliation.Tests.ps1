@@ -953,4 +953,93 @@ Describe 'The resume state in a folder whose path holds [ or ]' {
         Test-Path -LiteralPath $Path -PathType Leaf | Should -BeTrue
         @((Read-StreamState -Path $Path).Completed) | Should -Be @('sub-a')
     }
+
+    It 'finds the stream resume state files there' {
+        $Tenant = 'tenant-brackets'
+        foreach ($N in 0..1) { [System.IO.File]::WriteAllText((Join-Path $script:BracketDir (".resume-state-$Tenant-stream-$N.json")), '{}') }
+        $Files = @(Get-StreamResumeStateFiles -InventoryRoot $script:BracketDir -Tenant $Tenant)
+        $Files.Count | Should -Be 2
+    }
+}
+
+Describe 'Add-ItemsToZipArchive adds to a zip as Compress-Archive -Update does' {
+    BeforeAll {
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+        # A run's outer zip (one inner zip in it) and the run-level extras the
+        # wrapper folds in: two files, a folder with a file in a sub folder
+        # and an empty sub folder, and an empty folder (which, as in
+        # Compress-Archive, adds nothing). Built under $Parent.
+        function script:New-ZipCase
+        {
+            param([string]$Parent)
+            $Stage = Join-Path $Parent 'stage'
+            $null = [System.IO.Directory]::CreateDirectory((Join-Path $Stage 'HTML_1/deep'))
+            $null = [System.IO.Directory]::CreateDirectory((Join-Path $Stage 'HTML_1/blank'))
+            $null = [System.IO.Directory]::CreateDirectory((Join-Path $Stage 'Empty_1'))
+            [System.IO.File]::WriteAllText((Join-Path $Stage 'RunSummary.log'), 'run summary')
+            [System.IO.File]::WriteAllText((Join-Path $Stage 'MainSummary.html'), '<html>main</html>')
+            [System.IO.File]::WriteAllText((Join-Path $Stage 'HTML_1/deep/report.html'), '<html>sub</html>')
+            $Inner = Join-Path $Parent 'ResourcesReport_1.zip'
+            [System.IO.File]::WriteAllText((Join-Path $Parent 'Inventory_1.json'), '{}')
+            $Zip = [System.IO.Compression.ZipFile]::Open($Inner, [System.IO.Compression.ZipArchiveMode]::Create)
+            try { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Zip, (Join-Path $Parent 'Inventory_1.json'), 'Inventory_1.json') } finally { $Zip.Dispose() }
+            $Outer = Join-Path $Parent 'AllSubscriptions_ResourcesReport_1.zip'
+            $Zip = [System.IO.Compression.ZipFile]::Open($Outer, [System.IO.Compression.ZipArchiveMode]::Create)
+            try
+            {
+                $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Zip, $Inner, 'ResourcesReport_1.zip')
+                # An entry the fold replaces.
+                $Old = $Zip.CreateEntry('runsummary.LOG')
+                $Writer = [System.IO.StreamWriter]::new($Old.Open())
+                try { $Writer.Write('old') } finally { $Writer.Dispose() }
+            }
+            finally { $Zip.Dispose() }
+            return [pscustomobject]@{ Outer = $Outer; Items = @(Get-ChildItem -LiteralPath $Stage -Force | ForEach-Object { $_.FullName }) }
+        }
+        # Each entry of a zip: its name and its text.
+        function script:Get-ZipView
+        {
+            param([string]$Path)
+            $Zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+            try
+            {
+                $View = @()
+                foreach ($Entry in @($Zip.Entries | Sort-Object FullName))
+                {
+                    $Reader = [System.IO.StreamReader]::new($Entry.Open())
+                    try { $View += ('{0}={1}' -f $Entry.FullName, $(if ($Entry.FullName -like '*.zip') { $Entry.Length } else { $Reader.ReadToEnd() })) }
+                    finally { $Reader.Dispose() }
+                }
+                return $View
+            }
+            finally { $Zip.Dispose() }
+        }
+    }
+
+    It 'gives the same entries and contents as Compress-Archive -Update' {
+        $Root = Join-Path $script:TestRoot ('zip-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $A = New-ZipCase -Parent (Join-Path $Root 'a')
+        Compress-Archive -LiteralPath $A.Items -DestinationPath $A.Outer -Update
+        $B = New-ZipCase -Parent (Join-Path $Root 'b')
+        Add-ItemsToZipArchive -ZipPath $B.Outer -Items $B.Items
+        $Expected = Get-ZipView -Path $A.Outer
+        $Expected | Should -Contain 'RunSummary.log=run summary'
+        $Expected | Should -Contain 'HTML_1/deep/report.html=<html>sub</html>'
+        $Expected | Should -Contain 'HTML_1/blank/='
+        Get-ZipView -Path $B.Outer | Should -Be $Expected
+    }
+
+    It 'adds them to a zip in a folder whose path holds [ and ]' {
+        $Root = Join-Path $script:TestRoot ('zip[1]-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $Case = New-ZipCase -Parent $Root
+        Add-ItemsToZipArchive -ZipPath $Case.Outer -Items $Case.Items
+        $View = Get-ZipView -Path $Case.Outer
+        $View | Should -Contain 'RunSummary.log=run summary'
+        $View | Should -Contain 'MainSummary.html=<html>main</html>'
+        $View | Should -Contain 'HTML_1/deep/report.html=<html>sub</html>'
+        $View | Should -Contain 'HTML_1/blank/='
+        @($View | Where-Object { $_ -like 'ResourcesReport_1.zip=*' }).Count | Should -Be 1
+        @($View | Where-Object { $_ -like '*=old' }).Count | Should -Be 0
+        @($View | Where-Object { $_ -like 'Empty_1*' }).Count | Should -Be 0
+    }
 }

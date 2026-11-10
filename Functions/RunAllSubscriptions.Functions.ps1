@@ -580,6 +580,31 @@ function Write-StreamSummaryUnsaved
     Write-Host ('  -ResumeFailedOnly does not retry them, {0} without -Resume and -ResumeFailedOnly: a plain run runs every subscription, these too. Then remove the kept stream summaries.' -f $Then) -ForegroundColor Yellow
 }
 
+# Warns of the stream resume state files a parallel run whose resume state
+# could not be written keeps (-StreamFiles), and of the one it wrote for the
+# rows only the stream summaries held (-SummaryStateFile). Only the files
+# still there are named: on a clean run the clean-up at the end removes the
+# ones it read, so the caller then warns after that clean-up, or before a
+# stop that comes first. The console can be gone, so it never throws.
+function Write-StreamStateKept
+{
+    param([string[]]$StreamFiles = @(), [string]$SummaryStateFile = '', [string]$InventoryRoot = '')
+
+    try
+    {
+        $Kept = @($StreamFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
+        if ($Kept.Count -gt 0)
+        {
+            Write-Host ("WARNING: kept {0} stream resume state file(s) in {1}, as the resume state could not be written; the next run reads them at its start." -f $Kept.Count, $InventoryRoot) -ForegroundColor Yellow
+        }
+        if ($SummaryStateFile -and (Test-Path -LiteralPath $SummaryStateFile -PathType Leaf))
+        {
+            Write-Host ("WARNING: the resume state could not be written, so the records held only in the stream summaries were written to the stream resume state file {0}; the next run reads it at its start." -f $SummaryStateFile) -ForegroundColor Yellow
+        }
+    }
+    catch { $null = $_ }
+}
+
 # When the resume state cannot be written, the rows only the stream
 # summaries hold (Select-StreamSummaryOnlyRows: a stream that failed to
 # start, or whose state write failed) are in no file. They are written here

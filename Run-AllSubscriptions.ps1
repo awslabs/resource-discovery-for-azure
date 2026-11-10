@@ -646,6 +646,11 @@ $ReadStreamStateFiles = @()
 # warned about, so a parallel run that tries again in its merge warns once.
 # (One it cannot open stops the run: see Read-StreamResumeStateText.)
 $UnreadStreamStateFiles = @()
+# The stream resume state files a clean parallel run kept, as its resume
+# state could not be written ({ StreamFiles; SummaryStateFile }): the
+# warning that names them waits for the clean-run clean-up, which removes
+# the ones this run read (see Write-StreamStateKept).
+$DeferredStreamStateKept = $null
 $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
 if ($StrandedStreamFiles.Count -gt 0)
 {
@@ -1712,7 +1717,15 @@ else
                 $SummaryOnlyFailedIds = @($SummaryOnly.Failed | ForEach-Object { [string]$_.Id })
                 $SummaryOnlyAttempts = @($FailedAttempts | Where-Object { $_ -and $SummaryOnlyFailedIds -contains [string]$_.Id })
                 $SummaryStateFile = Save-StreamSummaryOnlyState -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $RunId -CompletedIds $SummaryOnly.CompletedIds -FailedAttempts $SummaryOnlyAttempts
-                if (-not $SummaryStateFile)
+                if ($SummaryStateFile)
+                {
+                    # Its rows are this run's, settled in this run's totals,
+                    # as those of the stream resume state files it read: so
+                    # the clean-run clean-up removes it with them, and a
+                    # clean run leaves no record for the next start to read.
+                    $ReadStreamStateFiles += [System.IO.Path]::GetFullPath([string]$SummaryStateFile)
+                }
+                else
                 {
                     $KeepSummaries = $true
                     $Unsaved = @(foreach ($f in $SummaryOnly.Failed) { [pscustomobject]@{ Name = [string]$f.Name; Id = [string]$f.Id; Outcome = 'failed' } })
@@ -1753,15 +1766,22 @@ else
                     try { Remove-Item -LiteralPath $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
                 }
             }
-            elseif ($AllStreamFiles.Count -gt 0)
+            else
             {
-                try { Write-Host ("WARNING: kept {0} stream resume state file(s) in {1}, as the resume state could not be written; the next run reads them at its start." -f $AllStreamFiles.Count, $InventoryRoot) -ForegroundColor Yellow }
-                catch { $null = $_ }
-            }
-            if ($SummaryStateFile)
-            {
-                try { Write-Host ("WARNING: the resume state could not be written, so the records held only in the stream summaries were written to the stream resume state file {0}; the next run reads it at its start." -f $SummaryStateFile) -ForegroundColor Yellow }
-                catch { $null = $_ }
+                # On a clean run (the check of the clean-run clean-up at the
+                # end, whose values no step after this merge changes) that
+                # clean-up removes the files this run read, so the warning
+                # waits for it, or for the stop of the zip check that comes
+                # before it, and names only the files still there.
+                $KeptStreamState = [pscustomobject]@{ StreamFiles = @($AllStreamFiles | ForEach-Object { $_.FullName }); SummaryStateFile = [string]$SummaryStateFile }
+                if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0 -and $FailedAttempts.Count -eq 0)
+                {
+                    $DeferredStreamStateKept = $KeptStreamState
+                }
+                else
+                {
+                    Write-StreamStateKept -StreamFiles $KeptStreamState.StreamFiles -SummaryStateFile $KeptStreamState.SummaryStateFile -InventoryRoot $InventoryRoot
+                }
             }
         }
         finally
@@ -1916,6 +1936,12 @@ if ($ExpectedZipCount -gt 0)
         {
             Write-Host $ExitLine -ForegroundColor Yellow
         }
+        # This stop comes before the clean-run clean-up, so the stream
+        # resume state files a clean run kept all stay.
+        if ($DeferredStreamStateKept)
+        {
+            Write-StreamStateKept -StreamFiles $DeferredStreamStateKept.StreamFiles -SummaryStateFile $DeferredStreamStateKept.SummaryStateFile -InventoryRoot $InventoryRoot
+        }
         Exit-Wrapper -Code 2
     }
     Write-Host ("Per-subscription output verification: OK (each of the {0} successful sub(s) has its zip; {1} zip(s) found)" -f $ExpectedZipCount, $ActualZipCount) -ForegroundColor Green
@@ -2043,6 +2069,12 @@ if ($FailedSubscriptions.Count -eq 0 -and $UnreadableStreamSummaries.Count -eq 0
         try { Remove-Item -LiteralPath $StreamFile.FullName -Force -ErrorAction Stop }
         catch { Write-Host ('WARNING: Could not remove stream resume state file {0}: {1}' -f $StreamFile.FullName, $_) -ForegroundColor Yellow }
     }
+}
+# The stream resume state files a clean parallel run kept that are still
+# there after that clean-up (ones it did not read, or could not remove).
+if ($DeferredStreamStateKept)
+{
+    Write-StreamStateKept -StreamFiles $DeferredStreamStateKept.StreamFiles -SummaryStateFile $DeferredStreamStateKept.SummaryStateFile -InventoryRoot $InventoryRoot
 }
 
 # Final summary

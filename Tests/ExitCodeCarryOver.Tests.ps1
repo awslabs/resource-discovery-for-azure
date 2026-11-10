@@ -412,7 +412,7 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked, [switch]$ResumeRemoveSoftFail)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory, [switch]$Stream7Unparseable, [string[]]$Stream7LockedDuringRun = @(), [switch]$SummaryStateBlocked, [switch]$ResumeRemoveSoftFail, [switch]$BracketTool)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
@@ -558,6 +558,15 @@ function Get-UsageAggregates
             # StandInInventory: the copy of the tool with the stand-in
             # ResourceInventory.ps1.
             $RunTool = if ($StandInInventory) { $script:ToolStandIn } else { $script:Tool }
+            # BracketTool: that copy of the tool under a folder whose name
+            # holds [ and ] ([client]), as a customer may unpack it.
+            if ($BracketTool)
+            {
+                $BracketParent = Join-Path $CaseDir '[client]'
+                $null = [System.IO.Directory]::CreateDirectory($BracketParent)
+                Copy-Item -LiteralPath $RunTool -Destination (Join-Path $BracketParent 'tool') -Recurse -Force
+                $RunTool = Join-Path $BracketParent 'tool'
+            }
             $RunWrapper = Join-Path $RunTool 'Run-AllSubscriptions.ps1'
             $Scenario = Join-Path $CaseDir 'scenario.json'
             [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; ResumeRemoveSoftFail = [bool]$ResumeRemoveSoftFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail; UnifiedStateOnce = [bool]$UnifiedStateBlocked; SummaryStateFail = [bool]$SummaryStateBlocked } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
@@ -1804,6 +1813,24 @@ function Get-UsageAggregates
         $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams $Streams -ResumeFailedOnly -ReuseHome $Run.Home -StandInInventory
         $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
         $After.ExitCode | Should -Be 0 -Because $After.Console
+    }
+
+    It '<Case>: a copy of the tool in a folder whose name holds [ and ] starts, finds its Az.Accounts version file and makes its report' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
+        # The wrapper and the stream worker load Functions/AzModules.Functions.ps1
+        # from their own folder; a path read as a wildcard pattern finds no
+        # file under [client] and the run stops at its start. The stand-in
+        # ResourceInventory.ps1 is used: the real one still checks one file
+        # by -Path (another change owns that line).
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams $Streams -StandInInventory -BracketTool
+        $Run.Console | Should -Not -Match 'Required functions file not found' -Because $Run.Console
+        if ($Streams -gt 1) { $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console }
+        $Run.Console | Should -Match 'Per-subscription output verification: OK' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        @($Run.InnerZips).Count | Should -Be 2 -Because $Run.Console
     }
 
     It 'two streams: a home whose path holds [ and ] gives a run with a failed subscription whose stream state files are merged into the resume state and removed' {

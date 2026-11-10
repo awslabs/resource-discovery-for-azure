@@ -311,6 +311,17 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
         [int](@(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ -and $_.Id -eq 'sub-b' })[0].Attempts) | Should -Be 1
     }
 
+    It 'keeps the resume state for the per-stream files it keeps because the state does not hold their records' {
+        $File = Join-Path $script:Root '.resume-state-t-stream-0.json'
+        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = @(); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $File -Encoding utf8
+        Mock Test-ResumeStateSaved { $false }
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        Set-Variable -Name LeftStreamFiles -Value @()
+        $Lines = @(& { . $script:MergeBlock $script:Streams $script:Root 't' $script:State @() @() @(); 'LEFT=' + ($LeftStreamFiles -join ',') } 6>&1 | ForEach-Object { [string]$_ })
+        Test-Path -LiteralPath $File | Should -BeTrue -Because 'it holds records the state does not'
+        @($Lines | Where-Object { $_ -eq ('LEFT=' + $File) }).Count | Should -Be 1 -Because 'so the run keeps the state and is not a clean run'
+    }
+
     It 'records a merged file it cannot remove, so the run keeps the state and ends with exit 2' {
         $File = Join-Path $script:Root '.resume-state-t-stream-0.json'
         [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = @(); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $File -Encoding utf8

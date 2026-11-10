@@ -2038,6 +2038,9 @@ else
             else
             {
                 Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($MergedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow
+                # They keep the resume state too: the run neither clears it nor
+                # calls itself clean while they wait for the next run (exit 2).
+                $LeftStreamFiles += @($MergedStreamFiles | ForEach-Object { $_.FullName })
             }
         }
         finally

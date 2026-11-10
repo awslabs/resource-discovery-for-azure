@@ -206,6 +206,7 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         @'
 param([string]$Functions, [string]$Preload = '')
 . $Functions
+if ($Preload) { Import-Module Az.Accounts -RequiredVersion $Preload -ErrorAction Stop | Out-Null }
 Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor') | ConvertTo-Json -Depth 4
 '@ | Set-Content -LiteralPath $script:CheckSession -Encoding utf8
         function script:Invoke-PinSession
@@ -348,6 +349,34 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         finally { Pop-Location }
         $Stop.Status | Should -Be 'SubModulePinned' -Because $Stop.Text
         $Stop.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3'))
+    }
+
+    It 'an older Az.Accounts loaded first: also names an unloaded submodule copy that would load and pins it, so one stop gives all the advice' {
+        # Az.Accounts 5.5.3 is loaded (a profile or an older tool), 5.5.4 is
+        # installed, and the Az.Compute that would load (not loaded yet) asks
+        # for exactly 5.5.3. A new session alone would stop again on that pin.
+        $Root = Join-Path $script:PinDir 'loaded-unloaded-pin'
+        $UserFolder = Join-Path $Root 'user'
+        $SystemFolder = Join-Path $Root 'system'
+        New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version '5.5.3'
+        New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $SystemFolder -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -Preload '5.5.3' -CheckOnly
+        $Stop.Status | Should -Be 'LoadedTooOld' -Because $Stop.Text
+        $Stop.Text | Should -Match 'Az\.Accounts 5\.5\.3 is already loaded'
+        $Stop.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3')) -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Install-Module -Name Az.Compute -Repository PSGallery -Scope CurrentUser -Force'))
+        $Stop.Text | Should -Not -Match 'Install-Module -Name Az\.Accounts' -Because 'a supported Az.Accounts is installed'
+        $Stop.Text | Should -Match 'new PowerShell session'
+
+        # The advice followed: the printed command installs a newer Az.Compute
+        # into the user's folder, then a new session without the old load.
+        New-PinModule -Root $UserFolder -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        $Next = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -CheckOnly
+        $Next.Status | Should -Be 'Ok' -Because $Next.Text
+        $Run = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder)
+        $Run.Status | Should -Be 'Ok' -Because $Run.Text
     }
 
     It 'names a submodule whose manifest caps Az.Accounts below the minimum (MaximumVersion)' {

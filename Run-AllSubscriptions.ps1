@@ -215,6 +215,18 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
     exit $LASTEXITCODE
 }
 
+# A script folder whose path holds a wildcard character ([ ] * ?, the last two
+# allowed in folder names on Linux and macOS) cannot be used: the collector
+# (ResourceInventory.ps1) finds its own files and its Services/*.ps1 with
+# wildcard paths, so it would fail, or load the scripts of another folder the
+# pattern matches. Stopped here, before the Azure CLI or the Az modules are
+# offered or installed and before any file is read or written.
+if ($PSScriptRoot.IndexOfAny([char[]]'[]*?') -ge 0)
+{
+    Write-Host ("ERROR: The script folder {0} has [ ] * or ? in its path, which this tool cannot run from. Move the folder to a path without them and run again." -f $PSScriptRoot) -ForegroundColor Red
+    exit 1
+}
+
 # ---------------------------------------------------------------------------
 # Azure CLI bootstrap. The authentication flow and Resource Graph queries shell
 # out to `az`; without it the run fails at auth with a confusing "'az' is not
@@ -423,16 +435,6 @@ catch
     Write-Host "Repair it, then re-run:" -ForegroundColor Yellow
     Write-Host "  Get-Module Az* -ListAvailable | Uninstall-Module -Force" -ForegroundColor Yellow
     Write-Host "  Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser" -ForegroundColor Yellow
-    exit 1
-}
-
-# A script folder whose path holds [ or ] cannot be used: the collector
-# (ResourceInventory.ps1) finds its own files and its Services/*.ps1 with
-# wildcard paths, so every subscription would fail and land on the retry list.
-# Stopped here, before any resume state is read or written.
-if ($PSScriptRoot.IndexOfAny([char[]]'[]') -ge 0)
-{
-    Write-Host ("ERROR: The script folder {0} has [ or ] in its path, which this tool cannot run from. Move the folder to a path without them and run again." -f $PSScriptRoot) -ForegroundColor Red
     exit 1
 }
 

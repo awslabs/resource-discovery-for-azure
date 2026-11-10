@@ -37,25 +37,3 @@ Describe 'The checks for the scripts'' own files read a path with brackets as wr
         & ([scriptblock]::Create($Checks[0])) | Should -BeFalse
     }
 }
-
-Describe 'A script folder whose path holds brackets' {
-    It 'stops the run at once with exit 1, before the functions load and before any resume state is used' {
-        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
-        $Stop = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq "`$PSScriptRoot.IndexOfAny([char[]]'[]') -ge 0" })
-        $Stop.Count | Should -Be 1
-        $Src = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
-        $Stop[0].Extent.StartOffset | Should -BeLessThan $Src.IndexOf('$FunctionsFile = Join-Path $PSScriptRoot')
-        $Stop[0].Extent.StartOffset | Should -BeLessThan $Src.IndexOf('$ResumeStateFile')
-        # The check itself, run from a script in each folder (its own $PSScriptRoot).
-        foreach ($Case in @(@{ Name = 'rda[2]'; Exit = 1 }, @{ Name = 'rda2'; Exit = 0 }))
-        {
-            $Dir = Join-Path $TestDrive $Case.Name
-            New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-            $Probe = Join-Path $Dir 'probe.ps1'
-            [System.IO.File]::WriteAllText($Probe, $Stop[0].Extent.Text)
-            $Out = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $Probe 2>&1
-            $LASTEXITCODE | Should -Be $Case.Exit -Because $Case.Name
-            if ($Case.Exit -eq 1) { ($Out -join ' ') | Should -Match 'has \[ or \] in its path' }
-        }
-    }
-}

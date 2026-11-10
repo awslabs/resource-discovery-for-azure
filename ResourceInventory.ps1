@@ -596,7 +596,9 @@ Function RunInventorySetup()
                 $SavedDebugPreference = $DebugPreference
                 $DebugPreference = "SilentlyContinue"
                 if ($DeviceLogin.IsPresent) { Write-Log -Message ('Calling Login, using device login.') -Severity 'Info' }
-                else { Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info' }
+                # With no console, Invoke-AzPsUserSignIn stops instead of
+                # opening a browser, so the line is only for a console.
+                elseif (Test-RdaInteractiveSession) { Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info' }
 
                 try { Invoke-AzPsUserSignIn }
                 finally { $DebugPreference = $SavedDebugPreference }

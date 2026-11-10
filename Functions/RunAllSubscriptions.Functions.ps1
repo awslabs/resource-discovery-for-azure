@@ -466,14 +466,37 @@ function Resolve-TenantId
     return $Resolved
 }
 
+# The text of a resume state file that is there. A read that fails (locked,
+# no access) is not a bad file: the file may hold done subscriptions and
+# failures still to retry, and this run's first save would write over them.
+# So the run stops here, with the real reason and the way out, before any
+# write. Once the file can be read (or is moved away), the next run goes on,
+# so this stop never repeats by itself. Without -ErrorAction Stop the failed
+# read is a non-terminating error, the file reads as empty, and the run
+# starts fresh over the saved state.
+function Read-ResumeStateText
+{
+    param([string]$Path)
+
+    try { return Get-Content -Path $Path -Raw -ErrorAction Stop }
+    catch
+    {
+        Write-Host ('ERROR: The resume state file {0} exists but could not be read: {1}' -f $Path, $_.Exception.Message) -ForegroundColor Red
+        Write-Host '  It holds the subscriptions already done and the failures still to retry, so this run stops rather than write over them.' -ForegroundColor Red
+        Write-Host '  Close the program that holds it open, or fix its permissions, then run again. To start fresh instead, move the file away first.' -ForegroundColor Yellow
+        Exit-Wrapper -Code 1
+    }
+}
+
 function Get-CompletedSubscriptionIds
 {
     param([string]$Path, [string]$Tenant)
 
     if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    $Text = Read-ResumeStateText -Path $Path
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = $Text | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant)
         {
             Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $State.TenantID) -ForegroundColor Yellow
@@ -492,6 +515,7 @@ function Get-CompletedSubscriptionIds
 # Read the FailedAttempts list out of the same resume-state file. Returns an
 # array of objects shaped { Id, Name, LastFailedAt, Reason, Attempts }, or an
 # empty array if the file is absent, malformed, or for a different tenant.
+# A file that is there but cannot be read stops the run (Read-ResumeStateText).
 # Backward-compatible: a state file written by an older version of this
 # script (which has CompletedSubscriptionIds but no FailedAttempts key) reads
 # back as empty here, so existing on-disk state never blocks an upgrade.
@@ -500,9 +524,10 @@ function Get-FailedAttempts
     param([string]$Path, [string]$Tenant)
 
     if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    $Text = Read-ResumeStateText -Path $Path
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = $Text | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.FailedAttempts) { return @() }
         return @($State.FailedAttempts)

@@ -613,9 +613,25 @@ function Test-ResumeStateSaved
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return ($WantIds.Count -eq 0 -and $WantFailed.Count -eq 0) }
     $SavedIds = @(Get-CompletedSubscriptionIds -Path $Path -Tenant $Tenant | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
     if (($SavedIds -join "`n") -ne ($WantIds -join "`n")) { return $false }
-    $FailedKey = { param($Entry) '{0}|{1}|{2}' -f [string]$Entry.Id, $(if ($Entry.PSObject.Properties['Attempts']) { [string]$Entry.Attempts } else { '' }), $(if ($Entry.PSObject.Properties['Reason']) { [string]$Entry.Reason } else { '' }) }
-    $SavedFailed = @(Get-FailedAttempts -Path $Path -Tenant $Tenant | Where-Object { $null -ne $_ } | ForEach-Object { & $FailedKey $_ } | Sort-Object)
-    if (($SavedFailed -join "`n") -ne (@($WantFailed | ForEach-Object { & $FailedKey $_ } | Sort-Object) -join "`n")) { return $false }
+    # Each retry entry whole, as JSON (so no field runs into the next): its id,
+    # count, time (as UTC round-trip text: the file reads it back as a date),
+    # reason and name, compared exactly. Merge-FailedAttempts picks the newest
+    # entry by its time, so an entry that differs only there is not saved.
+    $FailedKey = {
+        param($Entry)
+        $Field = { param($Name) if ($Entry.PSObject.Properties[$Name]) { $Entry.$Name } else { $null } }
+        $When = & $Field 'LastFailedAt'
+        if ($When -is [datetime]) { $When = $When.ToUniversalTime().ToString('o') }
+        elseif ($null -ne $When)
+        {
+            $Parsed = [datetime]::MinValue
+            if ([datetime]::TryParse([string]$When, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$Parsed)) { $When = $Parsed.ToUniversalTime().ToString('o') }
+            else { $When = [string]$When }
+        }
+        [ordered]@{ Id = [string](& $Field 'Id'); Attempts = [string](& $Field 'Attempts'); LastFailedAt = $When; Reason = [string](& $Field 'Reason'); Name = [string](& $Field 'Name') } | ConvertTo-Json -Compress
+    }
+    $SavedFailed = @(Get-FailedAttempts -Path $Path -Tenant $Tenant | Where-Object { $null -ne $_ } | ForEach-Object { & $FailedKey $_ } | Sort-Object -CaseSensitive)
+    if (($SavedFailed -join "`n") -cne (@($WantFailed | ForEach-Object { & $FailedKey $_ } | Sort-Object -CaseSensitive) -join "`n")) { return $false }
     $WantReports = Get-LatestCompletedReports -Reports $Reports
     $SavedReports = Get-LatestCompletedReports -Reports @(Get-CompletedReports -Path $Path -Tenant $Tenant)
     foreach ($Id in $WantIds)

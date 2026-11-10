@@ -63,7 +63,7 @@ BeforeAll {
         $null = $InventoryRoot, $Resume, $ResumeFailedOnly, $CompletedReports, $CompletedIds, $FailedAttempts
         $UnreadableStreamFiles = @()
         $Lines = @(. $script:FoldBlock 6>&1 | ForEach-Object { [string]$_ })
-        [pscustomobject]@{ Unreadable = @($UnreadableStreamFiles); Lines = $Lines; Completed = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant 't'); Failed = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant 't' | Where-Object { $null -ne $_ } | ForEach-Object Id) }
+        [pscustomobject]@{ Unreadable = @($UnreadableStreamFiles); StaleAside = @($StaleAsideFiles | Where-Object { $_ }); Lines = $Lines; Completed = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant 't'); Failed = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant 't' | Where-Object { $null -ne $_ } | ForEach-Object Id) }
     }
 }
 
@@ -150,6 +150,23 @@ Describe 'The per-stream resume state files at the start of a run' {
         $R = script:Invoke-Fold -Root $script:Root -Resume $false
         Test-Path -LiteralPath $Path | Should -BeFalse
         $R.Completed | Should -Be @('sub-b') -Because 'a -Resume after this run stops early must still collect Sub A'
+    }
+
+    It 'are merged whole into the retry list by a run without -Resume, also with no older completion, before they are removed' {
+        $State = Join-Path $script:Root '.resume-state-t.json'
+        # The unified file holds an older, lower count for Sub X and nothing for Sub Y.
+        Save-CompletedSubscriptionIds -Path $State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'older'; Attempts = 1 }) -Reports @()
+        $Path = script:New-StreamFile -Root $script:Root -N 0 -Failed @(
+            [pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'newer'; Attempts = 3 },
+            [pscustomobject]@{ Id = 'sub-y'; Name = 'Sub Y'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'only here'; Attempts = 2 })
+        $null = script:Invoke-Fold -Root $script:Root -Resume $false
+        Test-Path -LiteralPath $Path | Should -BeFalse
+        $Saved = @(Get-FailedAttempts -Path $State -Tenant 't' | Where-Object { $null -ne $_ } | Sort-Object Id)
+        @($Saved | ForEach-Object Id) | Should -Be @('sub-x', 'sub-y')
+        [int]$Saved[0].Attempts | Should -Be 3
+        $Saved[0].Reason | Should -Be 'newer'
+        [int]$Saved[1].Attempts | Should -Be 2
+        $Saved[1].Reason | Should -Be 'only here'
     }
 
     It 'are put aside, not removed, by a run without -Resume when they cannot be read' {
@@ -434,14 +451,19 @@ Describe 'A per-stream file an earlier run put aside as unreadable' {
         New-Item -ItemType Directory -Path $Root -Force | Out-Null
         $Aside = Join-Path $Root '.resume-state-t-stream-1.json.unreadable-20261109000000000'
         Set-Content -LiteralPath $Aside -Value '{ not json' -NoNewline
-        $null = script:Invoke-Fold -Root $Root -Resume $false
+        $R = script:Invoke-Fold -Root $Root -Resume $false
         Test-Path -LiteralPath $Aside | Should -BeTrue -Because 'the run may still stop before it collects'
+        # One this run's own merge puts aside later holds this run's records: kept.
+        $OwnAside = Join-Path $Root '.resume-state-t-stream-2.json.unreadable-20261109000000001'
+        Set-Content -LiteralPath $OwnAside -Value '{ not json' -NoNewline
         # After the collection: the step before "All subscriptions processed!".
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
-        $AfterRun = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '-not ($Resume -or $ResumeFailedOnly)' -and $_.Extent.Text.Contains('.unreadable-') })
+        $AfterRun = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '-not ($Resume -or $ResumeFailedOnly)' -and $_.Extent.Text.Contains('$StaleAsideFiles') })
         $AfterRun.Count | Should -Be 1
-        & { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>$null
+        & { $InventoryRoot = $Root; $TenantID = 't'; $Resume = $false; $ResumeFailedOnly = $false; $StaleAsideFiles = $R.StaleAside; $null = $InventoryRoot, $TenantID, $Resume, $ResumeFailedOnly, $StaleAsideFiles; . ([scriptblock]::Create($AfterRun[0].Extent.Text)) } 6>$null
         Test-Path -LiteralPath $Aside | Should -BeFalse
+        Test-Path -LiteralPath $OwnAside | Should -BeTrue -Because 'the file this run put aside in its own merge is named with exit 2, to be fixed and renamed back'
+        Remove-Item -LiteralPath $OwnAside -Force
         (script:Invoke-Fold -Root $Root -Resume $true).Unreadable | Should -BeNullOrEmpty
     }
 }

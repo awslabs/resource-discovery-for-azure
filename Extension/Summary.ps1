@@ -133,7 +133,7 @@ $TotalResources = 0; foreach ($SvcRow in $ServiceSummary) { $TotalResources += [
 # services; if most match the obfuscation signature treat the report as
 # obfuscated, else identifiable (the safe default for an unclear posture).
 $ObfuscationStatus = 'identifiable'
-$ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+$ObfPattern = '^(prod_|nonprod_)(aks_|vmss_|databricks_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 $Samples = New-Object System.Collections.Generic.List[string]
 foreach ($svc in $ServiceSummary | Select-Object -First 5)
 {

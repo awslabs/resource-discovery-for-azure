@@ -101,6 +101,18 @@ param (
 # && / ||, no ForEach-Object -Parallel). Adding any of those makes 5.1 fail to
 # parse the whole script, and this bootstrap never runs.
 # ---------------------------------------------------------------------------
+# A script folder whose path holds a wildcard character ([ ] * ?, the last two
+# allowed in folder names on Linux and macOS) cannot be used: the collector
+# (ResourceInventory.ps1) finds its own files and its Services/*.ps1 with
+# wildcard paths, so it would fail, or load the scripts of another folder the
+# pattern matches. Stopped here, before PowerShell 7, the Azure CLI or the Az
+# modules are offered or installed and before any file is read or written
+# (Windows PowerShell 5.1 syntax, like the block below).
+if ($PSScriptRoot.IndexOfAny([char[]]'[]*?') -ge 0)
+{
+    Write-Host ("ERROR: The script folder {0} has [ ] * or ? in its path, which this tool cannot run from. Move the folder to a path without them and run again." -f $PSScriptRoot) -ForegroundColor Red
+    exit 1
+}
 if ($PSVersionTable.PSVersion.Major -lt 7)
 {
     Write-Host ("Detected Windows PowerShell {0}. This tool requires PowerShell 7." -f $PSVersionTable.PSVersion) -ForegroundColor Yellow
@@ -213,18 +225,6 @@ if ($PSVersionTable.PSVersion.Major -lt 7)
     Write-Host ("Re-launching under PowerShell 7: {0}" -f $PwshPath) -ForegroundColor Cyan
     & $PwshPath -NoLogo -NoProfile -File $PSCommandPath @ForwardArgs
     exit $LASTEXITCODE
-}
-
-# A script folder whose path holds a wildcard character ([ ] * ?, the last two
-# allowed in folder names on Linux and macOS) cannot be used: the collector
-# (ResourceInventory.ps1) finds its own files and its Services/*.ps1 with
-# wildcard paths, so it would fail, or load the scripts of another folder the
-# pattern matches. Stopped here, before the Azure CLI or the Az modules are
-# offered or installed and before any file is read or written.
-if ($PSScriptRoot.IndexOfAny([char[]]'[]*?') -ge 0)
-{
-    Write-Host ("ERROR: The script folder {0} has [ ] * or ? in its path, which this tool cannot run from. Move the folder to a path without them and run again." -f $PSScriptRoot) -ForegroundColor Red
-    exit 1
 }
 
 # ---------------------------------------------------------------------------

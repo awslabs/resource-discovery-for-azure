@@ -1667,6 +1667,10 @@ else
                         $AllFailedFromStreams += @($Obj.FailedAttempts | Where-Object { $null -ne $_ })
                     }
                     $ReadStreamStateFiles += $PerStreamFile
+                    # A file the start could not parse, which this run's
+                    # stream has since written, is read now: it is no longer
+                    # one this run could not read (Write-StreamStateKept).
+                    $UnreadStreamStateFiles = @($UnreadStreamStateFiles | Where-Object { $_ -ne $PerStreamFile })
                 }
                 catch
                 {

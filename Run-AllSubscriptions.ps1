@@ -432,7 +432,7 @@ catch
 # breaking later with a confusing "command not found".
 # ---------------------------------------------------------------------------
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -442,7 +442,7 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 
 # Shared cross-cutting helpers (Write-RdaProgress). Same dot-source pattern.
 $CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
-if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $CommonFunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -1728,7 +1728,7 @@ else
         try
         {
             $WorkerScript = Join-Path $PSScriptRoot 'Run-AllSubscriptions.Stream.ps1'
-            if (-not (Test-Path -Path $WorkerScript -PathType Leaf))
+            if (-not (Test-Path -LiteralPath $WorkerScript -PathType Leaf))
             {
                 Write-Host ("ERROR: parallel worker script not found at {0}." -f $WorkerScript) -ForegroundColor Red
                 Write-Host "Make sure Run-AllSubscriptions.Stream.ps1 is present alongside Run-AllSubscriptions.ps1, or re-run without -ParallelStreams." -ForegroundColor Yellow
@@ -2350,7 +2350,7 @@ if ($null -ne $OuterZipFile)
         # missing file throws into the surrounding catch and downgrades to
         # a warning.
         $AllSubSummaryFunctions = Join-Path $PSScriptRoot 'Functions/AllSubHtmlSummary.Functions.ps1'
-        if (-not (Test-Path -Path $AllSubSummaryFunctions -PathType Leaf))
+        if (-not (Test-Path -LiteralPath $AllSubSummaryFunctions -PathType Leaf))
         {
             throw "Main summary functions not found at '$AllSubSummaryFunctions'."
         }

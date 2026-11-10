@@ -536,6 +536,31 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
             $Run.Status | Should -Be 'Ok' -Because $Run.Text
         }
     }
+
+    It '<Status>: with a pinning submodule, the advice names it and its update comes first, then the Az.Accounts step, then "Then run again."' -ForEach @(
+        @{ Status = 'Missing'; Accounts = @(); Step = 'Then install Az.Accounts:' }
+        @{ Status = 'TooOld'; Accounts = @('5.5.3'); Step = 'Then update Az.Accounts:' }
+    ) {
+        $Root = Join-Path $script:PinDir ('order-' + $Status)
+        foreach ($Version in $Accounts) { New-PinModule -Root $Root -Name 'Az.Accounts' -Version $Version }
+        New-PinModule -Root $Root -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($Root) -CheckOnly
+        $Stop.Status | Should -Be $Status -Because $Stop.Text
+        $Lines = @($Stop.Text -split "`n")
+        $Index = { param([string]$Like) [array]::FindIndex([string[]]$Lines, [Predicate[string]] { param($L) $L -like $Like }) }
+        $SubStep = & $Index 'Update Az.Compute first:'
+        $SubCommand = & $Index '  Install-Module -Name Az.Compute *'
+        $AccountsStep = & $Index $Step
+        $AccountsCommand = & $Index '  Install-Module -Name Az.Accounts -MinimumVersion 5.5.4*'
+        $SubStep | Should -BeGreaterOrEqual 0 -Because $Stop.Text
+        $SubCommand | Should -Be ($SubStep + 1) -Because $Stop.Text
+        $AccountsStep | Should -BeGreaterThan $SubCommand -Because $Stop.Text
+        $AccountsCommand | Should -Be ($AccountsStep + 1) -Because $Stop.Text
+        $Lines[-1] | Should -Be 'Then run again.' -Because $Stop.Text
+        $AccountsCommand | Should -Be ($Lines.Count - 2) -Because $Stop.Text
+        $Stop.Text | Should -Not -Match '(?m)^(Install|Update) it\b' -Because 'each step names its module'
+    }
 }
 
 Describe 'Install-RdaAzSubModule' {

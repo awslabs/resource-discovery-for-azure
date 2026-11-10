@@ -502,6 +502,40 @@ Test-RdaAzAccountsVersion -SubModule @('Az.Accounts', 'Az.Compute', 'Az.Monitor'
         Remove-Item -LiteralPath (Join-Path $OldFirst 'Az.Compute') -Recurse -Force
         (Invoke-PinSession -ModulePath @($OldFirst, $NewLater)).Status | Should -Be 'Ok'
     }
+
+    It '<Status>: also names a submodule copy on disk that pins an older Az.Accounts, so one stop gives both fixes, and the next runs pass once both are done' -ForEach @(
+        @{ Status = 'Missing'; Accounts = @() }
+        @{ Status = 'TooOld'; Accounts = @('5.5.3') }
+    ) {
+        # Az.Accounts is not installed, or only 5.5.3 is, and the Az.Compute
+        # a new session would load asks for exactly 5.5.3. Installing a
+        # supported Az.Accounts alone would stop the next run on that pin.
+        $Root = Join-Path $script:PinDir ('accounts-' + $Status)
+        $UserFolder = Join-Path $Root 'user'
+        $SystemFolder = Join-Path $Root 'system'
+        foreach ($Version in $Accounts) { New-PinModule -Root $SystemFolder -Name 'Az.Accounts' -Version $Version }
+        New-PinModule -Root $SystemFolder -Name 'Az.Compute' -Version '1.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; RequiredVersion = '5.5.3' }"
+
+        $Stop = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -CheckOnly
+        $Stop.Status | Should -Be $Status -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Install-Module -Name Az.Accounts -MinimumVersion 5.5.4')) -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3')) -Because $Stop.Text
+        $Stop.Text | Should -Match ([regex]::Escape('Install-Module -Name Az.Compute -Repository PSGallery -Scope CurrentUser -Force')) -Because $Stop.Text
+        @([regex]::Matches($Stop.Text, [regex]::Escape('Az.Compute 1.0.0 asks for Az.Accounts 5.5.3'))).Count | Should -Be 1 -Because $Stop.Text
+
+        # Both printed commands run: a supported Az.Accounts and a newer
+        # Az.Compute in the user's folder, first on the module path. The
+        # next two runs pass, the check alone and the full load.
+        New-PinModule -Root $UserFolder -Name 'Az.Accounts' -Version '5.5.4'
+        New-PinModule -Root $UserFolder -Name 'Az.Compute' -Version '2.0.0' -Requires "@{ ModuleName = 'Az.Accounts'; ModuleVersion = '5.5.4' }"
+        foreach ($Next in 1..2)
+        {
+            $Again = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder) -CheckOnly
+            $Again.Status | Should -Be 'Ok' -Because $Again.Text
+            $Run = Invoke-PinSession -ModulePath @($UserFolder, $SystemFolder)
+            $Run.Status | Should -Be 'Ok' -Because $Run.Text
+        }
+    }
 }
 
 Describe 'Install-RdaAzSubModule' {

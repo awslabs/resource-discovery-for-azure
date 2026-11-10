@@ -132,7 +132,9 @@ if ((Get-RdaStandInScenario).ResumeRemoveFail)
     function Remove-Item
     {
         [CmdletBinding()] param([Parameter(Position = 0)]$Path, $LiteralPath, [switch]$Force, [switch]$Recurse)
-        if (([string]$Path) -like '*.resume-state-*' -and ([string]$Path) -notlike '*-stream-*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the file is in use by {another process}' }
+        # The wrapper names the file by -LiteralPath (or by -Path).
+        $Target = if ($PSBoundParameters.ContainsKey('LiteralPath')) { [string]$LiteralPath } else { [string]$Path }
+        if ($Target -like '*.resume-state-*' -and $Target -notlike '*-stream-*' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the file is in use by {another process}' }
         Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
     }
 }
@@ -152,7 +154,8 @@ if ((Get-RdaStandInScenario).FailuresLogFail)
 {
     function Get-Item
     {
-        if (([string]$args[0]) -like '*_stream-0.log' -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the stream failures log cannot be read' }
+        # The wrapper names the file by -LiteralPath (or by position).
+        if (@($args | Where-Object { ([string]$_) -like '*_stream-0.log' }).Count -gt 0 -and @(Get-PSCallStack)[1].ScriptName -like '*Run-AllSubscriptions.ps1') { throw 'stand-in: the stream failures log cannot be read' }
         Microsoft.PowerShell.Management\Get-Item @args
     }
 }
@@ -317,6 +320,33 @@ if ($Task -eq 'Processing' -and $CollectorFailSub -and @($Resources | Where-Obje
 }
 '@ | Set-Content -LiteralPath (Join-Path $script:Tool 'Services/Networking/StandInCollector.ps1') -Encoding utf8
 
+        # A second copy of the tool whose ResourceInventory.ps1 is a stand-in:
+        # it writes one subscription's report folder (Inventory json, html and
+        # zip) under the home's inventory root by literal path and names the
+        # zip, as the real script does. Used for a home whose path holds [ or ],
+        # where only the wrapper's own handling of the path is under test.
+        $script:ToolStandIn = Join-Path $script:WorkDir 'tool-standin-inventory'
+        Copy-Item -LiteralPath $script:Tool -Destination $script:ToolStandIn -Recurse -Force
+        @'
+param($TenantID, $SubscriptionID)
+# The scenario's failing subscriptions end with exit 1, as the real script does.
+if (@((Get-Content -LiteralPath $env:RDA_STANDIN_AZURE -Raw | ConvertFrom-Json).FailSub) -contains [string]$SubscriptionID) { exit 1 }
+$Root = Join-Path $HOME 'InventoryReports'
+$Stamp = [guid]::NewGuid().ToString('N').Substring(0, 8)
+$Dir = Join-Path $Root ('ResourcesReport_{0}' -f $Stamp)
+$null = [System.IO.Directory]::CreateDirectory($Dir)
+$Json = Join-Path $Dir ('Inventory_{0}.json' -f $Stamp)
+[System.IO.File]::WriteAllText($Json, ('{{"Subscription":"{0}"}}' -f $SubscriptionID))
+[System.IO.File]::WriteAllText((Join-Path $Dir ('ResourcesReport_{0}.html' -f $Stamp)), '<!DOCTYPE html><html><body>stand-in report</body></html>')
+$Zip = Join-Path $Dir ('ResourcesReport_{0}.zip' -f $Stamp)
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$Archive = [System.IO.Compression.ZipFile]::Open($Zip, [System.IO.Compression.ZipArchiveMode]::Create)
+try { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Archive, $Json, [System.IO.Path]::GetFileName($Json)) }
+finally { $Archive.Dispose() }
+$Global:Resources = @([pscustomobject]@{ id = 'stand-in' })
+$Global:ZipOutputFile = $Zip
+'@ | Set-Content -LiteralPath (Join-Path $script:ToolStandIn 'ResourceInventory.ps1') -Encoding utf8
+
         $script:Modules = Join-Path $script:WorkDir 'modules'
         # Az.Billing answers the wrapper's up-front consumption access check
         # (runs without -SkipConsumption only): access is confirmed.
@@ -344,11 +374,13 @@ function Get-UsageAggregates
         # value, as when a native command failed at the prompt before the run.
         function script:Invoke-CarryOverRun
         {
-            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable)
+            param([object[]]$Subs, [string[]]$FailSub = @(), [int]$Streams = 1, [int]$PriorExitCode = -1, [string]$CollectorFailSub = '', [switch]$CorruptStreamSummary, [string]$StreamSummaryJson = '', [switch]$MissingStreamSummary, [string]$Stream1SummaryJson = '', [switch]$Resume, [string[]]$Stream0Completed = @(), [switch]$RemoveRoot, [string]$StaleStreamSummaryJson = '', [switch]$StreamSummaryFolderBeforeRun, [string]$ImportFailStream = '', [switch]$NarrationFail, [switch]$VerboseFail, [switch]$FailuresLogFail, [switch]$OtherRun, [switch]$PinnedCompute, [switch]$StreamNarrationFail, [switch]$ResumeRemoveFail, [switch]$ConsumptionPageFail, [switch]$MetricsTokenFail, [switch]$ResumeFailedOnly, [object]$SeedState = $null, [string]$ReuseHome = '', [switch]$ConsumptionTokenFail, [switch]$StreamStateBlocked, [switch]$UnifiedStateBlocked, [string[]]$Stream1Failed = @(), [string[]]$Stream7FailedUnreadable = @(), [switch]$UnifiedStateUnreadable, [string]$HomeName = 'home', [switch]$StandInInventory)
             $CaseDir = Join-Path $script:WorkDir ([guid]::NewGuid().ToString('N').Substring(0, 8))
             # ReuseHome: the next run on the same machine, with the resume
             # state the run before left.
-            $CaseHome = if ($ReuseHome) { $ReuseHome } else { Join-Path $CaseDir 'home' }
+            # HomeName: the home folder's name, for a home whose path holds
+            # [ or ] (a Unix user name such as u[1]).
+            $CaseHome = if ($ReuseHome) { $ReuseHome } else { Join-Path $CaseDir $HomeName }
             New-Item -ItemType Directory -Path $CaseDir -Force | Out-Null
             New-Item -ItemType Directory -Path $CaseHome -Force | Out-Null
             # UnifiedStateBlocked: an empty folder where the resume state's
@@ -470,6 +502,10 @@ function Get-UsageAggregates
                 # reports what this text says, not what it did.
                 $Plant += [pscustomobject]@{ Stream = '0'; Kind = 'Text'; Text = $StreamSummaryJson }
             }
+            # StandInInventory: the copy of the tool with the stand-in
+            # ResourceInventory.ps1.
+            $RunTool = if ($StandInInventory) { $script:ToolStandIn } else { $script:Tool }
+            $RunWrapper = Join-Path $RunTool 'Run-AllSubscriptions.ps1'
             $Scenario = Join-Path $CaseDir 'scenario.json'
             [pscustomobject]@{ Tenant = $script:Tenant; Subscriptions = @($Subs); FailSub = @($FailSub); CollectorFailSub = $CollectorFailSub; RemoveRoot = [bool]$RemoveRoot; Plant = @($Plant); ImportFailStream = $ImportFailStream; NarrationFail = [bool]$NarrationFail; VerboseFail = [bool]$VerboseFail; FailuresLogFail = [bool]$FailuresLogFail; StreamNarrationFail = [bool]$StreamNarrationFail; ResumeRemoveFail = [bool]$ResumeRemoveFail; SummaryFolderAtStart = [bool]$StreamSummaryFolderBeforeRun; ConsumptionPageFail = [bool]$ConsumptionPageFail; MetricsTokenFail = [bool]$MetricsTokenFail; ConsumptionTokenFail = [bool]$ConsumptionTokenFail; UnifiedStateOnce = [bool]$UnifiedStateBlocked } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Scenario -Encoding utf8
 
@@ -490,14 +526,14 @@ function Get-UsageAggregates
                 $Launcher = Join-Path $CaseDir 'launcher.ps1'
                 @(
                     ('$global:LASTEXITCODE = {0}' -f $PriorExitCode)
-                    ("& '{0}' {1}" -f $script:Wrapper, (($WrapperArgs | ForEach-Object { if ($_ -like '-*') { $_ } else { "'$_'" } }) -join ' '))
+                    ("& '{0}' {1}" -f $RunWrapper, (($WrapperArgs | ForEach-Object { if ($_ -like '-*') { $_ } else { "'$_'" } }) -join ' '))
                     'exit $LASTEXITCODE'
                 ) | Set-Content -LiteralPath $Launcher -Encoding utf8
                 $Entry = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $Launcher)
             }
             else
             {
-                $Entry = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $script:Wrapper) + $WrapperArgs
+                $Entry = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $RunWrapper) + $WrapperArgs
             }
 
             $Info = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh'))
@@ -506,7 +542,7 @@ function Get-UsageAggregates
             $Info.RedirectStandardInput = $true
             $Info.RedirectStandardOutput = $true
             $Info.RedirectStandardError = $true
-            $Info.WorkingDirectory = $script:Tool
+            $Info.WorkingDirectory = $RunTool
             $Info.Environment['HOME'] = $CaseHome
             $ModulePath = $script:Modules
             if ($PinnedCompute)
@@ -538,7 +574,7 @@ function Get-UsageAggregates
             $StateFile = Join-Path $CaseHome ('InventoryReports/.resume-state-{0}.json' -f $script:Tenant)
             $State = if (Test-Path -LiteralPath $StateFile) { Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json } else { $null }
             # RunSummary.log from the consolidated zip, when one was made.
-            $OuterZip = @(Get-ChildItem -Path (Join-Path $CaseHome 'InventoryReports') -Filter 'AllSubscriptions_ResourcesReport_*.zip' -File -ErrorAction SilentlyContinue)
+            $OuterZip = @(Get-ChildItem -LiteralPath (Join-Path $CaseHome 'InventoryReports') -Filter 'AllSubscriptions_ResourcesReport_*.zip' -File -ErrorAction SilentlyContinue)
             $RunSummary = $null
             $MainSummary = $null
             $InnerZips = @()
@@ -746,7 +782,6 @@ function Get-UsageAggregates
     It 'two streams: MainSummary.html names a stream whose summary could not be read, not as a failed subscription' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -CorruptStreamSummary
         $Run.ZipCount | Should -Be 1 -Because $Run.Console
-        $Run.MainSummary | Should -Not -BeNullOrEmpty -Because $Run.Console
         $Run.MainSummary | Should -Match ([regex]::Escape('The summary of stream 0 could not be read.</b> Its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.')) -Because 'MainSummary.html must show the same signal as the console and RunSummary.log'
         $Run.MainSummary | Should -Not -Match 'failed to process' -Because 'no subscription failed'
     }
@@ -1375,6 +1410,53 @@ function Get-UsageAggregates
         $Run.Console | Should -Not -Match '(?i)skipping \(already completed\)' -Because $Run.Console
         $Run.Console | Should -Not -Match '(?m)^Subscriptions Skipped:' -Because $Run.Console
         $Run.ExitCode | Should -Be 0 -Because $Run.Console
+    }
+
+    It '<Case>: a home whose path holds [ and ] gives a clean run: the kept stream state file is read and cleared, the zip is found and made with its run summary' -ForEach @(
+        @{ Case = 'sequential'; Streams = 1 }
+        @{ Case = 'two streams'; Streams = 2 }
+    ) {
+        # Its inventory root then holds [ and ] too. A plain path read as a
+        # wildcard pattern finds nothing there. An earlier parallel run left
+        # Sub A's failure only in stream 1's state file. The wrapper's and
+        # the stream worker's handling of the path is under test, so
+        # ResourceInventory.ps1 is the stand-in that writes a report folder.
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams $Streams -Stream1Failed $script:SubA.Id -HomeName 'u[1]' -StandInInventory
+        $Run.Root | Should -BeLike '*u`[1`]*'
+        $Run.Console | Should -Match 'Read per-stream resume state left by an earlier parallel run' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'is gone' -Because $Run.Console
+        $Run.Console | Should -Match 'Per-subscription output verification: OK' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+        @($Run.InnerZips).Count | Should -Be 2 -Because $Run.Console
+        $Run.RunSummary | Should -Not -BeNullOrEmpty -Because $Run.Console
+        $Run.StateKept | Should -BeFalse -Because 'a clean run clears the resume state'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'the run read the stream state files, so they are cleared'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter '.rda-stream-*' -Force).Count | Should -Be 0 -Because 'the stream summaries and the context snapshot are removed'
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter '.rda-bundle-*' -Force).Count | Should -Be 0 -Because 'the bundle stage is removed'
+
+        # The next run has nothing to retry.
+        $After = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams $Streams -ResumeFailedOnly -ReuseHome $Run.Home -StandInInventory
+        $After.Console | Should -Match 'ResumeFailedOnly: no failed subscriptions in resume state' -Because $After.Console
+        $After.ExitCode | Should -Be 0 -Because $After.Console
+    }
+
+    It 'two streams: a home whose path holds [ and ] gives a run with a failed subscription whose stream state files are merged into the resume state and removed' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -FailSub $script:SubA.Id -HomeName 'u[1]' -StandInInventory
+        $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
+        $Run.ExitCode | Should -Be 2 -Because $Run.Console
+        $Run.FailedIds | Should -Be @($script:SubA.Id) -Because $Run.Console
+        @(Get-ChildItem -LiteralPath $Run.Root -Filter ('.resume-state-{0}-stream-*.json' -f $script:Tenant) -File -Force).Count | Should -Be 0 -Because 'the resume state was saved, so the stream state files it holds are removed'
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
+    }
+
+    It 'two streams with -Resume: a home whose path holds [ and ] skips the subscription a stream state file lists as done, and the run is clean' {
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -Resume -Stream0Completed @($script:SubA.Id) -HomeName 'u[1]' -StandInInventory
+        $Run.Console | Should -Not -Match '\[stream-0\] done: Sub A' -Because $Run.Console
+        $Run.Console | Should -Match '\[stream-0\] done: Sub C' -Because $Run.Console
+        $Run.Console | Should -Not -Match 'not confirmed' -Because $Run.Console
+        $Run.ExitCode | Should -Be 0 -Because $Run.Console
+        $Run.ZipCount | Should -Be 1 -Because $Run.Console
     }
 
     # With two streams the session runs no inventory itself, so only the

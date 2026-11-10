@@ -351,7 +351,7 @@ function Invoke-PreFlightChecks
     # Catch it now.
     try
     {
-        $RootItem = Get-Item -Path $InventoryRoot -ErrorAction Stop
+        $RootItem = Get-Item -LiteralPath $InventoryRoot -ErrorAction Stop
         $Drive = $RootItem.PSDrive
         if ($null -ne $Drive -and $null -ne $Drive.Free)
         {
@@ -387,13 +387,13 @@ function Invoke-PreFlightChecks
     $ProbePath = Join-Path $InventoryRoot (".write-probe-{0}.tmp" -f ([guid]::NewGuid()))
     try
     {
-        Set-Content -Path $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
-        $ProbeRead = Get-Content -Path $ProbePath -Raw -ErrorAction Stop
+        Set-Content -LiteralPath $ProbePath -Value 'preflight write probe' -Encoding utf8 -ErrorAction Stop
+        $ProbeRead = Get-Content -LiteralPath $ProbePath -Raw -ErrorAction Stop
         if ($ProbeRead -notmatch 'preflight write probe')
         {
             throw "Write probe content mismatch (read back '$ProbeRead')"
         }
-        Remove-Item -Path $ProbePath -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $ProbePath -Force -ErrorAction Stop
         Write-Host ("Write probe: OK ({0})" -f $InventoryRoot) -ForegroundColor Green
     }
     catch
@@ -402,7 +402,7 @@ function Invoke-PreFlightChecks
         Write-Host "  This usually means: readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle." -ForegroundColor Red
         Write-Host "  Verify the directory is writable and re-run." -ForegroundColor Red
         # Best-effort cleanup in case Set-Content partially succeeded.
-        try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
+        try { if (Test-Path -LiteralPath $ProbePath) { Remove-Item -LiteralPath $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
         Exit-Wrapper -Code 1
     }
@@ -661,7 +661,7 @@ function Get-StreamResumeStateFiles
         [Parameter(Mandatory = $true)][string]$InventoryRoot,
         [Parameter(Mandatory = $true)][string]$Tenant
     )
-    return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+    return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
 }
 
 # Reconcile FailedAttempts entries gathered from multiple streams (plus any
@@ -1409,4 +1409,64 @@ function Get-RunSummaryLogContent
     }
 
     return $Lines.ToArray()
+}
+
+# Add files and folders to a zip that is there, as Compress-Archive -Update
+# does: a file goes in under its name, a folder under its name with the
+# '/'-separated paths of the files under it (hidden ones left out), and an
+# empty folder under it as '<path>/' (an empty folder given on its own adds
+# nothing). An entry with the same name (in any case) is replaced.
+# Compress-Archive -Update cannot be used for this: it reads the zip's own
+# path as a wildcard pattern, so for a zip in a folder whose path holds [ or ]
+# (a Unix home such as /home/u[1]) it fails and nothing is added.
+function Add-ItemsToZipArchive
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [Parameter(Mandatory = $true)][string[]]$Items
+    )
+
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $Adds = [System.Collections.Generic.List[object]]::new()
+    foreach ($Item in $Items)
+    {
+        if (Test-Path -LiteralPath $Item -PathType Leaf)
+        {
+            $Adds.Add([pscustomobject]@{ Source = $Item; Name = [System.IO.Path]::GetFileName($Item) })
+            continue
+        }
+        $Dir = [System.IO.DirectoryInfo]::new($Item)
+        $Base = $Dir.Parent.FullName.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        foreach ($Child in @(Get-ChildItem -LiteralPath $Item -Recurse))
+        {
+            $Relative = $Child.FullName.Substring($Base.Length).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+            if ($Child -is [System.IO.DirectoryInfo])
+            {
+                if (@($Child.GetFiles()).Count -eq 0) { $Adds.Add([pscustomobject]@{ Source = $null; Name = $Relative + '/' }) }
+            }
+            else
+            {
+                $Adds.Add([pscustomobject]@{ Source = $Child.FullName; Name = $Relative })
+            }
+        }
+    }
+
+    $Zip = [System.IO.Compression.ZipFile]::Open($ZipPath, [System.IO.Compression.ZipArchiveMode]::Update)
+    try
+    {
+        foreach ($Add in $Adds)
+        {
+            $Old = @($Zip.Entries | Where-Object { [string]::Equals($_.FullName.Replace([System.IO.Path]::DirectorySeparatorChar, '/'), $Add.Name, [System.StringComparison]::OrdinalIgnoreCase) }) | Select-Object -First 1
+            if ($null -ne $Old) { $Old.Delete() }
+            if ($null -eq $Add.Source)
+            {
+                $null = $Zip.CreateEntry($Add.Name, [System.IO.Compression.CompressionLevel]::Optimal)
+            }
+            else
+            {
+                $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Zip, $Add.Source, $Add.Name, [System.IO.Compression.CompressionLevel]::Optimal)
+            }
+        }
+    }
+    finally { $Zip.Dispose() }
 }

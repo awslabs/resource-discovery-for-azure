@@ -794,11 +794,14 @@ function Get-UsageAggregates
     }
 
     It 'two streams: the verification-gap stop prints the Exit code lines, naming the sign-in skip and collector failures it hides' {
-        # Stream 0 (Sub A) reports Sub A and two more subscriptions that
+        # Stream 0 (Sub A, Sub X, Sub Y) reports its three subscriptions as
         # worked, with a collector failure and a Metrics sign-in skip, and
-        # names no zip for any of them, so reports are missing.
+        # names no zip for any of them, so reports are missing. (A summary
+        # holds a row only for the subscriptions its stream ran, so Sub X and
+        # Sub Y are in the run; Sub C fills stream 1.)
         $SubX = [guid]::new(('0' * 31) + 'e').ToString()
         $SubY = [guid]::new(('0' * 31) + 'f').ToString()
+        $RunSubs = @($script:SubA, $script:SubB, [pscustomobject]@{ Id = $SubX; Name = 'Sub X' }, $script:SubC, [pscustomobject]@{ Id = $SubY; Name = 'Sub Y' })
         $Forged = [pscustomobject]@{
             RunId             = '{RunId}'
             StreamId          = '0'
@@ -808,7 +811,7 @@ function Get-UsageAggregates
             CollectorFailures = @([pscustomobject]@{ Id = $SubX; Name = 'Sub X'; Module = 'StandIn'; Message = 'stand-in: this collector failed' })
             MetricsFailedSubs = @([pscustomobject]@{ Id = $SubX; Name = 'Sub X'; Message = 'stand-in: no token' })
         } | ConvertTo-Json -Depth 5
-        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamSummaryJson $Forged
+        $Run = Invoke-CarryOverRun -Subs $RunSubs -Streams 2 -StreamSummaryJson $Forged
         $Run.ExitCode | Should -Be 2 -Because $Run.Console
         $Run.ZipCount | Should -Be 0 -Because $Run.Console
         $Gap = 'Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.'
@@ -908,13 +911,14 @@ function Get-UsageAggregates
 
     It 'two streams: the zips of a stream whose summary could not be read do not hide the missing zip of a subscription that reported success' {
         # Stream-0 (Sub A, Sub C) writes two zips but its summary cannot be
-        # read; stream 1 runs Sub B (one zip) but reports Sub X too, which has
-        # no zip (Sub B's row names none either). Three zips for two
-        # successes must not pass the check.
+        # read; stream 1 runs Sub B and Sub X (two zips) but its summary
+        # names no zip for either. Four fresh zips for two successes must not
+        # pass the check. (A summary holds a row only for the subscriptions
+        # its stream ran, so Sub X is in the run.)
         $SubX = [pscustomobject]@{ Name = 'Sub X'; Id = [guid]::new(('0' * 31) + 'e').ToString(); Count = 1 }
         $RowB = [pscustomobject]@{ Name = $script:SubB.Name; Id = $script:SubB.Id; Count = 1 }
         $Forged = [pscustomobject]@{ RunId = '{RunId}'; StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB, $SubX); Failed = @() } | ConvertTo-Json -Depth 5
-        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC, [pscustomobject]@{ Id = $SubX.Id; Name = $SubX.Name }) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
         $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
         $Run.Console | Should -Not -Match 'verification: OK' -Because $Run.Console
         $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
@@ -925,15 +929,16 @@ function Get-UsageAggregates
     }
 
     It 'two streams: a subscription whose named zip is gone fails the check, though other fresh zips are present' {
-        # Stream 1 runs Sub B but also reports Sub X with the zip its inner
-        # script named, and that zip is not on disk (as when antivirus
+        # Stream 1 runs Sub B and Sub X, and reports Sub X with the zip its
+        # inner script named, and that zip is not on disk (as when antivirus
         # removes it after it was written). Stream-0's zips (Sub A, Sub C,
-        # summary unreadable) and Sub B's zip are fresh, so only the path
-        # match can find Sub X's gap.
+        # summary unreadable) and stream 1's zips are fresh, so only the path
+        # match can find Sub X's gap. (A summary holds a row only for the
+        # subscriptions its stream ran, so Sub X is in the run.)
         $SubX = [pscustomobject]@{ Name = 'Sub X'; Id = [guid]::new(('0' * 31) + 'e').ToString(); Count = 1; Zip = '{Reports}/SubX/ResourcesReport_gone.zip' }
         $RowB = [pscustomobject]@{ Name = $script:SubB.Name; Id = $script:SubB.Id; Count = 1 }
         $Forged = [pscustomobject]@{ RunId = '{RunId}'; StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB, $SubX); Failed = @() } | ConvertTo-Json -Depth 5
-        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
+        $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC, [pscustomobject]@{ Id = $SubX.Id; Name = $SubX.Name }) -Streams 2 -CorruptStreamSummary -Stream1SummaryJson $Forged
         $Run.Console | Should -Match '\[stream-1\] done: Sub B' -Because $Run.Console
         $Run.Console | Should -Not -Match 'verification: OK' -Because $Run.Console
         $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
@@ -1002,12 +1007,12 @@ function Get-UsageAggregates
     }
 
     It 'two streams: the verification-gap stop does not count a stream with no summary file as a failed subscription' {
-        # Stream 1 (Sub B) reports Sub B and four more subscriptions that
-        # worked, with no zip named, so the run stops at the output
-        # verification.
-        $Phantoms = @('6', '7', '8', '9' | ForEach-Object { [pscustomobject]@{ Name = ('Sub {0}' -f $_); Id = [guid]::new(('0' * 31) + $_).ToString(); Count = 1 } })
+        # Stream 1 (Sub B) reports Sub B as worked, with no zip named, so
+        # the run stops at the output verification. Its one success is not
+        # the 2 subscriptions of stream 0, whose summary is missing. (A
+        # summary holds a row only for the subscriptions its stream ran.)
         $RowB = [pscustomobject]@{ Name = $script:SubB.Name; Id = $script:SubB.Id; Count = 1 }
-        $Forged = [pscustomobject]@{ RunId = '{RunId}'; StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB) + $Phantoms; Failed = @() } | ConvertTo-Json -Depth 5
+        $Forged = [pscustomobject]@{ RunId = '{RunId}'; StreamId = '1'; Status = 'ok'; ResourceCounts = @($RowB); Failed = @() } | ConvertTo-Json -Depth 5
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB, $script:SubC) -Streams 2 -MissingStreamSummary -Stream1SummaryJson $Forged
         $Run.Console | Should -Match 'Per-subscription output verification failed\.' -Because $Run.Console
         $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console

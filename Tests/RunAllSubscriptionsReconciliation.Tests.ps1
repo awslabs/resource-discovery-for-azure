@@ -328,6 +328,14 @@ Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
         @{ Case = 'StreamId names another stream'; Json = '{"StreamId":"1","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
         @{ Case = 'StreamId is missing'; Json = '{"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
         @{ Case = 'rows miss a subscription the stream ran'; Json = '{"StreamId":"0","ResourceCounts":[],"Failed":[]}'; Reason = 'no row for 1 of the 1' }
+        # One outcome row per subscription the stream ran: a second row
+        # would count its resources and zip twice, and a row for another
+        # subscription would add counts and a zip the stream did not make.
+        @{ Case = 'success rows name one subscription twice'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1,"Zip":"/r/a.zip"},{"Id":"sub-a","Count":1,"Zip":"/r/a.zip"}]}'; Reason = 'more than one row for 1 of the 1' }
+        @{ Case = 'a success row and a failed row name one subscription'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'more than one row for 1 of the 1' }
+        @{ Case = 'success rows name one subscription twice, in another case'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1},{"Id":"SUB-A","Count":1}]}'; Reason = 'more than one row for 1 of the 1' }
+        @{ Case = 'a success row names a subscription the stream did not run'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1},{"Id":"sub-x","Count":5,"Zip":"/r/x.zip"}]}'; Reason = '1 row(s) for a subscription the stream did not run' }
+        @{ Case = 'a failed row names a subscription the stream did not run'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":[{"Id":"sub-x","Name":"Sub X","Reason":"r"}]}'; Reason = '1 row(s) for a subscription the stream did not run' }
         @{ Case = 'text is a list'; Json = '[]'; Reason = 'not a JSON object' }
         @{ Case = 'RunId names another run'; Json = '{"RunId":"99999999-2222-3333-4444-555555555555","StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }
         @{ Case = 'RunId is missing'; Json = '{"RunId":null,"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }

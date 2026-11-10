@@ -1462,11 +1462,13 @@ else
                     }
                     # Read, but taken as this run's summary of the stream only
                     # when Resolve-StreamSummary accepts it: a JSON object that
-                    # names this run and this stream, has a row for every
-                    # subscription the stream ran this time, and holds in
+                    # names this run and this stream, has exactly one row
+                    # for every subscription the stream ran this time and
+                    # none for any other, and holds in
                     # every field the aggregation reads the shape the worker
                     # writes. Anything else ('{}', 'null', a list, another
-                    # run's or stream's, too few rows, a bad value) is
+                    # run's or stream's, too few, repeated or other rows,
+                    # a bad value) is
                     # treated as a summary that cannot
                     # be read: not confirmed. Only its checked values are used
                     # below.

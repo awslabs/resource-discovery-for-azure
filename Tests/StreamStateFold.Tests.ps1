@@ -351,7 +351,7 @@ Describe 'Retry-list entries this run leaves out' {
         $Out = @(. ([scriptblock]::Create($script:OwedIf[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
         @($Out | Where-Object { $_ -like 'Not In This Run:*Sub Off (sub-off)*' }).Count | Should -Be 1
         @($Out | Where-Object { $_ -like '*delete the resume state files .resume-state-t.json*' }).Count | Should -Be 1
-        $script:WrapperSource | Should -Match ([regex]::Escape('-or (@($RetryOwedNotInRun).Count -gt 0)) -SubscriptionsFailed'))
+        $script:WrapperSource | Should -Match ([regex]::Escape('-or (@($RetryOwedNotInRun).Count -gt 0)') + '[^\n]*\) -SubscriptionsFailed')
     }
 }
 

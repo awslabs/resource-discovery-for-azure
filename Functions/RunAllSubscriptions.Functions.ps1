@@ -25,6 +25,16 @@
 function Exit-Wrapper
 {
     param([int]$Code = 0)
+    # A run that moved a per-stream state file aside is not a clean run: a run
+    # that ends before its end-of-run summary says so here, with whether the
+    # resume state was kept (Write-UnreadableStreamStateSummary, once). Read
+    # with Get-Variable: none of these is set before the start-up fold.
+    $Unreadable = @(Get-Variable -Name UnreadableStreamFiles -ValueOnly -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ })
+    if ($Unreadable.Count -gt 0 -and -not (Get-Variable -Name UnreadableSummaryShown -Scope Script -ValueOnly -ErrorAction SilentlyContinue))
+    {
+        $StatePath = [string](Get-Variable -Name ResumeStateFile -ValueOnly -ErrorAction SilentlyContinue)
+        Write-UnreadableStreamStateSummary -Unreadable $Unreadable -StateKept (-not [string]::IsNullOrEmpty($StatePath) -and (Test-Path -LiteralPath $StatePath -PathType Leaf))
+    }
     if ($WrapperTranscriptStarted)
     {
         try { Stop-Transcript | Out-Null }
@@ -679,6 +689,8 @@ function Write-UnreadableStreamStateSummary
     $Word = if ($StateKept) { 'kept' } else { 'cleared' }
     foreach ($File in @($Unreadable | Where-Object { $null -ne $_ }))
     {
+        # Exit-Wrapper says it only when no summary was said before it.
+        $script:UnreadableSummaryShown = $true
         $Where = if ([string]::IsNullOrEmpty([string]$File.MovedTo)) { 'was left in place (it could not be moved aside)' } else { 'was moved aside to {0}' -f $File.MovedTo }
         Write-Host ('Resume state {0}, but not a clean run: the per-stream state file {1} could not be read and {2}; its records were not used.' -f $Word, $File.Name, $Where) -ForegroundColor Yellow
     }

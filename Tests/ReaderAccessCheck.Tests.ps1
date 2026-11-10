@@ -2543,6 +2543,9 @@ exit 1
         $Warning.Count | Should -Be 1
         $Warning[0] | Should -BeLike ('WARNING: The per-stream state file {0} from an interrupted parallel run could not be read, so its records are not used: the subscriptions it lists are not counted as completed and a later -Resume collects them (-ResumeFailedOnly retries only the retry list). It was moved aside to {0}.unreadable-*.' -f $Cut)
         $R1.Text | Should -Not -Contain 'Processing subscription: Sub B (sub-b)'
+        # The retry list is empty (Sub B's failure was in the file put aside), so
+        # the run ends early; it still says the run was not clean, and the state kept.
+        @($R1.Text | Where-Object { $_ -like ('Resume state kept, but not a clean run: the per-stream state file {0} could not be read and was moved aside to {0}.unreadable-*; its records were not used.' -f $Cut) }).Count | Should -Be 1
 
         $R2 = script:Invoke-WrapperRun -Arguments '-Resume'
         $R2.ExitCode | Should -Be 0

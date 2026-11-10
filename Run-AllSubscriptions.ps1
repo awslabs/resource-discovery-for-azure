@@ -1067,9 +1067,18 @@ if ($ResumeFailedOnly)
                 Write-Host ("WARNING: Could not remove resume state file {0}: {1}" -f $ResumeStateFile, $_.Exception.Message) -ForegroundColor Yellow
             }
         }
+        # A drop that reached neither a save nor the removal above leaves the
+        # dropped entries in the file, and every later -ResumeFailedOnly run
+        # would drop them again: exit 2, with the way out, so the repeat does
+        # not read as a success.
+        $DropNotSaved = $DroppedGoneEntries -and $ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
+        if ($DropNotSaved)
+        {
+            Write-Host ("ERROR: The resume state file {0} could not be written or removed, so it still lists the retry entries dropped above, and every -ResumeFailedOnly run would drop them again. Fix the cause (for example, free up disk space), then run again, or delete the resume state files .resume-state-{1}.json and .resume-state-{1}-stream-*.json in the inventory folder to start over." -f $ResumeStateFile, $TenantID) -ForegroundColor Red
+        }
         # A per-stream state file that could not be read may hold failures
         # (named above): the run is not clean while it is there.
-        Exit-Wrapper -Code $(if ($NotReachedIds.Count -gt 0 -or $UnreadableStreamFiles.Count -gt 0) { 2 } else { 0 })
+        Exit-Wrapper -Code $(if ($NotReachedIds.Count -gt 0 -or $UnreadableStreamFiles.Count -gt 0 -or $DropNotSaved) { 2 } else { 0 })
     }
     $FailedIds = @($FailedAttempts | ForEach-Object { $_.Id })
     $BeforeCount = $Subscriptions.Count
@@ -2837,10 +2846,11 @@ if (@($UncarriedSkipped).Count -gt 0)
 }
 
 # A save of the resume state that failed this run (Save-CompletedSubscriptionIds
-# warned) can leave the file listing a subscription this run failed as
-# completed, so a -Resume run would skip it and carry its old report: say so,
-# and how to run instead. A failed subscription already sets exit 2.
-if ($ResumeStateSaveFailed)
+# warned), with no later save that reached the disk, can leave the file listing
+# a subscription this run failed as completed, so a -Resume run would skip it
+# and carry its old report: say so, and how to run instead, while the file is
+# there. A failed subscription already sets exit 2.
+if ($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
 {
     Write-Host ""
     Write-Host "============== FAILED (resume state not saved) ==============" -ForegroundColor Red

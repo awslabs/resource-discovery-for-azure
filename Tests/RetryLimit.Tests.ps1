@@ -851,6 +851,34 @@ Describe 'A subscription past the retry limit that is no longer listed' {
     # A run without -Resume reads and writes the same retry list, so it drops the
     # entry of a subscription a complete listing no longer has; else that entry
     # would end every such run with exit 2 and advise the same run again.
+    # A -ResumeFailedOnly run that drops the last gone entry while the state can
+    # be neither written nor removed leaves the entry for the next run: exit 2
+    # with the way out, not a success that repeats.
+    It 'drops the last gone entry while the state can be neither written nor removed: exit 2 and the way out; the next run that can write ends it' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $null = script:Invoke-Run -Subs @($script:A, $script:B, $script:X)
+        $Global:RdaRlFailIds = @()
+        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' } -MockWith { throw 'stand-in: disk full' }
+        Mock Remove-Item -ParameterFilter { [string]$LiteralPath -eq $script:State } -MockWith { throw 'stand-in: read-only' }
+        # Sub X is deleted: a complete listing no longer has it.
+        $R1 = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
+        $R1.ExitCode | Should -Be 2
+        @(script:Get-Lines -Run $R1 -Like 'ERROR: The resume state file * could not be written or removed, so it still lists the retry entries dropped above*').Count | Should -Be 1
+        @((script:Get-Entry -Id 'sub-x')) | Should -Not -BeNullOrEmpty -Because 'the drop did not reach the disk'
+        $R2 = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
+        $R2.ExitCode | Should -Be 2 -Because 'the cause is not fixed yet'
+    }
+
+    It 'drops the last gone entry once the state can be written again, and ends with exit 0' {
+        $Global:RdaRlFailIds = @('sub-x')
+        $null = script:Invoke-Run -Subs @($script:A, $script:B, $script:X)
+        $Global:RdaRlFailIds = @()
+        $R = script:Invoke-Run -Subs @($script:A, $script:B) -ResumeFailedOnly
+        $R.ExitCode | Should -Be 0
+        @(script:Get-Lines -Run $R -Like 'ERROR: The resume state file * could not be written or removed*') | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+    }
+
     It 'is dropped by the next run without -Resume, which exits 0, and the run after it starts clean (<Streams> stream(s))' -ForEach @(@{ Streams = 1 }, @{ Streams = 2 }) {
         $Global:RdaRlFailIds = @('sub-x')
         $Subs = @($script:A, $script:B, $script:X)

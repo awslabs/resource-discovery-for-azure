@@ -1660,6 +1660,8 @@ Write-Host "All subscriptions processed!" -ForegroundColor Green
 # their zip-or-no-zip state is unreliable and the wrapper already surfaces
 # them via the failure summary.
 $ExpectedZipCount = @($SubResourceCounts).Count
+# Read by the consolidated zip build below, also when this check does not run.
+$ActualSubZips = @()
 if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
 {
     $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
@@ -1741,7 +1743,7 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
             # quarantine, storage evicted in between) would be left out without
             # a word: the zip is not built, and the run ends with exit 2.
             $GoneSinceCheck = @(@($ActualSubZips) | Where-Object { $null -ne $_ -and @($SubZips | ForEach-Object { $_.FullName }) -notcontains $_.FullName })
-            if ($GoneSinceCheck.Count -gt 0) { throw ('{0} report zip(s) found by the output check are gone now: {1}. Run again with -Resume to collect them again' -f $GoneSinceCheck.Count, (@($GoneSinceCheck | ForEach-Object { $_.FullName }) -join ', ')) }
+            if ($GoneSinceCheck.Count -gt 0) { throw ('{0} report zip(s) found by the output check are gone now: {1}. Run again without -Resume to collect them again (a -Resume run skips the subscriptions this run completed)' -f $GoneSinceCheck.Count, (@($GoneSinceCheck | ForEach-Object { $_.FullName }) -join ', ')) }
             # Built, checked, given the run summary and checked again under a
             # name of its own in the same folder; it takes the name a run
             # ships only after the last check, so a run stopped part-way
@@ -1791,7 +1793,7 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
     {
         Write-Host ("No per-subscription zip files found under {0} to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
         # Every report zip the output check found is gone now: no consolidated zip.
-        if (@($ActualSubZips).Count -gt 0) { $BundleBuildError = 'The {0} report zip(s) found by the output check are all gone now, so no consolidated zip was built. Run again with -Resume to collect them again.' -f @($ActualSubZips).Count }
+        if (@($ActualSubZips).Count -gt 0) { $BundleBuildError = 'The {0} report zip(s) found by the output check are all gone now, so no consolidated zip was built. Run again without -Resume to collect them again (a -Resume run skips the subscriptions this run completed).' -f @($ActualSubZips).Count }
     }
 }
 else
@@ -2308,7 +2310,10 @@ if ($null -ne $BundleBuildError)
     # Read now: the folder can go while the zip is built, summarised or checked.
     if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
     {
-        Write-Host ("The per-subscription report zips of this run are still on disk under {0}." -f $InventoryRoot) -ForegroundColor Red
+        # A report zip the output check found can be gone by now (see the build).
+        $GoneZips = @(@($ActualSubZips) | Where-Object { $null -ne $_ -and -not (Test-Path -LiteralPath $_.FullName -PathType Leaf) })
+        if ($GoneZips.Count -gt 0) { Write-Host ("{0} per-subscription report zip(s) of this run are gone; the others are still on disk under {1}." -f $GoneZips.Count, $InventoryRoot) -ForegroundColor Red }
+        else { Write-Host ("The per-subscription report zips of this run are still on disk under {0}." -f $InventoryRoot) -ForegroundColor Red }
     }
     else
     {

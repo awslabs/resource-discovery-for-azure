@@ -64,7 +64,7 @@ Describe 'A direct run lists the subscriptions it collects' {
         $Off = [pscustomobject]@{ id = 'sub-off'; name = 'Off'; tenantId = 'tenant-1'; homeTenantId = 'tenant-1'; state = 'Disabled' }
         $Err = $null
         try { Invoke-Set -SubscriptionID $SubscriptionID -Listed @($Off) | Out-Null } catch { $Err = $_.Exception.Message }
-        $Err | Should -BeLike '*no Enabled subscription*ADVICE:*To collect a subscription that is not Enabled, pass -SubscriptionID.*'
+        $Err | Should -BeLike '*no Enabled subscription*ADVICE:*To collect a subscription that is not Enabled, pass -SubscriptionID; or pass -TenantID for a tenant with Enabled subscriptions.*'
         $Err | Should -Not -BeLike '*ADVICE:*Reader*' -Because 'the tenant listed a subscription, so access is not the problem'
     }
 

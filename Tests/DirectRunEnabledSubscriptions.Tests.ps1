@@ -60,7 +60,26 @@ Describe 'A direct run lists the subscriptions it collects' {
     It 'stops without -SubscriptionID when no listed subscription is Enabled, and says how to collect one' {
         $SubscriptionID = $null
         $Off = [pscustomobject]@{ id = 'sub-off'; name = 'Off'; tenantId = 'tenant-1'; homeTenantId = 'tenant-1'; state = 'Disabled' }
-        { Invoke-Set -SubscriptionID $SubscriptionID -Listed @($Off) } | Should -Throw '*no Enabled subscription*ADVICE:*pass -SubscriptionID to collect one that is not Enabled*'
+        { Invoke-Set -SubscriptionID $SubscriptionID -Listed @($Off) } | Should -Throw '*no Enabled subscription*ADVICE:*To collect a subscription that is not Enabled, pass -SubscriptionID.*'
+    }
+
+    It 'stops without -SubscriptionID when nothing is listed, without the hint to pass -SubscriptionID' {
+        $SubscriptionID = $null
+        $Err = $null
+        try { Invoke-Set -SubscriptionID $SubscriptionID -Listed @() | Out-Null } catch { $Err = $_.Exception.Message }
+        $Err | Should -BeLike '*lists no subscriptions*'
+        $Err | Should -Not -BeLike '*pass -SubscriptionID*'
+    }
+
+    It 'stops with -SubscriptionID when the sign-in does not list that subscription' {
+        $SubscriptionID = 'sub-missing'
+        { Invoke-Set -SubscriptionID $SubscriptionID } | Should -Throw '*does not list subscription sub-missing*'
+    }
+
+    It 'finds the -SubscriptionID subscription whatever the case of its id' {
+        $SubscriptionID = 'SUB-WARN'
+        $Subs = Invoke-Set -SubscriptionID $SubscriptionID
+        @($Subs).Count | Should -Be 3
     }
 
     It 'stops with -SubscriptionID when nothing is listed, without the hint to pass -SubscriptionID' {
@@ -69,5 +88,20 @@ Describe 'A direct run lists the subscriptions it collects' {
         try { Invoke-Set -SubscriptionID $SubscriptionID -Listed @() | Out-Null } catch { $Err = $_.Exception.Message }
         $Err | Should -BeLike '*lists no subscriptions*'
         $Err | Should -Not -BeLike '*pass -SubscriptionID*'
+    }
+}
+
+Describe 'A direct run with -ResourceGroup and no -SubscriptionID' {
+    It 'stops with exit 1' {
+        $Root = Split-Path $PSScriptRoot -Parent
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'ResourceInventoryLoop' }, $true))
+        $Fn.Count | Should -Be 1
+        $Script = Join-Path $TestDrive 'rg.ps1'
+        Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) }`n`$ResourceGroup = 'rg-1'`n`$SubscriptionID = `$null`n" + $Fn[0].Extent.Text + "`nResourceInventoryLoop`n'NOT STOPPED'")
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Out = & $Pwsh -NoProfile -NonInteractive -File $Script
+        $LASTEXITCODE | Should -Be 1
+        $Out | Should -Not -Contain 'NOT STOPPED'
     }
 }

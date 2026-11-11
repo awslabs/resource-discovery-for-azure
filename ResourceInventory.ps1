@@ -517,23 +517,34 @@ Function RunInventorySetup()
             }
 
             # The run's subscriptions. A direct run with none stops instead of
-            # writing an empty report. Without -SubscriptionID the run collects
-            # every one listed, so, as `az account list` did by default, only
-            # Enabled ones: a Disabled or Warned subscription is collected only
-            # when -SubscriptionID names it.
+            # writing an empty report. Without -SubscriptionID only Enabled
+            # subscriptions are kept, as `az account list` did by default. With
+            # -SubscriptionID every state is kept, so a named Disabled or Warned
+            # subscription is still found; a named one the sign-in does not
+            # list stops the run.
             function Set-RdaRunSubscriptions([string]$Tenant)
             {
                 $script:RdaRunTenant = $Tenant
                 $Listed = @(Get-RdaTenantSubscriptions -Tenant $Tenant)
-                $AllListed = [string]::IsNullOrEmpty($SubscriptionID)
-                if ($AllListed) { $Listed = @($Listed | Where-Object { [string]$_.state -eq 'Enabled' }) }
-                $Global:Subscriptions = $Listed
-                if ($Global:Subscriptions.Count -eq 0)
+                $Access = 'Check that the signed-in identity has at least Reader on a subscription of the tenant, and that -TenantID names the right tenant, then re-run.'
+                $Empty = "Az PowerShell: tenant {0} lists {1} for this sign-in; stopping instead of writing an empty report."
+                if ($Listed.Count -eq 0)
                 {
-                    $NoneText = if ($AllListed) { 'no Enabled subscription' } else { 'no subscriptions' }
-                    $Hint = if ($AllListed) { ' (pass -SubscriptionID to collect one that is not Enabled)' } else { '' }
-                    Stop-SignIn -Message ("Az PowerShell: tenant {0} lists {1} for this sign-in; stopping instead of writing an empty report." -f $Tenant, $NoneText) -Advice ('Check that the signed-in identity has at least Reader on a subscription of the tenant, and that -TenantID names the right tenant{0}, then re-run.' -f $Hint)
+                    Stop-SignIn -Message ($Empty -f $Tenant, 'no subscriptions') -Advice $Access
                 }
+                if ([string]::IsNullOrEmpty($SubscriptionID))
+                {
+                    $Listed = @($Listed | Where-Object { [string]$_.state -eq 'Enabled' })
+                    if ($Listed.Count -eq 0)
+                    {
+                        Stop-SignIn -Message ($Empty -f $Tenant, 'no Enabled subscription') -Advice ($Access + ' To collect a subscription that is not Enabled, pass -SubscriptionID.')
+                    }
+                }
+                elseif (@($Listed | Where-Object { [string]$_.id -eq $SubscriptionID }).Count -eq 0)
+                {
+                    Stop-SignIn -Message ("Az PowerShell: tenant {0} does not list subscription {1} for this sign-in; stopping instead of writing an empty report." -f $Tenant, $SubscriptionID) -Advice 'Check that -SubscriptionID is right, that -TenantID names its tenant, and that the signed-in identity has at least Reader on it, then re-run.'
+                }
+                $Global:Subscriptions = $Listed
             }
 
             if ($Appid)
@@ -798,7 +809,7 @@ Function RunInventorySetup()
         {
             Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
             Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            Exit
+            exit 1
         }
 
         if (![string]::IsNullOrEmpty($ResourceGroup))

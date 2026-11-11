@@ -95,10 +95,11 @@ Describe 'A direct run with -ResourceGroup and no -SubscriptionID' {
     It 'stops with exit 1' {
         $Root = Split-Path $PSScriptRoot -Parent
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
-        $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'ResourceInventoryLoop' }, $true))
-        $Fn.Count | Should -Be 1
+        # The refusal is found by its message, wherever in the script it sits.
+        $Check = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item2.Extent.Text -like '*must also put SubscriptionId*' }, $true))
+        $Check.Count | Should -Be 1
         $Script = Join-Path $TestDrive 'rg.ps1'
-        Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) }`n`$ResourceGroup = 'rg-1'`n`$SubscriptionID = `$null`n" + $Fn[0].Extent.Text + "`nResourceInventoryLoop`n'NOT STOPPED'")
+        Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) }`n`$ResourceGroup = 'rg-1'`n`$SubscriptionID = `$null`n" + $Check[0].Extent.Text + "`n'NOT STOPPED'")
         $Pwsh = (Get-Process -Id $PID).Path
         $Out = & $Pwsh -NoProfile -NonInteractive -File $Script
         $LASTEXITCODE | Should -Be 1

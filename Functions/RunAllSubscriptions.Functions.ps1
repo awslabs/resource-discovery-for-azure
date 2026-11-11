@@ -695,6 +695,8 @@ function Move-UnreadableStreamFile
     param([Parameter(Mandatory = $true)][string]$Path, [string]$Reason, [switch]$Interrupted)
     $Aside = '{0}.unreadable-{1}' -f $Path, (Get-Date -Format 'yyyyMMddHHmmssfff')
     $Of = if ($Interrupted) { ' of an interrupted run' } else { '' }
+    # One full stop after the reason, whether or not it ends with one.
+    $Reason = ([string]$Reason).TrimEnd('.', ' ') + '.'
     try { Move-Item -LiteralPath $Path -Destination $Aside -ErrorAction Stop }
     catch
     {

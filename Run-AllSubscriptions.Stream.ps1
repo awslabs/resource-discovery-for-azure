@@ -157,6 +157,9 @@ $FailedAttempts = @()
 # The report zip recorded per completed sub (New-CompletedReportRecord), kept in
 # this stream's state so the parent can carry it on a later -Resume.
 $Reports = @()
+# The parent's start-up fold has removed or put aside every per-stream file
+# before this stream starts, so this reads a file only if one of this run is
+# there (none today); another run's file reads as empty.
 if ($Resume -or $ResumeFailedOnly)
 {
     $State = Read-StreamState -Path $StreamStateFile -RunId $RunId

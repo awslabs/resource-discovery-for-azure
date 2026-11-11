@@ -920,7 +920,8 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
     }
 
     It 'a stream does not list a sub as both completed and failed when a sub its own state file held as completed fails' {
-        # The stream's own file (an earlier run) lists sub-b as completed; this
+        # Guards the catch-block rule only: the stream's own file lists sub-b as
+        # completed (a case the start-up fold prevents today) and this
         # -ResumeFailedOnly run is given sub-b again and it fails.
         $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })
         $StreamFile = Join-Path $script:Root '.resume-state-t-stream-0.json'
@@ -962,10 +963,10 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
         @($Agg.CompletedIds) | Should -Not -Contain 'sub-b' -Because "a file for $Case gives no completion"
         @($Agg.CompletedReports | ForEach-Object { [string]$_.Id }) | Should -Not -Contain 'sub-b'
-        # Another run's file is put aside, so the next start-up fold does not
-        # take it; this run's file is merged and removed.
+        # Another run's file is put aside (to be deleted), so the next start-up
+        # fold does not take it; this run's file is merged and removed.
         Test-Path -LiteralPath $File | Should -BeFalse
-        @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t-stream-0.json.unreadable-*' -Force).Count | Should -Be $(if ($Aside) { 1 } else { 0 })
+        @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t-stream-0.json.other-run-*' -Force).Count | Should -Be $(if ($Aside) { 1 } else { 0 })
     }
 
     It 'every stream summary and state file carries the run id the parent gave the stream' {
@@ -975,7 +976,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Wrapper | Should -Match 'RunId\s+=\s+\$StreamRunId'
         # Each run's summaries are named with its id, and earlier runs' are removed at the start.
         $Wrapper | Should -Match ([regex]::Escape('".rda-stream-{0}-summary-{1}.json" -f $S, $StreamRunId'))
-        $Wrapper | Should -Match ([regex]::Escape("-Filter '.rda-stream-*-summary-*.json*'"))
+        $Wrapper | Should -Match ([regex]::Escape('-Filter (".rda-stream-{0}-summary-*.json*" -f $S)'))
         # The no-subscriptions, failed-to-start and full summaries.
         ([regex]::Matches($Worker, 'RunId\s+=\s+\$RunId')).Count | Should -Be 3
         $Functions | Should -Match 'RunId\s+=\s+\$RunId'

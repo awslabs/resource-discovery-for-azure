@@ -1548,8 +1548,8 @@ else
     #   - Its own resume-state file at
     #     $InventoryRoot/.resume-state-<TenantID>-stream-<N>.json
     #     so concurrent state writes cannot race.
-    #   - Its own per-stream summary JSON (.rda-stream-<N>-summary.json) which the
-    #     parent aggregates at the end.
+    #   - Its own per-stream summary JSON (.rda-stream-<N>-summary-<run id>.json)
+    #     which the parent aggregates at the end.
     #   - Its own per-stream failures log (RunAllSubscriptions_failures_*_stream-<N>.log).
     #
     # All streams share:
@@ -1689,31 +1689,24 @@ else
     }
     if ($StreamCount -ge 2)
     {
-        # A stream summary an interrupted earlier run left
-        # (.rda-stream-<N>-summary.json) would be read as this run's when the
-        # new stream ends without writing one. Every one this run uses is
-        # removed here, before the sign-in snapshot is written and before any
-        # stream starts; one that cannot be removed stops the run here, before
-        # it collects anything (exit 1).
+        # Stream summaries earlier runs left are never read: each run names its
+        # own with its run id (below) and reads only those. They are removed
+        # here so they do not pile up, both the older shared name
+        # (.rda-stream-<N>-summary.json) and earlier runs' run-named ones; one
+        # that cannot be removed gets a warning and the run goes on.
         for ($S = 0; $S -lt $StreamCount; $S++)
         {
             $StaleSummary = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
             if (Test-Path -LiteralPath $StaleSummary -PathType Leaf)
             {
                 try { Remove-Item -LiteralPath $StaleSummary -Force -ErrorAction Stop }
-                catch
-                {
-                    Write-Host ("ERROR: Could not remove the stream summary {0} an earlier run left: {1}. Remove it, then run again. Nothing was collected (exit 1)." -f $StaleSummary, $_.Exception.Message) -ForegroundColor Red
-                    Exit-Wrapper -Code 1
-                }
+                catch { Write-Host ("WARNING: Could not remove the stream summary {0} an earlier run left: {1}. It is not read; remove it when you can." -f $StaleSummary, $_.Exception.Message) -ForegroundColor Yellow }
             }
-        }
-        # The summaries of earlier runs under their run's name are never read
-        # (each run reads only its own); removed so they do not pile up.
-        foreach ($Old in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter '.rda-stream-*-summary-*.json*' -File -Force -ErrorAction SilentlyContinue))
-        {
-            try { Remove-Item -LiteralPath $Old.FullName -Force -ErrorAction Stop }
-            catch { Write-Host ("WARNING: Could not remove the stream summary {0} an earlier run left: {1}. It is not read; remove it when you can." -f $Old.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+            foreach ($Old in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".rda-stream-{0}-summary-*.json*" -f $S) -File -Force -ErrorAction SilentlyContinue))
+            {
+                try { Remove-Item -LiteralPath $Old.FullName -Force -ErrorAction Stop }
+                catch { Write-Host ("WARNING: Could not remove the stream summary {0} an earlier run left: {1}. It is not read; remove it when you can." -f $Old.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+            }
         }
 
         # Snapshot the parent's Az context to a shared file so each stream can
@@ -1749,9 +1742,10 @@ else
         # Declared outside the try so the finally can always see them.
         $Jobs = @()
         $StreamSummaries = @()
-        # This run's id: each stream writes it into its summary, and a summary
-        # without it (a worker of an earlier run that is still running wrote
-        # the shared path) is not used.
+        # This run's id: it names this run's stream summaries, and each stream
+        # writes it into its summary and its state file; a summary or state
+        # file without it (placed or copied under this run's name, or written
+        # by a worker of an earlier run) is not used.
         $StreamRunId = [guid]::NewGuid().ToString('N')
         try
         {
@@ -1979,8 +1973,10 @@ else
                     }
                 }
 
-                # Each stream skips (on -Resume) the subs its own state file lists
-                # as completed, so only the stream knows which ones it skipped.
+                # A stream skips (on -Resume) the subs its own state file lists as
+                # completed. Its file is read only when it is this run's, and the
+                # start-up fold has removed or put aside every per-stream file, so
+                # this list is empty today; it stays for a stream that skips.
                 if ($StreamSummary.Skipped)
                 {
                     foreach ($k in @($StreamSummary.Skipped))
@@ -2045,7 +2041,7 @@ else
             {
                 if (Test-Path -LiteralPath $S.SummaryPath)
                 {
-                    try { Remove-Item -LiteralPath $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
+                    try { Remove-Item -LiteralPath $S.SummaryPath -Force -ErrorAction Stop } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
                 }
             }
 
@@ -2078,7 +2074,19 @@ else
                     # start-up fold does not take it either (exit 2 names it).
                     if ([string]$Obj.RunId -ne [string]$StreamRunId)
                     {
-                        throw ("it is another run's file (run '{0}', this run is '{1}')" -f $Obj.RunId, $StreamRunId)
+                        $Other = '{0}.other-run-{1}' -f $PerStreamFile, (Get-Date -Format 'yyyyMMddHHmmssfff')
+                        try
+                        {
+                            Move-Item -LiteralPath $PerStreamFile -Destination $Other -ErrorAction Stop
+                            Write-Host ("WARNING: The per-stream resume state file {0} belongs to another run (run '{1}'; this run is '{2}'). Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {3}: delete it; do not rename it back." -f $PerStreamFile, $Obj.RunId, $StreamRunId, $Other) -ForegroundColor Yellow
+                        }
+                        catch
+                        {
+                            $Other = $PerStreamFile
+                            Write-Host ("WARNING: The per-stream resume state file {0} belongs to another run (run '{1}'; this run is '{2}') and could not be moved aside: {3} Its records are not used, so this run keeps the resume state and ends with exit 2. Delete it before the next run." -f $PerStreamFile, $Obj.RunId, $StreamRunId, $_.Exception.Message) -ForegroundColor Yellow
+                        }
+                        $UnreadableStreamFiles += $Other
+                        continue
                     }
                     $MergedStreamFiles += $StreamFile
                     # A completed sub counts only with its report record, so a

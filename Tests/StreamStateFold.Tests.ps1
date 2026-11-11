@@ -640,17 +640,25 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
         $script:PreBlock = [scriptblock]::Create("param(`$InventoryRoot, `$StreamCount)`n" + $Pre[0].Extent.Text)
     }
 
-    It 'leaves no stream summary of an earlier run, and stops with exit 1 before any stream when one cannot be removed' {
+    It 'leaves no stream summary of an earlier run, under the old shared name or a run''s name, and warns but goes on when one cannot be removed' {
         function Exit-Wrapper { param([int]$Code) throw ('EXIT ' + $Code) }
-        Mock Write-Host { }
+        $script:Warned = @()
+        Mock Write-Host { $script:Warned += [string]$Object }
         $Dir = Join-Path $script:TestBase ('stale-' + [guid]::NewGuid().ToString().Substring(0, 8))
         New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-        foreach ($N in 0, 1) { Set-Content -LiteralPath (Join-Path $Dir ('.rda-stream-{0}-summary.json' -f $N)) -Value '{}' }
+        foreach ($N in 0, 1)
+        {
+            Set-Content -LiteralPath (Join-Path $Dir ('.rda-stream-{0}-summary.json' -f $N)) -Value '{}'
+            Set-Content -LiteralPath (Join-Path $Dir ('.rda-stream-{0}-summary-oldrun.json' -f $N)) -Value '{}'
+            Set-Content -LiteralPath (Join-Path $Dir ('.rda-stream-{0}-summary-oldrun.json.tmp' -f $N)) -Value '{}'
+        }
         & $script:PreBlock $Dir 2
-        @(Get-ChildItem -LiteralPath $Dir -Force -Filter '.rda-stream-*-summary.json') | Should -BeNullOrEmpty
-        foreach ($N in 0, 1) { Set-Content -LiteralPath (Join-Path $Dir ('.rda-stream-{0}-summary.json' -f $N)) -Value '{}' }
-        Mock Remove-Item -ParameterFilter { [string]$LiteralPath -like '*.rda-stream-1-summary.json' } -MockWith { throw 'stand-in: denied' }
-        { & $script:PreBlock $Dir 2 } | Should -Throw 'EXIT 1'
+        @(Get-ChildItem -LiteralPath $Dir -Force -Filter '.rda-stream-*-summary*') | Should -BeNullOrEmpty
+        Set-Content -LiteralPath (Join-Path $Dir '.rda-stream-1-summary.json') -Value '{}'
+        Set-Content -LiteralPath (Join-Path $Dir '.rda-stream-1-summary-oldrun.json') -Value '{}'
+        Mock Remove-Item -ParameterFilter { [string]$LiteralPath -like '*.rda-stream-1-summary*' } -MockWith { throw 'stand-in: denied' }
+        { & $script:PreBlock $Dir 2 } | Should -Not -Throw
+        @($script:Warned | Where-Object { $_ -like 'WARNING: Could not remove the stream summary *stand-in: denied. It is not read; remove it when you can.' }).Count | Should -Be 2
     }
 
     It 'says the state was cleared at the end of a clean run only when its removal worked' {

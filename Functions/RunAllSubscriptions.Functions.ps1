@@ -770,6 +770,64 @@ function Remove-FailedAttempt
 # Get-ChildItem hides dot-files by default on Unix. Pulled out to its own
 # function purely so it can be exercised by a Pester test against a temp
 # directory without spinning up any streams.
+# The id of the parallel run whose streams are running or were cut off, in
+# .rda-stream-run-<tenant>.json: written before the streams start and removed
+# after the end-of-run merge, so the next run's start-up fold folds in only
+# that run's per-stream files. A write or read that fails only loses the
+# folding of that run's files (their subscriptions are collected again).
+function Get-StreamRunMarkerPath
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
+    return (Join-Path $InventoryRoot ('.rda-stream-run-{0}.json' -f $Tenant))
+}
+
+function Set-StreamRunMarker
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant, [string]$RunId)
+    if ([string]::IsNullOrEmpty($RunId)) { return }
+    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
+    try { @{ RunId = $RunId } | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding utf8 -ErrorAction Stop }
+    catch { Write-Host ("WARNING: Could not write {0}: {1} If this run is cut off, the next -Resume does not fold in its streams' records; those subscriptions are collected again." -f $Path, (([string]$_.Exception.Message).TrimEnd('.', ' ') + '.')) -ForegroundColor Yellow }
+}
+
+function Get-StreamRunMarker
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
+    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    try { return [string](Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).RunId }
+    catch { return '' }
+}
+
+function Remove-StreamRunMarker
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
+    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    try { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch { Write-Host ("WARNING: Could not remove {0}: {1} Remove it before the next run." -f $Path, (([string]$_.Exception.Message).TrimEnd('.', ' ') + '.')) -ForegroundColor Yellow }
+}
+
+# Put aside a per-stream resume state file of another run (its run id is not
+# the one expected): its records are not used. Returns the path it now has,
+# for the caller's list of files that keep the state (exit 2).
+function Move-OtherRunStreamFile
+{
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$FileRunId)
+    $Other = '{0}.other-run-{1}' -f $Path, (Get-Date -Format 'yyyyMMddHHmmssfff')
+    try
+    {
+        Move-Item -LiteralPath $Path -Destination $Other -ErrorAction Stop
+        Write-Host ("WARNING: The per-stream resume state file {0} belongs to another run (run '{1}'). Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {2}: delete it; do not rename it back. No later run names it again." -f $Path, $FileRunId, $Other) -ForegroundColor Yellow
+        return $Other
+    }
+    catch
+    {
+        Write-Host ("WARNING: The per-stream resume state file {0} belongs to another run (run '{1}') and could not be moved aside: {2} Its records are not used, so this run keeps the resume state and ends with exit 2. Delete it before the next run." -f $Path, $FileRunId, (([string]$_.Exception.Message).TrimEnd('.', ' ') + '.')) -ForegroundColor Yellow
+        return $Path
+    }
+}
+
 function Get-StreamResumeStateFiles
 {
     param(

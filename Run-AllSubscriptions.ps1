@@ -799,6 +799,13 @@ if ($Resume -or $ResumeFailedOnly)
         $UnreadableStreamFiles += $Aside.FullName
     }
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
+    # The run whose streams were cut off: a parallel run writes its id to this
+    # file before its streams start and removes it after its end-of-run merge,
+    # so the file names the interrupted run, if any. Only that run's per-stream
+    # files (and those of an older version, which carry no run id) are folded
+    # in; another run's (a worker that went on writing after its run ended) is
+    # put aside, so a late completion cannot end a newer failure.
+    $InterruptedRunId = Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
     if ($StrandedStreamFiles.Count -gt 0)
     {
         $StrandedCompleted = @()
@@ -814,6 +821,12 @@ if ($Resume -or $ResumeFailedOnly)
                 # otherwise read as a file with no record, and be removed.
                 $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
+                $FileRunId = [string]$Obj.RunId
+                if (-not [string]::IsNullOrEmpty($FileRunId) -and $FileRunId -ne [string]$InterruptedRunId)
+                {
+                    $UnreadableStreamFiles += Move-OtherRunStreamFile -Path $StreamFile.FullName -FileRunId $FileRunId
+                    continue
+                }
                 if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
                 if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
@@ -961,6 +974,9 @@ else
         }
     }
 }
+# The per-stream files of the run the marker named are folded in or removed
+# above, so it no longer names a run whose files are still to come.
+Remove-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
 
 if ($Resume)
 {
@@ -989,7 +1005,8 @@ if ($Resume)
     }
     elseif ($RecollectIds.Count -eq 0)
     {
-        Write-Host "Resume mode: no previous state found; processing all subscriptions." -ForegroundColor Cyan
+        if (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf) { Write-Host "Resume mode: no completed subscriptions to skip; processing all subscriptions." -ForegroundColor Cyan }
+        else { Write-Host "Resume mode: no previous state found; processing all subscriptions." -ForegroundColor Cyan }
     }
 }
 else
@@ -1775,6 +1792,10 @@ else
                 $Slices[$i % $StreamCount].Add($PendingSubscriptions[$i])
             }
 
+            # This run's id, for the start-up fold of the next run should these
+            # streams be cut off (removed again after the end-of-run merge).
+            Set-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId
+
             # Build per-stream output paths up front so we know where to look later.
             for ($S = 0; $S -lt $StreamCount; $S++)
             {
@@ -2078,18 +2099,7 @@ else
                     # start-up fold does not take it either (exit 2 names it).
                     if ([string]$Obj.RunId -ne [string]$StreamRunId)
                     {
-                        $Other = '{0}.other-run-{1}' -f $PerStreamFile, (Get-Date -Format 'yyyyMMddHHmmssfff')
-                        try
-                        {
-                            Move-Item -LiteralPath $PerStreamFile -Destination $Other -ErrorAction Stop
-                            Write-Host ("WARNING: The per-stream resume state file {0} belongs to another run (run '{1}'; this run is '{2}'). Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {3}: delete it; do not rename it back. No later run names it again." -f $PerStreamFile, $Obj.RunId, $StreamRunId, $Other) -ForegroundColor Yellow
-                        }
-                        catch
-                        {
-                            $Other = $PerStreamFile
-                            Write-Host ("WARNING: The per-stream resume state file {0} belongs to another run (run '{1}'; this run is '{2}') and could not be moved aside: {3} Its records are not used, so this run keeps the resume state and ends with exit 2. Delete it before the next run." -f $PerStreamFile, $Obj.RunId, $StreamRunId, (([string]$_.Exception.Message).TrimEnd('.', ' ') + '.')) -ForegroundColor Yellow
-                        }
-                        $UnreadableStreamFiles += $Other
+                        $UnreadableStreamFiles += Move-OtherRunStreamFile -Path $PerStreamFile -FileRunId ([string]$Obj.RunId)
                         continue
                     }
                     $MergedStreamFiles += $StreamFile
@@ -2206,6 +2216,8 @@ else
                 # calls itself clean while they wait for the next run (exit 2).
                 $LeftStreamFiles += @($MergedStreamFiles | ForEach-Object { $_.FullName })
             }
+            # The merge is done: no later run is to fold this run's files.
+            Remove-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
         }
         finally
         {

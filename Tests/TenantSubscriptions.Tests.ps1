@@ -15,8 +15,8 @@
 #  - keep every state (a Disabled or Warned subscription is still listed).
 #    The callers choose: a direct run without -SubscriptionID keeps the
 #    Enabled ones, as `az account list` did by default
-#    (DirectRunEnabledSubscriptions.Tests.ps1), and the -RunAllSubs wrapper
-#    applies its own Enabled filter.
+#    (DirectRunEnabledSubscriptions.Tests.ps1); under -RunAllSubs every
+#    state is kept and the wrapper chooses the subscriptions.
 #  - give callers the properties they read from the az objects: id, name,
 #    tenantId, homeTenantId, state.
 #

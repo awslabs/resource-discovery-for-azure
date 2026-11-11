@@ -131,7 +131,7 @@ $Global:ResourceCount = 1
     $script:AggregateBlock = [scriptblock]::Create(
         "param(`$StreamSummaries, `$InventoryRoot, `$TenantID, `$ResumeStateFile, `$CompletedIds, `$FailedAttempts, `$CompletedReports)`n" +
         "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$RunStartTime = (Get-Date).AddMinutes(-1); `$StreamRunId = 'run-1'`n" +
-        $AggText + "`n[pscustomobject]@{ SkippedSubscriptions = @(`$SkippedSubscriptions); SubResourceCounts = @(`$SubResourceCounts); CompletedIds = @(`$CompletedIds); CompletedReports = @(`$CompletedReports); FailedSubscriptions = @(`$FailedSubscriptions); UnreadableStreamFiles = @(`$UnreadableStreamFiles) }")
+        $AggText + "`n[pscustomobject]@{ SkippedSubscriptions = @(`$SkippedSubscriptions); SubResourceCounts = @(`$SubResourceCounts); CompletedIds = @(`$CompletedIds); CompletedReports = @(`$CompletedReports); FailedSubscriptions = @(`$FailedSubscriptions); UnreadableStreamFiles = @(`$UnreadableStreamFiles); ResumeStateSaveFailed = [bool]`$script:ResumeStateSaveFailed }")
 
     # Post-processing shared by both paths: from "All subscriptions processed!"
     # through the MainSummary.html build. Exit-Wrapper is replaced so a failed
@@ -992,6 +992,26 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         }
         & (Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1') @WorkerArgs 6>$null
         (Get-Content -LiteralPath $Summary -Raw | ConvertFrom-Json).RunId | Should -Be 'run-1'
+    }
+
+    It 'parallel: when the resume state does not take what only the summaries gave, the run says so and ends with the not-saved note' {
+        $S = script:Read-State -Path $script:State
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })
+        $Zip = Join-Path $script:Root 'sub-b-report.zip'
+        Set-Content -LiteralPath $Zip -Value 'zip'
+        $Record = New-CompletedReportRecord -InventoryRoot $script:Root -Id 'sub-b' -Name 'Sub B' -ZipPath $Zip -Obfuscated $false
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ RunId = 'run-1'; StreamId = '0'; Tenant = 't'; Status = 'ok'; Completed = @('sub-b'); Reports = @($Record); ResourceCounts = @(); Failed = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1; SubIds = @('sub-b') })
+        # The save does not reach the disk (and says nothing).
+        Mock Save-CompletedSubscriptionIds { }
+        $script:ResumeStateSaveFailed = $false
+        $script:Said = @()
+        Mock Write-Host { $script:Said += [string]$Object }
+        $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports
+        @($script:Said | Where-Object { $_ -like "WARNING: The resume state file * does not hold every record this run's stream summaries gave, so it does not show this run's results; see the FAILED (resume state not saved) note*" }).Count | Should -Be 1
+        $Agg.ResumeStateSaveFailed | Should -BeTrue -Because 'the end-of-run note and exit 2 follow from it'
+        $script:ResumeStateSaveFailed = $false
     }
 
     It 'parallel: a subscription a stream''s summary lists as completed without a report record is not counted completed' {

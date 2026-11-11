@@ -1947,9 +1947,9 @@ else
                     $StreamNoReportIds += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
                 }
 
-                # The subs the summary lists as completed (this run's; the stream
-                # reads its own state file only when it is this run's, which the
-                # start-up fold has removed, so none from earlier runs), each with
+                # The subs the summary lists as completed (only this run's: the
+                # start-up fold has removed or put aside every earlier run's
+                # per-stream file, and the stream reads only a file of this run), each with
                 # the report zip it recorded, for the merge below: the stream's
                 # own state file on disk misses some when a save of it did not
                 # reach the disk. Only the subs this stream was given count. One
@@ -2184,7 +2184,13 @@ else
             else
             {
                 if (@($MergedStreamFiles).Count -gt 0) { Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($MergedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow }
-                else { Write-Host ("WARNING: The resume state file {0} does not hold every record this run's stream summaries gave; the next run collects those subscriptions again." -f $ResumeStateFile) -ForegroundColor Yellow }
+                else
+                {
+                    Write-Host ("WARNING: The resume state file {0} does not hold every record this run's stream summaries gave, so it does not show this run's results; see the FAILED (resume state not saved) note at the end of the run for how to run next." -f $ResumeStateFile) -ForegroundColor Yellow
+                    # The file does not hold this run's results, as after a save
+                    # that failed: the end-of-run note and exit 2 say so.
+                    $script:ResumeStateSaveFailed = $true
+                }
                 # They keep the resume state too: the run neither clears it nor
                 # calls itself clean while they wait for the next run (exit 2).
                 $LeftStreamFiles += @($MergedStreamFiles | ForEach-Object { $_.FullName })

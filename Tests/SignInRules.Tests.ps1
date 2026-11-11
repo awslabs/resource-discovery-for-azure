@@ -423,7 +423,7 @@ Describe 'A direct run with nothing to collect, or nobody to sign in, stops' {
 
         $script:Run.ExitCode | Should -Be 1
         $script:Run.Returned | Should -BeFalse
-        $script:Run.Output | Should -Match 'lists no (Enabled )?subscription'
+        $script:Run.Output | Should -Match 'lists no Enabled subscription'
     }
 
     It 'stops with exit 1, without opening a browser, in a session with no console and nothing signed in' {

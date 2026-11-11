@@ -267,8 +267,8 @@ function Test-RdaInteractiveSession
 # PowerShell with -TenantId, so a subscription delegated to the tenant (Azure
 # Lighthouse), whose HomeTenantId is another tenant, is kept. A subscription
 # returned twice is listed once (first one kept, ids compared without case).
-# Every state is kept, as `az account list` listed them; the -RunAllSubs
-# wrapper applies its own Enabled filter. Each entry has the properties
+# Every state is kept; callers filter (a direct run without -SubscriptionID
+# keeps Enabled ones, and the -RunAllSubs wrapper applies its own filter). Each entry has the properties
 # callers read: id, name, tenantId (the tenant asked when Az gives none),
 # homeTenantId and state.
 function Get-RdaTenantSubscriptions

@@ -1776,6 +1776,8 @@ else
                     SummaryPath  = $SummaryPath
                     FailuresPath = $FailuresPath
                     SubCount     = $SliceList.Count
+                    # The ids this stream was given, for the summary check below.
+                    SubIds       = @($SliceIds)
                 }
 
                 Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan
@@ -1930,16 +1932,22 @@ else
                     $StreamNoReportIds += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
                 }
 
-                # The subs this stream completed this run, each with the report
-                # zip it recorded, for the merge below: the stream's own state
-                # file misses them when no save of it reached the disk. One
+                # The subs the summary lists as completed (this run's, plus those
+                # the stream's own state file held), each with the report zip it
+                # recorded, for the merge below: the stream's own state file on
+                # disk misses some when a save of it did not reach the disk. Only
+                # a summary of this tenant and this stream counts, and only for
+                # the subs this stream was given, so a summary another run wrote
+                # at the same path cannot end other subscriptions' retries. One
                 # without a record is left out, so it is collected again.
-                if ($StreamSummary.Status -ne 'failed-to-start' -and $StreamSummary.Completed)
+                $SummaryIsThisStream = [string]$StreamSummary.Tenant -eq [string]$TenantID -and [string]$StreamSummary.StreamId -eq [string]$S.StreamId
+                if ($SummaryIsThisStream -and $StreamSummary.Status -ne 'failed-to-start' -and $StreamSummary.Completed)
                 {
                     $SummaryReports = Get-LatestCompletedReports -Reports @($StreamSummary.Reports)
+                    $GivenIds = if ($S.PSObject.Properties['SubIds']) { @($S.SubIds | ForEach-Object { [string]$_ }) } else { @() }
                     foreach ($DoneId in @($StreamSummary.Completed | Where-Object { $_ } | ForEach-Object { [string]$_ }))
                     {
-                        if (-not $SummaryReports.ContainsKey($DoneId)) { continue }
+                        if ($GivenIds -notcontains $DoneId -or -not $SummaryReports.ContainsKey($DoneId)) { continue }
                         $StreamCompletedIds += $DoneId
                         $StreamCompletedReports += $SummaryReports[$DoneId]
                     }
@@ -2065,8 +2073,8 @@ else
                     $UnreadableStreamFiles += $Aside
                 }
             }
-            # What the summaries list as completed this run, after the files, so
-            # their reports win; the rules below still end any that failed or
+            # What the summaries list as completed (see above), after the files,
+            # so their reports win; the rules below still end any that failed or
             # left no zip.
             $AllCompletedFromStreams += @($StreamCompletedIds | Where-Object { $_ })
             $AllReportsFromStreams += @($StreamCompletedReports | Where-Object { $null -ne $_ })

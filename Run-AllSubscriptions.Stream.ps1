@@ -350,6 +350,10 @@ for ($i = 0; $i -lt $PairCount; $i++)
         # history to the next -ResumeFailedOnly invocation.
         $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts `
             -Id $SubId -Name $SubName -Reason $ErrRecord.Exception.Message
+        # A sub an earlier run completed is not completed once it fails here:
+        # the file and the summary must not list it as both.
+        $Completed = @($Completed | Where-Object { $_ -ne $SubId })
+        $Reports = @($Reports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $SubId })
         Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $Reports
     }
 }
@@ -375,7 +379,8 @@ $Summary = [pscustomobject]@{
     SubsProcessed          = $PairCount
     Completed              = @($Completed)
     # The report zip of each completed sub, so the parent can record them when
-    # no save of this stream's own state file reached the disk.
+    # the stream's own state file on disk misses some of them (a save did not
+    # reach the disk).
     Reports                = @($Reports)
     Failed                 = $FailedSubs
     Skipped                = @($SkippedSubs)

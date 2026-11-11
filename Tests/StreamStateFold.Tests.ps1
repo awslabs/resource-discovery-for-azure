@@ -631,8 +631,8 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
         $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
     }
 
-    It 'ends with exit 2 while a resume state that could not be saved is on disk or was put aside' {
-        $script:Src | Should -Match ([regex]::Escape('-ReportsMissing (($ResumeStateSaveFailed -and ($StateSetAside -or (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))) -or ('))
+    It 'ends with exit 2 when a resume state could not be saved and the run is not clean' {
+        $script:Src | Should -Match ([regex]::Escape('-ReportsMissing (($ResumeStateSaveFailed -and -not $RunClean) -or ('))
     }
 
     It 'removes every stream summary an earlier run left before the sign-in snapshot and the first stream' {
@@ -676,7 +676,8 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
 
     It 'says the state was cleared at the end of a clean run only when its removal worked' {
         $script:Src | Should -Match ([regex]::Escape('Remove-Item -LiteralPath $ResumeStateFile -Force -ErrorAction Stop'))
-        $script:Src | Should -Match ([regex]::Escape('if (-not (Test-Path -LiteralPath $ResumeStateFile)) { Write-Host "Resume state cleared (clean run)." -ForegroundColor Green }'))
+        $script:Src | Should -Match ([regex]::Escape('if (-not (Test-Path -LiteralPath $ResumeStateFile))'))
+        $script:Src | Should -Match ([regex]::Escape('Write-Host "Resume state cleared (clean run)." -ForegroundColor Green'))
     }
 
     It 'removes the stream summaries by literal path' {

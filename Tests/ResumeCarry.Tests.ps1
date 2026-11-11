@@ -385,7 +385,7 @@ Describe 'Exit code when an earlier report is missing from the consolidated zip'
 
     It 'the wrapper passes the uncarried list to the exit code and prints the FAILED banner before its transcript stops' {
         $Src = Get-Content -LiteralPath $script:WrapperPath -Raw
-        $Src | Should -Match ([regex]::Escape('Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing (($ResumeStateSaveFailed -and ($StateSetAside -or (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))) -or (@($UncarriedSkipped).Count -gt 0) -or (@($RetryLimitedOwed).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0) -or (@($LeftStreamFiles).Count -gt 0) -or (@($RetryOwedNotInRun).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)'))
+        $Src | Should -Match ([regex]::Escape('Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing (($ResumeStateSaveFailed -and -not $RunClean) -or (@($UncarriedSkipped).Count -gt 0) -or (@($RetryLimitedOwed).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0) -or (@($LeftStreamFiles).Count -gt 0) -or (@($RetryOwedNotInRun).Count -gt 0)) -SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)'))
         $Lines = Get-Content -LiteralPath $script:WrapperPath
         $Banner = ($Lines | Select-String -SimpleMatch 'FAILED (earlier report not carried) =' | Select-Object -First 1).LineNumber
         $Stop = ($Lines | Select-String -SimpleMatch 'Stop-Transcript on normal completion failed' | Select-Object -First 1).LineNumber
@@ -719,6 +719,22 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         @($Agg.FailedSubscriptions).Count | Should -Be 1
     }
 
+    It 'a stream that did not start counts one more failed run for each sub it leaves not done, once, so the retry limit ends a stream that never starts' {
+        $S = script:Read-State -Path $script:State
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ RunId = 'run-1'; StreamId = '0'; Tenant = 't'; Status = 'failed-to-start'; Reason = 'stand-in'; Completed = @(); ResourceCounts = @()
+            Failed = @(@{ Id = 'sub-a'; Name = 'Sub A'; Reason = 'stream did not start' }, @{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stream did not start' }, @{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stream did not start' })
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2 })
+        $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
+        @($Agg.CompletedIds) | Should -Be @('sub-a') -Because 'the stream attempted nothing, so the earlier completion stays'
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        @($After | ForEach-Object Id) | Should -Be @('sub-b')
+        [int]$After[0].Attempts | Should -Be 3 -Because 'listed twice, it is still one failed run'
+        @(Get-RetryLimitedAttempts -FailedAttempts $After | ForEach-Object Id) | Should -Be @('sub-b')
+    }
+
     It 'sequential: a run without -Resume leaves no zip for sub-a, and the next -Resume collects it again' {
         $Run1Zip = Split-Path -Path (script:Read-State -Path $script:State).Reports[0].Zip -Leaf
         $Global:RdaCarryTestNoZipIds = @('sub-a')
@@ -1031,15 +1047,17 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         # failed or owed) removes it first, and then nothing is said, since
         # nothing is left to skip wrongly.
         $Top = @([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null).EndBlock.Statements)
-        $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$FailedSubscriptions.Count -eq 0 -and $RetryOwedCount -eq 0*' })
-        $Note = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
+        $IsClean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$RunClean' })
+        $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
+        $Note = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeStateSaveFailed -and -not $RunClean' })
+        $IsClean.Count | Should -Be 1
         $Clean.Count | Should -Be 1
         $Note.Count | Should -Be 1
         foreach ($Case in @(@{ Owed = 1; Shown = $true }, @{ Owed = 0; Shown = $false }))
         {
             Set-Content -LiteralPath $script:State -Value '{}'
             $script:Said = @()
-            $End = [scriptblock]::Create("param(`$ResumeStateFile, `$RetryOwedCount)`n`$FailedSubscriptions = @(); `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @(); `$ResumeStateSaveFailed = `$true`n" + $Clean[0].Extent.Text + "`n" + $Note[0].Extent.Text)
+            $End = [scriptblock]::Create("param(`$ResumeStateFile, `$RetryOwedCount)`n`$FailedSubscriptions = @(); `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @(); `$ResumeStateSaveFailed = `$true; `$StatePutAside = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Note[0].Extent.Text)
             & $End $script:State $Case.Owed
             @($script:Said | Where-Object { $_ -like '*FAILED (resume state not saved)*' }).Count | Should -Be $(if ($Case.Shown) { 1 } else { 0 })
             Test-Path -LiteralPath $script:State | Should -BeFalse
@@ -1124,8 +1142,9 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
     }
 
     It 'a failed save of the resume state after a subscription fails is named at the end, and the file is put aside so no later run skips on it (<Case>)' -ForEach @(
-        @{ Case = 'put aside'; MoveFails = $false }
-        @{ Case = 'cannot be put aside'; MoveFails = $true }
+        @{ Case = 'put aside'; MoveFails = $false; NoFile = $false }
+        @{ Case = 'cannot be put aside'; MoveFails = $true; NoFile = $false }
+        @{ Case = 'no state file: a mark is made'; MoveFails = $false; NoFile = $true }
     ) {
         # Run 1 (BeforeEach) completed sub-a. This run fails sub-a, and its save of
         # that does not reach the disk, so the file still lists sub-a as completed:
@@ -1143,6 +1162,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         Set-Variable -Name ResumeStateSaveFailed -Value $true
         Set-Variable -Name ResumeStateFile -Value $script:State
         if ($MoveFails) { Mock Move-Item -ParameterFilter { [string]$LiteralPath -eq $script:State } -MockWith { throw 'stand-in: denied' } }
+        if ($NoFile) { Remove-Item -LiteralPath $script:State -Force }
         $Lines = @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
         if ($MoveFails)
         {
@@ -1154,7 +1174,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         {
             $Aside = @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t.json.not-saved-*' -Force)
             $Aside.Count | Should -Be 1
-            @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written with this run''s results*put aside as {1}: no -Resume or -ResumeFailedOnly run skips a subscription on it, and the next run collects every subscription.' -f $script:State, $Aside[0].FullName) }).Count | Should -Be 1
+            @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written with this run''s results*put aside as {1}. No -Resume run skips a subscription on it*-ResumeFailedOnly refuses to run until a run saves the resume state again.' -f $script:State, $Aside[0].FullName) }).Count | Should -Be 1
             # The next -Resume finds no state, so it skips nothing: sub-a is collected again.
             Test-Path -LiteralPath $script:State | Should -BeFalse
             @(Get-CompletedSubscriptionIds -Path $script:State -Tenant 't') | Should -BeNullOrEmpty
@@ -1172,7 +1192,9 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Banner.Count | Should -Be 1
         Set-Variable -Name ResumeStateSaveFailed -Value $true
         Set-Variable -Name ResumeStateFile -Value (Join-Path $script:Root 'no-such-state.json')
-        @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1) | Should -BeNullOrEmpty -Because 'a run that cleared the state leaves nothing a -Resume could skip on'
+        Set-Variable -Name RunClean -Value $true
+        @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1) | Should -BeNullOrEmpty -Because 'a clean run leaves nothing owed, so nothing a -Resume could skip on'
+        @(Get-ChildItem -LiteralPath $script:Root -Filter 'no-such-state.json.not-saved-*' -Force) | Should -BeNullOrEmpty
     }
 
     It 'a run whose saves of the resume state all reach the disk says nothing about it' {
@@ -1256,6 +1278,30 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
             FailedAttempts           = @([ordered]@{ Id = 'sub-c'; Name = 'Sub C'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 })
             LastUpdated              = '2026-01-01T00:00:00Z'
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:State -Encoding utf8
+    }
+
+    It 'after the state is put aside, -ResumeFailedOnly refuses to run (exit 2), -Resume collects every subscription, and a clean run removes the mark' {
+        Remove-Item -LiteralPath $script:State -Force
+        $Mark = Join-Path $script:Root '.resume-state-t.json.not-saved-20260101000000000'
+        Set-Content -LiteralPath $Mark -Value '{}'
+        $Top = @([System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null).EndBlock.Statements)
+        $Check = @($Top | Where-Object { ($_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -in '$StatePutAside', '$StatePutAsideOnly') -or ($_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeFailedOnly -and $StatePutAsideOnly') })
+        $Check.Count | Should -Be 3
+        $CheckBlock = [scriptblock]::Create("param(`$InventoryRoot, `$ResumeStateFile, `$ResumeFailedOnly)`nfunction Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" + (@($Check | ForEach-Object { $_.Extent.Text }) -join "`n"))
+        $Said = @()
+        { & $CheckBlock $script:Root $script:State $true 6>&1 | ForEach-Object { $Said += [string]$_ } } | Should -Throw 'Exit-Wrapper 2'
+        { & $CheckBlock $script:Root $script:State $false 6>$null } | Should -Not -Throw
+        # -Resume: no state, so it skips nothing and says why.
+        $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>&1)
+        $Lines = @($Start | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { [string]$_.MessageData } | Where-Object { $_ -like 'Resume mode:*' })
+        $Lines | Should -Be @(('Resume mode: an earlier run could not save the resume state (put aside as {0}); processing all subscriptions.' -f $Mark))
+        # A clean run that clears a state saved since removes the mark.
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @()
+        $IsClean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$RunClean' })
+        $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
+        $End = [scriptblock]::Create("param(`$ResumeStateFile, `$StatePutAside)`n`$FailedSubscriptions = @(); `$RetryOwedCount = 0; `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text)
+        & $End $script:State @($Mark) 6>$null
+        Test-Path -LiteralPath $Mark | Should -BeFalse
     }
 
     It 'collects the subscriptions it lists as completed again, says so in one line, and ships a report for each' {

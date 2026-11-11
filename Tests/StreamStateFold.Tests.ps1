@@ -641,10 +641,12 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
         $Pre[0].Extent.StartOffset | Should -BeLessThan $Snapshot[0].Extent.StartOffset
         $Pre[0].Extent.StartOffset | Should -BeLessThan $Launch[0].Extent.StartOffset
         @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text.Contains('Start-Job') -and $args[0].Body.Extent.Text.Contains('Remove-Item -LiteralPath $SummaryPath') }, $true)) | Should -BeNullOrEmpty -Because 'no removal is left inside the launch loop'
-        # Not inside the parallel branch: it runs whatever the stream count.
-        $Parallel = @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.IfStatementAst] -and $args[0].Clauses[0].Item1.Extent.Text -eq '$StreamCount -ge 2' }, $true))
-        $Parallel.Count | Should -BeGreaterThan 0
-        foreach ($P in $Parallel) { ($Pre[0].Extent.StartOffset -ge $P.Extent.StartOffset -and $Pre[0].Extent.EndOffset -le $P.Extent.EndOffset) | Should -BeFalse }
+        # A top-level statement of the script, before the sequential or
+        # parallel split: it runs on every run, sequential ones included.
+        $script:Ast.EndBlock.Statements | Should -Contain $Pre[0]
+        $Split = @($script:Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ParallelStreams -le 1' })
+        $Split.Count | Should -Be 1
+        $Pre[0].Extent.StartOffset | Should -BeLessThan $Split[0].Extent.StartOffset
         $script:PreBlock = [scriptblock]::Create("param(`$InventoryRoot, `$StreamCount)`n" + $Pre[0].Extent.Text)
     }
 

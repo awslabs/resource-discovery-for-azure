@@ -1329,6 +1329,19 @@ $DiagFile = $null
 # subscription, but it can also legitimately mean the subscription is empty).
 $SubResourceCounts = @()
 
+# Stream summaries earlier runs left are never read: each run names its own
+# with its run id (below) and reads only those. Every one is removed here,
+# before the sequential or parallel path, whatever its stream number and
+# whether or not this run uses streams, so they do not pile up: the older
+# shared name (.rda-stream-<N>-summary.json), earlier runs' run-named ones and
+# their temporary files. One that cannot be removed gets a warning and the
+# run goes on.
+foreach ($StaleSummary in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter '.rda-stream-*-summary*.json*' -File -Force -ErrorAction SilentlyContinue))
+{
+    try { Remove-Item -LiteralPath $StaleSummary.FullName -Force -ErrorAction Stop }
+    catch { Write-Host ("WARNING: Could not remove the stream summary {0} an earlier run left: {1}. It is not read; remove it when you can." -f $StaleSummary.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+}
+
 if ($ParallelStreams -le 1)
 {
     # === SEQUENTIAL PATH (default) ============================================
@@ -1686,18 +1699,6 @@ else
         # Skip the parallel orchestration entirely; fall through to the
         # post-processing (consolidation, summary) below.
         $StreamCount = 0
-    }
-    # Stream summaries earlier runs left are never read: each run names its
-    # own with its run id (below) and reads only those. Every one is removed
-    # here, whatever its stream number and whether or not this run uses
-    # streams, so they do not pile up: the older shared name
-    # (.rda-stream-<N>-summary.json), earlier runs' run-named ones and their
-    # temporary files. One that cannot be removed gets a warning and the run
-    # goes on.
-    foreach ($StaleSummary in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter '.rda-stream-*-summary*.json*' -File -Force -ErrorAction SilentlyContinue))
-    {
-        try { Remove-Item -LiteralPath $StaleSummary.FullName -Force -ErrorAction Stop }
-        catch { Write-Host ("WARNING: Could not remove the stream summary {0} an earlier run left: {1}. It is not read; remove it when you can." -f $StaleSummary.FullName, $_.Exception.Message) -ForegroundColor Yellow }
     }
     if ($StreamCount -ge 2)
     {

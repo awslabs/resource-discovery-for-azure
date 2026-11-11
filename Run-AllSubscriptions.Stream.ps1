@@ -374,6 +374,9 @@ $Summary = [pscustomobject]@{
     Status                 = if ($FailedSubs.Count -eq 0) { 'ok' } else { 'partial-failure' }
     SubsProcessed          = $PairCount
     Completed              = @($Completed)
+    # The report zip of each completed sub, so the parent can record them when
+    # no save of this stream's own state file reached the disk.
+    Reports                = @($Reports)
     Failed                 = $FailedSubs
     Skipped                = @($SkippedSubs)
     NoReport               = @($NoReportSubs)

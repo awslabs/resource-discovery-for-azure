@@ -1863,6 +1863,8 @@ else
             # retry list when a stream's own state file cannot be read.
             $StreamFailedEntries = @()
             $StreamNoReportIds = @()
+            $StreamCompletedIds = @()
+            $StreamCompletedReports = @()
             foreach ($S in $StreamSummaries)
             {
                 if (-not (Test-Path -LiteralPath $S.SummaryPath -PathType Leaf))
@@ -1926,6 +1928,21 @@ else
                 if ($StreamSummary.NoReport)
                 {
                     $StreamNoReportIds += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
+                }
+
+                # The subs this stream completed this run, each with the report
+                # zip it recorded, for the merge below: the stream's own state
+                # file misses them when no save of it reached the disk. One
+                # without a record is left out, so it is collected again.
+                if ($StreamSummary.Status -ne 'failed-to-start' -and $StreamSummary.Completed)
+                {
+                    $SummaryReports = Get-LatestCompletedReports -Reports @($StreamSummary.Reports)
+                    foreach ($DoneId in @($StreamSummary.Completed | Where-Object { $_ } | ForEach-Object { [string]$_ }))
+                    {
+                        if (-not $SummaryReports.ContainsKey($DoneId)) { continue }
+                        $StreamCompletedIds += $DoneId
+                        $StreamCompletedReports += $SummaryReports[$DoneId]
+                    }
                 }
 
                 # Each stream skips (on -Resume) the subs its own state file lists
@@ -2048,6 +2065,11 @@ else
                     $UnreadableStreamFiles += $Aside
                 }
             }
+            # What the summaries list as completed this run, after the files, so
+            # their reports win; the rules below still end any that failed or
+            # left no zip.
+            $AllCompletedFromStreams += @($StreamCompletedIds | Where-Object { $_ })
+            $AllReportsFromStreams += @($StreamCompletedReports | Where-Object { $null -ne $_ })
             if ($AllCompletedFromStreams.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)

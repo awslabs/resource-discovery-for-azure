@@ -174,7 +174,8 @@ if ($Resume -or $ResumeFailedOnly)
 }
 # Start from the parent's retry-list entries, so a failure here counts one more
 # run on top of the earlier ones instead of starting again at one. The newer
-# entry wins where this stream's own state file has the same subscription.
+# entry wins where this stream's own state file (read only when it is this
+# run's) has the same subscription.
 $Prior = @(@($PriorFailedAttempts) | Where-Object { $null -ne $_ })
 if ($Prior.Count -gt 0)
 {

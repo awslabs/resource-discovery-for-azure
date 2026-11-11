@@ -800,7 +800,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         # file (with B's entry as the parent gave it); its save of B's failure did not
         # reach the disk, and its summary lists B as failed.
         $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
-        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = $Prior; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        [pscustomobject]@{ RunId = 'run-1'; Tenant = 't'; StreamId = '0'; Completed = @('sub-a'); FailedAttempts = $Prior; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
         $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
         @{ RunId = 'run-1'; StreamId = '0'; Tenant = 't'; Status = 'partial-failure'; Completed = @('sub-a'); ResourceCounts = @(); Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stand-in' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2 })
@@ -813,7 +813,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $S = script:Read-State -Path $script:State
         $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
         $Saved = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = (Get-Date).ToUniversalTime().ToString('o'); Reason = 'stand-in'; Attempts = 3 })
-        [pscustomobject]@{ Tenant = 't'; Completed = @(); FailedAttempts = $Saved; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        [pscustomobject]@{ RunId = 'run-1'; Tenant = 't'; StreamId = '0'; Completed = @(); FailedAttempts = $Saved; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
         $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
         @{ RunId = 'run-1'; StreamId = '0'; Tenant = 't'; Status = 'partial-failure'; Completed = @(); ResourceCounts = @(); Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stand-in' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1 })
@@ -897,7 +897,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         {
             @($Agg.CompletedIds) | Should -Be @('sub-a') -Because "a summary for $Case is not this stream's: its failure of sub-a is not used either"
             @(Get-FailedAttempts -Path $script:State -Tenant 't' | ForEach-Object { [string]$_.Id }) | Should -Not -Contain 'sub-a'
-            @($Agg.FailedSubscriptions) | Should -Contain 'stream-0 (summary of another run)'
+            @($Agg.FailedSubscriptions) | Should -Contain "stream-0 (summary not this run's)"
         }
     }
 
@@ -924,7 +924,8 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         # -ResumeFailedOnly run is given sub-b again and it fails.
         $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })
         $StreamFile = Join-Path $script:Root '.resume-state-t-stream-0.json'
-        @{ Tenant = 't'; StreamId = '0'; Completed = @('sub-b'); FailedAttempts = @($Prior); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamFile -Encoding utf8
+        # Of this run, so the stream reads it.
+        @{ RunId = 'run-1'; Tenant = 't'; StreamId = '0'; Completed = @('sub-b'); FailedAttempts = @($Prior); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamFile -Encoding utf8
         $Global:RdaCarryTestFailIds = @('sub-b')
         $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
         $WorkerArgs = @{
@@ -938,12 +939,15 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         @($Sum.Failed | ForEach-Object Id) | Should -Contain 'sub-b'
         @($Sum.Completed) | Should -Not -Contain 'sub-b'
         $File = Get-Content -LiteralPath $StreamFile -Raw | ConvertFrom-Json
+        $File.RunId | Should -Be 'run-1'
         @($File.Completed) | Should -Not -Contain 'sub-b'
+        # The stream read its file: sub-b's earlier entry counts one more failed run.
+        [int](@($File.FailedAttempts | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 2
     }
 
-    It 'parallel: a per-stream state file of another run is not merged or removed, and one of this run without a report record does not count (<Case>)' -ForEach @(
-        @{ Case = 'another run'; FileRunId = 'run-0'; WithReport = $true; Kept = $true }
-        @{ Case = 'no report record'; FileRunId = 'run-1'; WithReport = $false; Kept = $false }
+    It 'parallel: a per-stream state file of another run is put aside unused, and one of this run without a report record does not count (<Case>)' -ForEach @(
+        @{ Case = 'another run'; FileRunId = 'run-0'; WithReport = $true; Aside = $true }
+        @{ Case = 'no report record'; FileRunId = 'run-1'; WithReport = $false; Aside = $false }
     ) {
         $S = script:Read-State -Path $script:State
         $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })
@@ -958,7 +962,10 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
         @($Agg.CompletedIds) | Should -Not -Contain 'sub-b' -Because "a file for $Case gives no completion"
         @($Agg.CompletedReports | ForEach-Object { [string]$_.Id }) | Should -Not -Contain 'sub-b'
-        Test-Path -LiteralPath $File | Should -Be $Kept
+        # Another run's file is put aside, so the next start-up fold does not
+        # take it; this run's file is merged and removed.
+        Test-Path -LiteralPath $File | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t-stream-0.json.unreadable-*' -Force).Count | Should -Be $(if ($Aside) { 1 } else { 0 })
     }
 
     It 'every stream summary and state file carries the run id the parent gave the stream' {
@@ -966,6 +973,9 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Wrapper = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
         $Functions = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1') -Raw
         $Wrapper | Should -Match 'RunId\s+=\s+\$StreamRunId'
+        # Each run's summaries are named with its id, and earlier runs' are removed at the start.
+        $Wrapper | Should -Match ([regex]::Escape('".rda-stream-{0}-summary-{1}.json" -f $S, $StreamRunId'))
+        $Wrapper | Should -Match ([regex]::Escape("-Filter '.rda-stream-*-summary-*.json*'"))
         # The no-subscriptions, failed-to-start and full summaries.
         ([regex]::Matches($Worker, 'RunId\s+=\s+\$RunId')).Count | Should -Be 3
         $Functions | Should -Match 'RunId\s+=\s+\$RunId'
@@ -1122,11 +1132,12 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         @(Get-FailedAttempts -Path $script:State -Tenant 't' | ForEach-Object Id) | Should -Be @('sub-c')
     }
 
-    It 'counts only what the state file lists, not the per-stream state an interrupted parallel run left' {
+    It 'counts only what the state file lists, and no completion an interrupted parallel run left without a report' {
         # Two ids in the state file (the fold joins a one-id list and the stranded ids
         # into one string), and an older version's stream file: sub-x completed, no
-        # Reports. The stream that owns it skips sub-x on -Resume, so it is not one this
-        # run collects again.
+        # Reports. With no report record a later -Resume could carry, sub-x does not
+        # count as completed either: it is collected again, like the two older-version
+        # ids, and never skipped with no zip to carry.
         [ordered]@{ TenantID = 't'; CompletedSubscriptionIds = @('sub-a', 'sub-b'); FailedAttempts = @(); LastUpdated = '2026-01-01T00:00:00Z' } | ConvertTo-Json | Set-Content -LiteralPath $script:State -Encoding utf8
         @{ Tenant = 't'; StreamId = '0'; Completed = @('sub-x'); FailedAttempts = @() } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
         $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>&1)
@@ -1134,9 +1145,8 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         $Lines = @($Start | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { [string]$_.MessageData } | Where-Object { $_ -like 'Resume mode:*' })
 
         $Lines | Should -Be @(
-            'Resume mode: the resume state was written by an older version, so 2 subscription(s) will be collected again for the bundle to hold their reports.',
-            'Resume mode: 1 previously completed subscription(s) will be skipped.')
-        @($Loaded.CompletedIds) | Should -Be @('sub-x')
+            'Resume mode: the resume state was written by an older version, so 2 subscription(s) will be collected again for the bundle to hold their reports.')
+        @($Loaded.CompletedIds) | Should -BeNullOrEmpty
     }
 
     It 'the next -Resume run skips them as usual and carries the reports this run recorded' {

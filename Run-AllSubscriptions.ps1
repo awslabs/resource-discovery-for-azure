@@ -836,6 +836,11 @@ if ($Resume -or $ResumeFailedOnly)
         $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and $StrandedFailedIds -notcontains [string]$_.Id })
         $StrandedCompleted = @($StrandedCompleted | Where-Object { $StrandedFailedIds -notcontains [string]$_ })
         $StrandedReports = @($StrandedReports | Where-Object { $null -ne $_ -and $StrandedFailedIds -notcontains [string]$_.Id })
+        # A completed sub counts only with its report record, so a later
+        # -Resume can carry its zip; one without is collected again (as at the
+        # end-of-run merge).
+        $StrandedReportIds = Get-LatestCompletedReports -Reports $StrandedReports
+        $StrandedCompleted = @($StrandedCompleted | Where-Object { $_ -and $StrandedReportIds.ContainsKey([string]$_) })
         if ($StrandedCompleted.Count -gt 0)
         {
             $CompletedIds = @($CompletedIds + $StrandedCompleted | Sort-Object -Unique)
@@ -1703,6 +1708,13 @@ else
                 }
             }
         }
+        # The summaries of earlier runs under their run's name are never read
+        # (each run reads only its own); removed so they do not pile up.
+        foreach ($Old in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter '.rda-stream-*-summary-*.json*' -File -Force -ErrorAction SilentlyContinue))
+        {
+            try { Remove-Item -LiteralPath $Old.FullName -Force -ErrorAction Stop }
+            catch { Write-Host ("WARNING: Could not remove the stream summary {0} an earlier run left: {1}. It is not read; remove it when you can." -f $Old.FullName, $_.Exception.Message) -ForegroundColor Yellow }
+        }
 
         # Snapshot the parent's Az context to a shared file so each stream can
         # Import-AzContext without prompting. Save-AzContext writes a JSON file
@@ -1772,7 +1784,9 @@ else
                 $SliceIds = @($SliceList | ForEach-Object { $_.Id })
                 $SliceNames = @($SliceList | ForEach-Object { $_.Name })
 
-                $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary.json" -f $S)
+                # Named with this run's id, so a worker of an earlier run cannot
+                # write over it.
+                $SummaryPath = Join-Path $InventoryRoot (".rda-stream-{0}-summary-{1}.json" -f $S, $StreamRunId)
                 $FailuresPath = Join-Path $InventoryRoot ("RunAllSubscriptions_failures_{0}_stream-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'), $S)
 
                 $StreamSummaries += [pscustomobject]@{
@@ -1890,14 +1904,13 @@ else
                     $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
                     continue
                 }
-                # A summary of another run, tenant or stream (a worker of an
-                # earlier run wrote the shared path) is not this stream's: none
-                # of it is used, and the stream counts as one with a corrupt
-                # summary.
+                # A summary that is not this run's summary of this stream (its run
+                # id, tenant or stream id differs) is not used at all, and the
+                # stream counts as failed, as for one with a corrupt summary.
                 if ([string]$StreamSummary.RunId -ne [string]$StreamRunId -or [string]$StreamSummary.Tenant -ne [string]$TenantID -or [string]$StreamSummary.StreamId -ne [string]$S.StreamId)
                 {
                     Write-Host ("[stream-{0}] ERROR: summary file {1} is not this run's summary of this stream (run {2}, tenant {3}, stream {4}; this run is {5}); it is not used." -f $S.StreamId, $S.SummaryPath, $StreamSummary.RunId, $StreamSummary.Tenant, $StreamSummary.StreamId, $StreamRunId) -ForegroundColor Red
-                    $FailedSubscriptions += ("stream-{0} (summary of another run)" -f $S.StreamId)
+                    $FailedSubscriptions += ("stream-{0} (summary not this run's)" -f $S.StreamId)
                     continue
                 }
 
@@ -1947,13 +1960,13 @@ else
                     $StreamNoReportIds += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
                 }
 
-                # The subs the summary lists as completed (this run's, plus, on
-                # -Resume or -ResumeFailedOnly, those the stream's own state file
-                # held), each with the report zip it recorded, for the merge
-                # below: the stream's own state file on disk misses some when a
-                # save of it did not reach the disk. Only the subs this stream
-                # was given count. One without a record is left out, so it is
-                # collected again.
+                # The subs the summary lists as completed (this run's; the stream
+                # reads its own state file only when it is this run's, which the
+                # start-up fold has removed, so none from earlier runs), each with
+                # the report zip it recorded, for the merge below: the stream's
+                # own state file on disk misses some when a save of it did not
+                # reach the disk. Only the subs this stream was given count. One
+                # without a record is left out, so it is collected again.
                 if ($StreamSummary.Status -ne 'failed-to-start' -and $StreamSummary.Completed)
                 {
                     $SummaryReports = Get-LatestCompletedReports -Reports @($StreamSummary.Reports)
@@ -2059,17 +2072,18 @@ else
                     $Obj = Get-Content -LiteralPath $PerStreamFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                     if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
                     # Another run's file (a worker of an earlier run that still
-                    # writes): not used and not removed here. The start-up fold
-                    # removed every file before this run's streams began.
+                    # writes; the start-up fold removed every file before this
+                    # run's streams began): its records are not used, and it is
+                    # put aside like an unreadable file, so the next run's
+                    # start-up fold does not take it either (exit 2 names it).
                     if ([string]$Obj.RunId -ne [string]$StreamRunId)
                     {
-                        Write-Host ("WARNING: The per-stream resume state file {0} is not this run's (run {1}); it is not used." -f $PerStreamFile, $Obj.RunId) -ForegroundColor Yellow
-                        continue
+                        throw ("it is another run's file (run '{0}', this run is '{1}')" -f $Obj.RunId, $StreamRunId)
                     }
                     $MergedStreamFiles += $StreamFile
                     # A completed sub counts only with its report record, so a
                     # later -Resume can carry its zip; one without is collected
-                    # again (as for the summaries below).
+                    # again (as for the summaries, checked above, appended below).
                     $FileReports = Get-LatestCompletedReports -Reports @($Obj.Reports)
                     $AllCompletedFromStreams += @($Obj.Completed | Where-Object { $_ -and $FileReports.ContainsKey([string]$_) } | ForEach-Object { [string]$_ })
                     $AllReportsFromStreams += @($FileReports.Values)

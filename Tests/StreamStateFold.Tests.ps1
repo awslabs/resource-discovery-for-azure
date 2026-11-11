@@ -46,7 +46,15 @@ BeforeAll {
     {
         param([string]$Root, [int]$N, [string[]]$Completed = @(), [object[]]$Failed = @())
         $Path = Join-Path $Root ('.resume-state-t-stream-{0}.json' -f $N)
-        [pscustomobject]@{ Tenant = 't'; Completed = @($Completed); FailedAttempts = @($Failed); Reports = @() } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding utf8
+        # Each completed sub with its report record, as a stream writes it (a
+        # completion without one is collected again).
+        $Reports = @(foreach ($Id in $Completed)
+            {
+                $Zip = Join-Path $Root ('report-{0}.zip' -f $Id)
+                Set-Content -LiteralPath $Zip -Value 'zip'
+                New-CompletedReportRecord -InventoryRoot $Root -Id $Id -Name $Id -ZipPath $Zip -Obfuscated $false
+            })
+        [pscustomobject]@{ Tenant = 't'; Completed = @($Completed); FailedAttempts = @($Failed); Reports = @($Reports) } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding utf8
         $Path
     }
 

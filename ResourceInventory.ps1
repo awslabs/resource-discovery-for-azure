@@ -517,14 +517,20 @@ Function RunInventorySetup()
             }
 
             # The run's subscriptions. A direct run with none stops instead of
-            # writing an empty report.
+            # writing an empty report. Without -SubscriptionID the run collects
+            # every one listed, so, as `az account list` did by default, only
+            # Enabled ones: a Disabled or Warned subscription is collected only
+            # when -SubscriptionID names it.
             function Set-RdaRunSubscriptions([string]$Tenant)
             {
                 $script:RdaRunTenant = $Tenant
-                $Global:Subscriptions = @(Get-RdaTenantSubscriptions -Tenant $Tenant)
+                $Listed = @(Get-RdaTenantSubscriptions -Tenant $Tenant)
+                if ([string]::IsNullOrEmpty($SubscriptionID)) { $Listed = @($Listed | Where-Object { [string]$_.state -ceq 'Enabled' }) }
+                $Global:Subscriptions = $Listed
                 if ($Global:Subscriptions.Count -eq 0)
                 {
-                    Stop-SignIn -Message ("Az PowerShell: tenant {0} lists no subscriptions for this sign-in; stopping instead of writing an empty report." -f $Tenant) -Advice 'Check that the signed-in identity has at least Reader on a subscription of the tenant, and that -TenantID names the right tenant, then re-run.'
+                    $NoneText = if ([string]::IsNullOrEmpty($SubscriptionID)) { 'no Enabled subscription' } else { 'no subscriptions' }
+                    Stop-SignIn -Message ("Az PowerShell: tenant {0} lists {1} for this sign-in; stopping instead of writing an empty report." -f $Tenant, $NoneText) -Advice 'Check that the signed-in identity has at least Reader on a subscription of the tenant, and that -TenantID names the right tenant (pass -SubscriptionID to collect one that is not Enabled), then re-run.'
                 }
             }
 

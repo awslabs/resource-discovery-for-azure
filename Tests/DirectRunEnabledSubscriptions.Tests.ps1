@@ -3,11 +3,11 @@
 #
 # WHY THIS TEST EXISTS
 # --------------------
-# A direct run of ResourceInventory.ps1 without -SubscriptionID collects every
-# subscription the sign-in lists. It used to list them with `az account list`,
+# A direct run of ResourceInventory.ps1 without -SubscriptionID collects the
+# subscriptions the sign-in lists. It used to list them with `az account list`,
 # which by default lists only Enabled subscriptions. Get-AzSubscription lists
 # every state, so a Disabled or Warned subscription was collected too. The run
-# keeps only Enabled ones, as before; -SubscriptionID still collects the one it
+# now keeps only the Enabled ones of that list, as before; -SubscriptionID still collects the one it
 # names, whatever its state (the wrapper's -IncludeDisabled relies on that).
 #
 # Set-RdaRunSubscriptions is lifted from ResourceInventory.ps1; the listing
@@ -117,18 +117,18 @@ Describe 'A direct run with wrong arguments' {
     }
 
     It 'stops with exit 1 for -ResourceGroup without -SubscriptionID, before sign-in' {
-        $Run = Invoke-Check -Text 'must also put SubscriptionId' -Setup "`$ResourceGroup = 'rg-1'`n`$SubscriptionID = `$null"
+        $Run = Invoke-Check -Text 'Pass -SubscriptionID when you use -ResourceGroup.' -Setup "`$ResourceGroup = 'rg-1'`n`$SubscriptionID = `$null"
         $Run.ExitCode | Should -Be 1
-        $Run.Output | Should -Contain 'Resource Group Name present, but missing Subscription ID.'
+        $Run.Output | Should -Contain '-ResourceGroup was given without -SubscriptionID.'
         $Run.Output | Should -Not -Contain 'NOT STOPPED'
 
         $Setup = @($script:RiAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true))[0].Extent.Text
-        $Setup.IndexOf('must also put SubscriptionId') | Should -BeGreaterThan -1
-        $Setup.IndexOf('must also put SubscriptionId') | Should -BeLessThan $Setup.IndexOf("`n            LoginSession")
+        $Setup.IndexOf('Pass -SubscriptionID when you use -ResourceGroup.') | Should -BeGreaterThan -1
+        $Setup.IndexOf('Pass -SubscriptionID when you use -ResourceGroup.') | Should -BeLessThan $Setup.IndexOf("`n            LoginSession")
     }
 
     It 'goes on for -ResourceGroup with -SubscriptionID' {
-        $Run = Invoke-Check -Text 'must also put SubscriptionId' -Setup "`$ResourceGroup = 'rg-1'`n`$SubscriptionID = 'sub-1'"
+        $Run = Invoke-Check -Text 'Pass -SubscriptionID when you use -ResourceGroup.' -Setup "`$ResourceGroup = 'rg-1'`n`$SubscriptionID = 'sub-1'"
         $Run.ExitCode | Should -Be 0
         $Run.Output | Should -Contain 'NOT STOPPED'
     }
@@ -139,9 +139,9 @@ Describe 'A direct run with wrong arguments' {
         # one under a file.
         $File = Join-Path $TestDrive 'a-file'
         Set-Content -LiteralPath $File -Value 'x'
-        $Run = Invoke-Check -Text 'Wrong OutputDirectory Path' -Setup ("`$OutputDirectory = '{0}'" -f (Join-Path $File 'out'))
+        $Run = Invoke-Check -Text 'could not be found or made' -Setup ("`$OutputDirectory = '{0}'" -f (Join-Path $File 'out'))
         $Run.ExitCode | Should -Be 1
-        $Run.Output | Should -Contain 'Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.'
+        $Run.Output | Should -Contain ('The output directory {0} could not be found or made. Pass -OutputDirectory as the full path of a folder you can write to.' -f (Join-Path $File 'out'))
         $Run.Output | Should -Not -Contain 'NOT STOPPED'
     }
 
@@ -163,12 +163,12 @@ Describe 'A direct run with wrong arguments' {
         if ($Stops)
         {
             $LASTEXITCODE | Should -Be 1
-            $Out | Should -Contain 'You must use Powershell 7 to run the inventory script.'
+            $Out | Should -Contain 'You must use PowerShell 7 to run the inventory script.'
             $Out | Should -Not -Contain 'NOT STOPPED'
         }
         else
         {
-            $Out | Should -Not -Contain 'You must use Powershell 7 to run the inventory script.'
+            $Out | Should -Not -Contain 'You must use PowerShell 7 to run the inventory script.'
             $Out | Should -Contain 'NOT STOPPED'
         }
     }

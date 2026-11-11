@@ -159,7 +159,7 @@ $FailedAttempts = @()
 $Reports = @()
 if ($Resume -or $ResumeFailedOnly)
 {
-    $State = Read-StreamState -Path $StreamStateFile
+    $State = Read-StreamState -Path $StreamStateFile -RunId $RunId
     $CompletedIds = $State.Completed
     $FailedAttempts = $State.Failed
     $Reports = @($State.Reports)
@@ -399,10 +399,14 @@ $Summary = [pscustomobject]@{
 }
 try
 {
-    $Summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
+    # Through a temporary file and one rename, as Write-StreamState does, so a
+    # write cut short (a full disk) leaves no half summary.
+    $Summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$StreamSummaryPath.tmp" -Encoding utf8 -ErrorAction Stop
+    [System.IO.File]::Move("$StreamSummaryPath.tmp", $StreamSummaryPath, $true)
 }
 catch
 {
+    Remove-Item -LiteralPath "$StreamSummaryPath.tmp" -Force -ErrorAction SilentlyContinue
     Write-Stream ("FATAL: could not write stream summary to {0}: {1}" -f $StreamSummaryPath, $_.Exception.Message) 'Red'
     exit 1
 }

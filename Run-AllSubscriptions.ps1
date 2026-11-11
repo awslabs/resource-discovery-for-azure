@@ -1896,8 +1896,8 @@ else
                 # summary.
                 if ([string]$StreamSummary.RunId -ne [string]$StreamRunId -or [string]$StreamSummary.Tenant -ne [string]$TenantID -or [string]$StreamSummary.StreamId -ne [string]$S.StreamId)
                 {
-                    Write-Host ("[stream-{0}] ERROR: summary file {1} is not this run's summary of this stream (tenant {2}, stream {3}); it is not used." -f $S.StreamId, $S.SummaryPath, $StreamSummary.Tenant, $StreamSummary.StreamId) -ForegroundColor Red
-                    $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
+                    Write-Host ("[stream-{0}] ERROR: summary file {1} is not this run's summary of this stream (run {2}, tenant {3}, stream {4}; this run is {5}); it is not used." -f $S.StreamId, $S.SummaryPath, $StreamSummary.RunId, $StreamSummary.Tenant, $StreamSummary.StreamId, $StreamRunId) -ForegroundColor Red
+                    $FailedSubscriptions += ("stream-{0} (summary of another run)" -f $S.StreamId)
                     continue
                 }
 
@@ -2058,16 +2058,21 @@ else
                     # As at the start: a read error or an empty file is unreadable.
                     $Obj = Get-Content -LiteralPath $PerStreamFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                     if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
+                    # Another run's file (a worker of an earlier run that still
+                    # writes): not used and not removed here. The start-up fold
+                    # removed every file before this run's streams began.
+                    if ([string]$Obj.RunId -ne [string]$StreamRunId)
+                    {
+                        Write-Host ("WARNING: The per-stream resume state file {0} is not this run's (run {1}); it is not used." -f $PerStreamFile, $Obj.RunId) -ForegroundColor Yellow
+                        continue
+                    }
                     $MergedStreamFiles += $StreamFile
-                    if ($null -ne $Obj.Completed)
-                    {
-                        $AllCompletedFromStreams += @($Obj.Completed)
-                    }
-                    # The report zip each stream recorded per completed sub.
-                    if ($null -ne $Obj.Reports)
-                    {
-                        $AllReportsFromStreams += @($Obj.Reports)
-                    }
+                    # A completed sub counts only with its report record, so a
+                    # later -Resume can carry its zip; one without is collected
+                    # again (as for the summaries below).
+                    $FileReports = Get-LatestCompletedReports -Reports @($Obj.Reports)
+                    $AllCompletedFromStreams += @($Obj.Completed | Where-Object { $_ -and $FileReports.ContainsKey([string]$_) } | ForEach-Object { [string]$_ })
+                    $AllReportsFromStreams += @($FileReports.Values)
                     # Per-stream files written by workers also carry their
                     # FailedAttempts entries. Merge by Id so the unified
                     # state file reflects every stream's failures, with the

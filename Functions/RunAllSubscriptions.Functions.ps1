@@ -1230,11 +1230,13 @@ function Write-Stream
 
 function Read-StreamState
 {
-    param([string]$Path)
+    # $RunId: a file another run's worker wrote (another RunId) reads as empty.
+    param([string]$Path, [string]$RunId = '')
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @(); Reports = @() } }
     try
     {
         $Obj = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not [string]::IsNullOrEmpty($RunId) -and [string]$Obj.RunId -ne $RunId) { return @{ Completed = @(); Failed = @(); Reports = @() } }
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
@@ -1257,6 +1259,8 @@ function Write-StreamState
     try
     {
         @{
+            # The run this file belongs to, so the parent merges only its own run's files.
+            RunId          = $RunId
             Tenant         = $TenantID
             StreamId       = $StreamId
             Completed      = $Completed

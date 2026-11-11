@@ -897,7 +897,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         {
             @($Agg.CompletedIds) | Should -Be @('sub-a') -Because "a summary for $Case is not this stream's: its failure of sub-a is not used either"
             @(Get-FailedAttempts -Path $script:State -Tenant 't' | ForEach-Object { [string]$_.Id }) | Should -Not -Contain 'sub-a'
-            @($Agg.FailedSubscriptions) | Should -Contain 'stream-0 (corrupt summary)'
+            @($Agg.FailedSubscriptions) | Should -Contain 'stream-0 (summary of another run)'
         }
     }
 
@@ -939,6 +939,46 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         @($Sum.Completed) | Should -Not -Contain 'sub-b'
         $File = Get-Content -LiteralPath $StreamFile -Raw | ConvertFrom-Json
         @($File.Completed) | Should -Not -Contain 'sub-b'
+    }
+
+    It 'parallel: a per-stream state file of another run is not merged or removed, and one of this run without a report record does not count (<Case>)' -ForEach @(
+        @{ Case = 'another run'; FileRunId = 'run-0'; WithReport = $true; Kept = $true }
+        @{ Case = 'no report record'; FileRunId = 'run-1'; WithReport = $false; Kept = $false }
+    ) {
+        $S = script:Read-State -Path $script:State
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })
+        $Zip = Join-Path $script:Root 'sub-b-report.zip'
+        Set-Content -LiteralPath $Zip -Value 'zip'
+        $Record = New-CompletedReportRecord -InventoryRoot $script:Root -Id 'sub-b' -Name 'Sub B' -ZipPath $Zip -Obfuscated $false
+        $File = Join-Path $script:Root '.resume-state-t-stream-0.json'
+        @{ RunId = $FileRunId; Tenant = 't'; StreamId = '0'; Completed = @('sub-b'); FailedAttempts = @(); Reports = @(if ($WithReport) { $Record }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $File -Encoding utf8
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ RunId = 'run-1'; StreamId = '0'; Tenant = 't'; Status = 'ok'; Completed = @(); Reports = @(); ResourceCounts = @(); Failed = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1; SubIds = @('sub-b') })
+        $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
+        @($Agg.CompletedIds) | Should -Not -Contain 'sub-b' -Because "a file for $Case gives no completion"
+        @($Agg.CompletedReports | ForEach-Object { [string]$_.Id }) | Should -Not -Contain 'sub-b'
+        Test-Path -LiteralPath $File | Should -Be $Kept
+    }
+
+    It 'every stream summary and state file carries the run id the parent gave the stream' {
+        $Worker = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1') -Raw
+        $Wrapper = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1') -Raw
+        $Functions = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1') -Raw
+        $Wrapper | Should -Match 'RunId\s+=\s+\$StreamRunId'
+        # The no-subscriptions, failed-to-start and full summaries.
+        ([regex]::Matches($Worker, 'RunId\s+=\s+\$RunId')).Count | Should -Be 3
+        $Functions | Should -Match 'RunId\s+=\s+\$RunId'
+        # A worker with an empty slice writes its short summary with the id.
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        $WorkerArgs = @{
+            RunId = 'run-1'
+            TenantID = 't'; StreamId = '0'; InventoryRoot = $script:Root; ScriptRoot = $script:FailRoot
+            AzContextPath = (Join-Path $script:Root 'ctx.json'); StreamSummaryPath = $Summary; StreamFailuresPath = (Join-Path $script:Root 'failures-stream-0.log')
+            SubscriptionIds = @(); SubscriptionNames = @(); ConcurrencyLimit = 6
+        }
+        & (Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1') @WorkerArgs 6>$null
+        (Get-Content -LiteralPath $Summary -Raw | ConvertFrom-Json).RunId | Should -Be 'run-1'
     }
 
     It 'parallel: a subscription a stream''s summary lists as completed without a report record is not counted completed' {

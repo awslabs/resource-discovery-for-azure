@@ -582,7 +582,9 @@ Describe 'The stream worker and the Az context snapshot use literal paths' {
         $Worker = Get-Content -LiteralPath (Join-Path $RepoRoot 'Run-AllSubscriptions.Stream.ps1') -Raw
         $Wrapper = Get-Content -LiteralPath (Join-Path $RepoRoot 'Run-AllSubscriptions.ps1') -Raw
         $Worker | Should -Not -Match ([regex]::Escape('Set-Content -Path $StreamSummaryPath'))
-        ([regex]::Matches($Worker, [regex]::Escape('Set-Content -LiteralPath $StreamSummaryPath'))).Count | Should -Be 3
+        # The two short summaries in place, the full one through a temporary file.
+        ([regex]::Matches($Worker, [regex]::Escape('Set-Content -LiteralPath $StreamSummaryPath'))).Count | Should -Be 2
+        ([regex]::Matches($Worker, [regex]::Escape('Set-Content -LiteralPath "$StreamSummaryPath.tmp"'))).Count | Should -Be 1
         $Wrapper | Should -Not -Match ([regex]::Escape('Test-Path -Path $AzContextSnapshot'))
         $Wrapper | Should -Not -Match ([regex]::Escape('Remove-Item -Path $AzContextSnapshot'))
     }

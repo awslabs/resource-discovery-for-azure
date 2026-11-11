@@ -1183,6 +1183,17 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         @($Loaded.CompletedIds) | Should -BeNullOrEmpty
     }
 
+    It 'does not count as without a report a completed subscription an interrupted stream file lists as failed' {
+        $Zip = Join-Path $script:Root 'sub-a-report.zip'
+        Set-Content -LiteralPath $Zip -Value 'zip'
+        $Record = New-CompletedReportRecord -InventoryRoot $script:Root -Id 'sub-a' -Name 'Sub A' -ZipPath $Zip -Obfuscated $false
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @($Record)
+        @{ Tenant = 't'; StreamId = '0'; Completed = @(); FailedAttempts = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 }); Reports = @() } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>&1)
+        $Lines = @($Start | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { [string]$_.MessageData } | Where-Object { $_ -like 'Resume mode:*' })
+        @($Lines | Where-Object { $_ -like '*no recorded report*' -or $_ -like '*written by an older version*' }) | Should -BeNullOrEmpty -Because 'sub-a had its record; it is collected again because it failed'
+    }
+
     It 'counts only what the state file lists, and no completion an interrupted parallel run left without a report' {
         # Two ids in the state file (the fold joins a one-id list and the stranded ids
         # into one string), and an older version's stream file: sub-x completed, no

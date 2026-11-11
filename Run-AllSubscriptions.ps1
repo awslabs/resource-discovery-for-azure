@@ -964,15 +964,18 @@ else
 
 if ($Resume)
 {
-    # A state file written by a version without CompletedReports records no report
-    # zip for its completed subscriptions, so none of them could be carried into
-    # this run's consolidated zip. Collect those again instead of skipping them;
-    # this run saves their records, so the next -Resume skips them as usual.
+    # A completed subscription with no recorded report zip (every one in a state
+    # file written by a version without CompletedReports, and any other the file
+    # lists without its record) could not be carried into this run's
+    # consolidated zip. Collect those again instead of skipping them; this run
+    # saves their records, so the next -Resume skips them as usual. Only the ids
+    # still completed after the start-up fold count: one it took off as failed
+    # is collected again anyway, and is not counted here.
     $RecollectIds = @()
     if ($IdsWithoutReports.Count -gt 0)
     {
         $RecordedReports = Get-LatestCompletedReports -Reports $CompletedReports
-        $RecollectIds = @($IdsWithoutReports | Where-Object { -not $RecordedReports.ContainsKey([string]$_) })
+        $RecollectIds = @($CompletedIds | Where-Object { $IdsWithoutReports -contains $_ -and -not $RecordedReports.ContainsKey([string]$_) })
         $CompletedIds = @($CompletedIds | Where-Object { $RecollectIds -notcontains $_ })
     }
     if ($RecollectIds.Count -gt 0)

@@ -631,8 +631,8 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
         $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$Tokens, [ref]$ParseErrors)
     }
 
-    It 'ends with exit 2 while a resume state that could not be saved is still on disk' {
-        $script:Src | Should -Match ([regex]::Escape('-ReportsMissing (($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)) -or ('))
+    It 'ends with exit 2 while a resume state that could not be saved is on disk or was put aside' {
+        $script:Src | Should -Match ([regex]::Escape('-ReportsMissing (($ResumeStateSaveFailed -and ($StateSetAside -or (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))) -or ('))
     }
 
     It 'removes every stream summary an earlier run left before the sign-in snapshot and the first stream' {

@@ -819,7 +819,9 @@ Function RunInventorySetup()
     {
         if (![string]::IsNullOrEmpty($ResourceGroup))
         {
-            $ResourceGroup = $ResourceGroup.ToLower()
+            # Invariant rules: on a tr-TR or az-Latn host ToLower() turns 'I'
+            # into a dotless i, and the query then matches no resource group.
+            $ResourceGroup = $ResourceGroup.ToLowerInvariant()
         }
 
         if (![string]::IsNullOrEmpty($ResourceGroup) -and ![string]::IsNullOrEmpty($SubscriptionID))

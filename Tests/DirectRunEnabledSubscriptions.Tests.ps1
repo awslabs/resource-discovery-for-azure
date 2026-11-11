@@ -28,7 +28,7 @@ BeforeAll {
         [pscustomobject]@{ id = 'sub-off'; name = 'Off'; tenantId = $Tenant; homeTenantId = $Tenant; state = 'Disabled' }
         [pscustomobject]@{ id = 'sub-warn'; name = 'Warn'; tenantId = $Tenant; homeTenantId = $Tenant; state = 'Warned' }
     }
-    function Stop-SignIn { param([string]$Message, [string]$Advice) throw ('STOP: ' + $Message) }
+    function Stop-SignIn { param([string]$Message, [string]$Advice) throw ('STOP: ' + $Message + ' ADVICE: ' + $Advice) }
 
     function script:Invoke-Set
     {
@@ -60,6 +60,14 @@ Describe 'A direct run lists the subscriptions it collects' {
     It 'stops without -SubscriptionID when no listed subscription is Enabled, and says how to collect one' {
         $SubscriptionID = $null
         $Off = [pscustomobject]@{ id = 'sub-off'; name = 'Off'; tenantId = 'tenant-1'; homeTenantId = 'tenant-1'; state = 'Disabled' }
-        { Invoke-Set -SubscriptionID $SubscriptionID -Listed @($Off) } | Should -Throw '*no Enabled subscription*'
+        { Invoke-Set -SubscriptionID $SubscriptionID -Listed @($Off) } | Should -Throw '*no Enabled subscription*ADVICE:*pass -SubscriptionID to collect one that is not Enabled*'
+    }
+
+    It 'stops with -SubscriptionID when nothing is listed, without the hint to pass -SubscriptionID' {
+        $SubscriptionID = 'sub-off'
+        $Err = $null
+        try { Invoke-Set -SubscriptionID $SubscriptionID -Listed @() | Out-Null } catch { $Err = $_.Exception.Message }
+        $Err | Should -BeLike '*lists no subscriptions*'
+        $Err | Should -Not -BeLike '*pass -SubscriptionID*'
     }
 }

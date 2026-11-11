@@ -510,4 +510,24 @@ Describe 'Exit-Wrapper with no per-stream state file it could not read' {
         $Output | Should -Not -Match 'not a clean run' -Because $Output
         $Output | Should -Not -Match 'Exception|is not recognized' -Because $Output
     }
+
+    It 'says once that a moved-aside state file made the run not clean, and whether the state was kept' {
+        $State = Join-Path $TestDrive 'state.json'
+        Set-Content -LiteralPath $State -Value '{}'
+        # The end-of-run summary says it first; the stop after it does not repeat it.
+        $Script = (". '{0}'; `$UnreadableStreamFiles = @([pscustomobject]@{{ Name = 'stream-1.json'; MovedTo = 'stream-1.json.unreadable' }}); `$ResumeStateFile = '{1}'; `$WrapperTranscriptStarted = `$false; " +
+            "Write-UnreadableStreamStateSummary -Unreadable `$UnreadableStreamFiles -StateKept `$true | Out-Null; Exit-Wrapper -Code 7") -f $script:FunctionsPath.Replace("'", "''"), $State.Replace("'", "''")
+        $Output = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -Command $Script 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 7 -Because $Output
+        @([regex]::Matches($Output, 'not a clean run')).Count | Should -Be 1 -Because $Output
+        $Output | Should -Match 'Resume state kept, but not a clean run: the per-stream state file stream-1\.json could not be read and was moved aside to stream-1\.json\.unreadable'
+    }
+
+    It 'says it at the stop when no summary was said before, with the state cleared when no state file is left' {
+        $Script = ". '{0}'; `$UnreadableStreamFiles = @([pscustomobject]@{{ Name = 'stream-2.json'; MovedTo = '' }}); `$ResumeStateFile = '{1}'; `$WrapperTranscriptStarted = `$false; Exit-Wrapper -Code 7" -f $script:FunctionsPath.Replace("'", "''"), (Join-Path $TestDrive 'gone.json').Replace("'", "''")
+        $Output = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -Command $Script 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 7 -Because $Output
+        @([regex]::Matches($Output, 'not a clean run')).Count | Should -Be 1 -Because $Output
+        $Output | Should -Match 'Resume state cleared, but not a clean run: the per-stream state file stream-2\.json could not be read and was left in place'
+    }
 }

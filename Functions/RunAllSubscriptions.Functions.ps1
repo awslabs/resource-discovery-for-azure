@@ -28,8 +28,8 @@ function Exit-Wrapper
     # A run that moved a per-stream state file aside is not a clean run: a run
     # that ends before its end-of-run summary says so here, with whether the
     # resume state was kept (Write-UnreadableStreamStateSummary, once). Read
-    # with Get-Variable: none of these is set before the start-up fold. In
-    # parentheses, so the list is read item by item: Get-Variable -ValueOnly
+    # with Get-Variable: on an exit before the start-up fold the unreadable-file
+    # variables are not set yet. In parentheses, so the list is read item by item: Get-Variable -ValueOnly
     # passes the list as one object, and an empty list is not $null.
     $Unreadable = @((Get-Variable -Name UnreadableStreamFiles -ValueOnly -ErrorAction SilentlyContinue) | Where-Object { $null -ne $_ })
     if ($Unreadable.Count -gt 0 -and -not (Get-Variable -Name UnreadableSummaryShown -Scope Script -ValueOnly -ErrorAction SilentlyContinue))

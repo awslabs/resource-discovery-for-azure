@@ -806,7 +806,7 @@ if ($Resume -or $ResumeFailedOnly)
     # carries no run id, so its run cannot be told: only its failures are
     # used, never its completions or reports (those subscriptions are
     # collected again, the safe side).
-    $PendingRunIds = @(Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID)
+    $RunMarker = Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
     if ($StrandedStreamFiles.Count -gt 0)
     {
         $StrandedCompleted = @()
@@ -823,7 +823,7 @@ if ($Resume -or $ResumeFailedOnly)
                 $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
                 $FileRunId = [string]$Obj.RunId
-                if (-not [string]::IsNullOrEmpty($FileRunId) -and $PendingRunIds -notcontains $FileRunId)
+                if (-not [string]::IsNullOrEmpty($FileRunId) -and $RunMarker.Known -and @($RunMarker.RunIds) -notcontains $FileRunId)
                 {
                     $UnreadableStreamFiles += Move-OtherRunStreamFile -Path $StreamFile.FullName -FileRunId $FileRunId
                     continue
@@ -980,7 +980,8 @@ else
 }
 # The runs whose per-stream files the fold above folded in and removed are
 # taken off the list (Update-StreamRunMarker); one with a file still there stays.
-Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
+# A list that cannot be written keeps the resume state (exit 2) and is named.
+if (-not (Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID)) { $UnreadableStreamFiles += (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID) }
 
 if ($Resume)
 {
@@ -1797,8 +1798,9 @@ else
             }
 
             # This run's id, for the start-up fold of the next run should these
-            # streams be cut off (removed again after the end-of-run merge).
-            Add-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId
+            # streams be cut off (taken off once none of its per-stream files is
+            # left). A list that cannot be written keeps the resume state (exit 2).
+            if (-not (Add-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId)) { $UnreadableStreamFiles += (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID) }
 
             # Build per-stream output paths up front so we know where to look later.
             for ($S = 0; $S -lt $StreamCount; $S++)
@@ -2159,9 +2161,16 @@ else
             # A stream reads its own file, which can still hold an entry this
             # run dropped as gone at the start (an interrupted run left it).
             $AllFailedFromStreams = @($AllFailedFromStreams | Where-Object { $null -ne $_ -and $GoneIds -notcontains [string]$_.Id })
+            # The parent's count per sub, before the merge, so a stream entry
+            # that counts one more failed run is known as this run's even when
+            # a clock moved.
+            $PriorAttempts = @{}
+            foreach ($P in @($FailedAttempts | Where-Object { $null -ne $_ })) { $PriorAttempts[[string]$P.Id] = [int]$P.Attempts }
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             $FailedThisRunIds = @($AllFailedFromStreams | Where-Object {
-                    $null -ne $_ -and $_.PSObject.Properties['LastFailedAt'] -and $(try { ([datetime]$_.LastFailedAt).ToUniversalTime() -ge ([datetime]$RunStartTime).ToUniversalTime() } catch { $false })
+                    $null -ne $_ -and (
+                        ([int]$_.Attempts -gt [int]$PriorAttempts[[string]$_.Id]) -or
+                        ($_.PSObject.Properties['LastFailedAt'] -and $(try { ([datetime]$_.LastFailedAt).ToUniversalTime() -ge ([datetime]$RunStartTime).ToUniversalTime() } catch { $false })))
                 } | ForEach-Object { [string]$_.Id })
             # A sub a stream's summary lists as failed whose failure this run its
             # stream's own file does not hold (that file could not be read, or
@@ -2223,7 +2232,7 @@ else
             # The merge is done: this run is taken off the list once none of its
             # per-stream files is left (a file kept above stays to be folded in
             # by the next run, so its run stays on the list).
-            Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
+            if (-not (Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID)) { $UnreadableStreamFiles += (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID) }
         }
         finally
         {

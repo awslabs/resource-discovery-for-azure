@@ -60,7 +60,7 @@ BeforeAll {
             })
         [pscustomobject]@{ RunId = 'run-1'; Tenant = 't'; StreamId = '0'; Completed = @($Completed); FailedAttempts = @($Failed); Reports = @($Reports) } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding utf8
         # The file of an interrupted run 'run-1', which the run marker names.
-        Add-StreamRunMarker -InventoryRoot $Root -Tenant 't' -RunId 'run-1'
+        $null = Add-StreamRunMarker -InventoryRoot $Root -Tenant 't' -RunId 'run-1'
         $Path
     }
 

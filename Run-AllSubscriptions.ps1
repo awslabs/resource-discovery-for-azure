@@ -508,6 +508,12 @@ if (-not (Test-Path -Path $InventoryRoot -PathType Container))
     try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null }
     catch { Write-Verbose ("InventoryRoot create failed at {0}: {1}" -f $InventoryRoot, $_.Exception.Message) }
 }
+# The report folders and zips already there when this run starts: never this
+# run's, whatever the clock says (a clock moved back could date an old one
+# after this run's start), so the bundle cannot take an old copy of a
+# subscription this run collects again.
+$PreRunReportDirs = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+$PreRunZips = @(foreach ($Dir in $PreRunReportDirs) { Get-ChildItem -LiteralPath $Dir -Filter '*.zip' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName } })
 
 # Wrapper-level transcript.
 #
@@ -768,6 +774,13 @@ $UnreadableStreamFiles = @()
 # still folded in). A clean run removes these files.
 $StatePutAside = @(Get-ChildItem -LiteralPath $InventoryRoot -Filter ((Split-Path -Path $ResumeStateFile -Leaf) + '.not-saved-*') -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $StatePutAsideOnly = $StatePutAside.Count -gt 0 -and -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
+# Fail-safe rule, as for a kept per-stream file: only the failures of a put-aside
+# state are used (never its completions or reports), so no retry entry is lost,
+# and the run saves them with its own state.
+if ($StatePutAsideOnly)
+{
+    foreach ($Aside in $StatePutAside) { $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts @(Get-FailedAttempts -Path $Aside -Tenant $TenantID) -CompletedIds @() }
+}
 if ($ResumeFailedOnly -and $StatePutAsideOnly)
 {
     Write-Host ("ERROR: An earlier run could not save the resume state and put it aside as {0}, so -ResumeFailedOnly cannot tell which subscriptions are owed. Nothing was collected (exit 2). Run again with -Resume, or without either switch: it collects every subscription." -f ($StatePutAside -join ', ')) -ForegroundColor Red
@@ -2369,7 +2382,7 @@ $CarriedFolderNames = @($CarriedReports | ForEach-Object { $_.Folder })
 $ExpectedZipCount = @($SubResourceCounts).Count + $CarriedReports.Count
 if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Container))
 {
-    $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    $ActualSubZips = @(Get-ChildItem -Path $InventoryRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime -and @($PreRunZips) -notcontains $_.FullName } })
     $ActualSubZips = @(Join-CarriedReportZips -Zips $ActualSubZips -CarriedReports $CarriedReports)
     $ActualZipCount = $ActualSubZips.Count
     if ($ActualZipCount -lt $ExpectedZipCount)
@@ -2424,10 +2437,11 @@ $OuterZipFile = $null
 if (Test-Path -Path $InventoryRoot -PathType Container)
 {
     # Filter ZIPs by current run timestamp only, plus the zips carried from an earlier run on -Resume
-    # shortcut: picks this run's zips by time, so a second wrapper writing to the same
-    # inventory folder at the same time could add its zips; one wrapper per folder is
-    # supported. A cut-off run leaves no late writer: its stream jobs end with it.
-    $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
+    # (and never one that was there when this run started: see $PreRunZips).
+    # shortcut: a second wrapper writing to the same inventory folder at the same time
+    # could add its zips; one wrapper per folder is supported. A cut-off run leaves no
+    # late writer: its stream jobs end with it (measured on Linux; Windows not checked).
+    $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime -and @($PreRunZips) -notcontains $_.FullName } })
     $SubZips = @(Join-CarriedReportZips -Zips $SubZips -CarriedReports $CarriedReports)
     if ($SubZips.Count -gt 0)
     {
@@ -2537,8 +2551,6 @@ if ($RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
         if (-not (Test-Path -LiteralPath $ResumeStateFile))
         {
             Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
-            # A state an earlier run put aside as not saved is now out of date too.
-            foreach ($Aside in @($StatePutAside | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })) { Remove-Item -LiteralPath $Aside -Force -ErrorAction SilentlyContinue }
         }
         else { Write-Host ("WARNING: Could not remove resume state file {0}: it is still there after the removal." -f $ResumeStateFile) -ForegroundColor Yellow }
     }
@@ -2546,6 +2558,14 @@ if ($RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
     {
         Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
     }
+}
+
+# A state an earlier run put aside as not saved: a clean run owes nothing (its
+# failures were read in at the start), so it goes, whether or not this run had
+# a state file to clear.
+if ($RunClean -and -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
+{
+    foreach ($Aside in @($StatePutAside | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })) { Remove-Item -LiteralPath $Aside -Force -ErrorAction SilentlyContinue }
 }
 
 # A put-aside file kept above for an older completion: once a clean run has
@@ -2900,7 +2920,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         #    data". Scoped to THIS run by timestamp, plus the report folders
         #    carried from an earlier run on -Resume; a de-obfuscated
         #    *_revealed* report is never copied across.
-        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime -or $CarriedFolderNames -contains $_.Name }))
+        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { ($_.LastWriteTime -ge $RunStartTime -and @($PreRunReportDirs) -notcontains $_.FullName) -or $CarriedFolderNames -contains $_.Name }))
         {
             $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
             if ($null -eq $SubHtml) { continue }

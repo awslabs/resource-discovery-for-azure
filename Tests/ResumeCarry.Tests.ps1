@@ -145,6 +145,9 @@ $Global:ResourceCount = 1
     }
     if ($From -lt 0 -or $To -lt 0) { throw 'Expected the post-processing statements (verification, consolidation, main summary) in the wrapper.' }
     $PostText = (@($Top[$From..$To] | ForEach-Object { $_.Extent.Text }) -join "`n") -replace '\$PSScriptRoot', '$RealScriptRoot'
+    # The snapshot of the reports already there when a run starts, as written.
+    $script:PreRunText = (@($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -in '$PreRunReportDirs', '$PreRunZips' } | ForEach-Object { $_.Extent.Text }) -join "`n")
+    $script:PostText = $PostText
     $script:PostBlock = [scriptblock]::Create(
         "param(`$RealScriptRoot, `$InventoryRoot, `$RunStartTime, `$SubResourceCounts, `$SkippedSubscriptions, `$CompletedReports, `$Resume, `$Obfuscate, `$ResumeStateFile, `$TenantID)`n" +
         "function Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" +
@@ -409,6 +412,23 @@ Describe 'MainSummary.html covers the carried subscriptions' {
         $Text | Should -Match 'Carried Sub'
         $Text | Should -Match 'This Run Sub'
         $Text | Should -Not -Match 'Unrelated Sub'
+    }
+}
+
+Describe 'The bundle never takes a report that was there before the run started' {
+    It 'leaves out an older report dated after the run''s start (a clock moved back), so a subscription collected again is in it once' {
+        @($script:PreRunText -split "`n").Count | Should -Be 2
+        $Root = script:New-CaseRoot
+        $Old = script:New-TestReport -Root $Root -Stamp '1old' -SubName 'Sub A'
+        script:Set-ReportAge -Zip $Old -When (Get-Date).AddHours(2)
+        $Since = Get-Date
+        $Block = [scriptblock]::Create("param(`$RealScriptRoot, `$InventoryRoot, `$RunStartTime, `$SubResourceCounts, `$SkippedSubscriptions, `$CompletedReports, `$Resume, `$Obfuscate, `$ResumeStateFile, `$TenantID)`n" +
+            "function Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" + $script:PreRunText + "`n" +
+            "`$null = script:New-TestReport -Root `$InventoryRoot -Stamp '2new' -SubName 'Sub A'`n" +
+            "`$WrapperTranscriptStarted = `$false; `$FailedSubscriptions = @(); `$Detailed = `$false`n" + $script:PostText + "`n[pscustomobject]@{ OuterZipFile = `$OuterZipFile }")
+        $Out = @(& $Block $script:RepoRoot $Root $Since @([pscustomobject]@{ Name = 'Sub A'; Id = 'sub-a'; Count = 2 }) @() @() $true $false (Join-Path $Root '.resume-state-t.json') 't' 6>$null)
+        $Result = $Out | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['OuterZipFile'] } | Select-Object -Last 1
+        @(script:Get-InnerZipNames -OuterZip $Result.OuterZipFile) | Should -Be @('ResourcesReport_2new.zip')
     }
 }
 
@@ -834,7 +854,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 3 -Because 'the file already counted this run''s failure'
     }
 
-    It 'parallel: a retried subscription a stream completed but could not save stays on the retry list one run more (fail-safe rule), the next -Resume collects it once, and the one after owes nothing' {
+    It 'parallel: a retried subscription a stream completed but could not save stays on the retry list one run more (fail-safe rule), and the next -Resume collects it once and owes nothing' {
         # The unified state: sub-a completed (BeforeEach); sub-b and sub-c on the retry list.
         $C = [pscustomobject]@{ Id = 'sub-c'; Name = 'Sub C' }
         $S = script:Read-State -Path $script:State
@@ -884,18 +904,9 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $After3.Failed | Should -BeNullOrEmpty -Because 'the retry list is empty after run 3'
         @($After3.Completed | Sort-Object) | Should -Be @('sub-a', 'sub-b', 'sub-c')
 
-        # Run 4, -Resume: everything is skipped and carried once, nothing is owed.
-        Get-ChildItem -LiteralPath $script:Root -Directory -Filter 'ResourcesReport*' | ForEach-Object {
-            $Z = Get-ChildItem -LiteralPath $_.FullName -Filter '*.zip' | Select-Object -First 1
-            if ($Z) { script:Set-ReportAge -Zip $Z.FullName -When (Get-Date).AddHours(-1) }
-        }
-        $Since = Get-Date
-        $S = script:Read-State -Path $script:State
-        $Run4 = & $script:SeqBlock $script:FailRoot @($script:A, $script:B, $C) $true $S.Completed @(Get-FailedAttempts -Path $script:State -Tenant 't') $S.Reports $script:Root $script:State 't' $false 6>$null
-        $Post4 = script:Invoke-Post -Root $script:Root -Since $Since -ThisRun $Run4.SubResourceCounts -Skipped $Run4.SkippedSubscriptions -Reports $Run4.CompletedReports
-        @($Run4.SkippedSubscriptions | ForEach-Object Id) | Should -Be @('sub-a', 'sub-b', 'sub-c')
-        @($Run4.SubResourceCounts) | Should -BeNullOrEmpty
-        @(script:Get-InnerZipNames -OuterZip $Post4.Result.OuterZipFile).Count | Should -Be 3
+        # Nothing is owed after run 3, so the wrapper's clean-run rule removes
+        # the resume state (that block is not run here) and the next run starts
+        # afresh: nothing keeps sub-b in a loop.
         @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ }).Count | Should -Be 0
     }
 
@@ -1299,9 +1310,19 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @()
         $IsClean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$RunClean' })
         $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
-        $End = [scriptblock]::Create("param(`$ResumeStateFile, `$StatePutAside)`n`$FailedSubscriptions = @(); `$RetryOwedCount = 0; `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text)
+        $Marks = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
+        $Marks.Count | Should -Be 1
+        $End = [scriptblock]::Create("param(`$ResumeStateFile, `$StatePutAside)`n`$FailedSubscriptions = @(); `$RetryOwedCount = 0; `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Marks[0].Extent.Text)
         & $End $script:State @($Mark) 6>$null
         Test-Path -LiteralPath $Mark | Should -BeFalse
+    }
+
+    It 'reads only the failures of a state put aside as not saved, never its completions, so no retry entry is lost' {
+        Move-Item -LiteralPath $script:State -Destination ($script:State + '.not-saved-20260101000000000')
+        $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>$null)
+        $Loaded = $Start | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['CompletedIds'] } | Select-Object -Last 1
+        @($Loaded.FailedAttempts | ForEach-Object Id) | Should -Be @('sub-c') -Because 'sub-c (for example disabled, not in this run) stays owed'
+        @($Loaded.CompletedIds) | Should -BeNullOrEmpty -Because 'sub-a is collected again'
     }
 
     It 'collects the subscriptions it lists as completed again, says so in one line, and ships a report for each' {

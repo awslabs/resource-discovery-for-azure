@@ -180,3 +180,32 @@ Describe 'A direct run with wrong arguments' {
         }
     }
 }
+
+Describe 'A -ResourceGroup run on a Turkish host' {
+    It 'queries the group by its invariant lower-case name (<Culture>)' -ForEach @(
+        @{ Culture = 'en-US' }
+        @{ Culture = 'tr-TR' }
+    ) {
+        $Root = Split-Path $PSScriptRoot -Parent
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+        $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'ResourceInventoryLoop' }, $true))
+        $Fn.Count | Should -Be 1
+        # The loop runs with stand-ins that print each query; the group has no
+        # resource, so only the count query runs.
+        $Script = Join-Path $TestDrive 'rg-culture.ps1'
+        Set-Content -LiteralPath $Script -Value ((@'
+[System.Globalization.CultureInfo]::CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('{0}')
+function Write-Log {{ param([string]$Message, [string]$Severity) }}
+function Invoke-AzGraphQuerySafe {{ param([string]$Query, [string[]]$SubscriptionId, [switch]$Lowercase, [switch]$HideRawOutput) [Console]::WriteLine('QUERY: ' + $Query); return $null }}
+function Get-AzGraphCount {{ param($Result) 0 }}
+$ResourceGroup = 'RG-INFRA'
+$SubscriptionID = '00000000-0000-0000-0000-000000000001'
+$Global:Resources = @()
+'@ -f $Culture) + "`n" + $Fn[0].Extent.Text + "`nResourceInventoryLoop")
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Out = @(& $Pwsh -NoProfile -NonInteractive -File $Script)
+        $Queries = @($Out | Where-Object { $_ -like 'QUERY: *' })
+        $Queries.Count | Should -BeGreaterThan 0
+        $Queries | ForEach-Object { $_ | Should -BeLike "*resourceGroup == 'rg-infra'*" }
+    }
+}

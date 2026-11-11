@@ -131,7 +131,7 @@ $Global:ResourceCount = 1
     $script:AggregateBlock = [scriptblock]::Create(
         "param(`$StreamSummaries, `$InventoryRoot, `$TenantID, `$ResumeStateFile, `$CompletedIds, `$FailedAttempts, `$CompletedReports)`n" +
         "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$RunStartTime = (Get-Date).AddMinutes(-1); `$StreamRunId = 'run-1'`n" +
-        $AggText + "`n[pscustomobject]@{ SkippedSubscriptions = @(`$SkippedSubscriptions); SubResourceCounts = @(`$SubResourceCounts); CompletedIds = @(`$CompletedIds); CompletedReports = @(`$CompletedReports); FailedSubscriptions = @(`$FailedSubscriptions) }")
+        $AggText + "`n[pscustomobject]@{ SkippedSubscriptions = @(`$SkippedSubscriptions); SubResourceCounts = @(`$SubResourceCounts); CompletedIds = @(`$CompletedIds); CompletedReports = @(`$CompletedReports); FailedSubscriptions = @(`$FailedSubscriptions); UnreadableStreamFiles = @(`$UnreadableStreamFiles) }")
 
     # Post-processing shared by both paths: from "All subscriptions processed!"
     # through the MainSummary.html build. Exit-Wrapper is replaced so a failed
@@ -962,6 +962,8 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1; SubIds = @('sub-b') })
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
         @($Agg.CompletedIds) | Should -Not -Contain 'sub-b' -Because "a file for $Case gives no completion"
+        # Another run's file keeps the state and makes the run end with exit 2 (it is not clean).
+        @($Agg.UnreadableStreamFiles | Where-Object { [string]$_ -like '*.other-run-*' }).Count | Should -Be $(if ($Aside) { 1 } else { 0 })
         @($Agg.CompletedReports | ForEach-Object { [string]$_.Id }) | Should -Not -Contain 'sub-b'
         # Another run's file is put aside (to be deleted), so the next start-up
         # fold does not take it; this run's file is merged and removed.
@@ -976,7 +978,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Wrapper | Should -Match 'RunId\s+=\s+\$StreamRunId'
         # Each run's summaries are named with its id, and earlier runs' are removed at the start.
         $Wrapper | Should -Match ([regex]::Escape('".rda-stream-{0}-summary-{1}.json" -f $S, $StreamRunId'))
-        $Wrapper | Should -Match ([regex]::Escape('-Filter (".rda-stream-{0}-summary-*.json*" -f $S)'))
+        $Wrapper | Should -Match ([regex]::Escape("-Filter '.rda-stream-*-summary*.json*'"))
         # The no-subscriptions, failed-to-start and full summaries.
         ([regex]::Matches($Worker, 'RunId\s+=\s+\$RunId')).Count | Should -Be 3
         $Functions | Should -Match 'RunId\s+=\s+\$RunId'

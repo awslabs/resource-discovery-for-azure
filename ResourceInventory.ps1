@@ -351,7 +351,7 @@ Function RunInventorySetup()
                 {
                     Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
                     Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                    Exit
+                    exit 1
                 }
             }
         }
@@ -546,7 +546,7 @@ Function RunInventorySetup()
                     $Listed = @($Listed | Where-Object { [string]$_.state -eq 'Enabled' })
                     if ($Listed.Count -eq 0)
                     {
-                        Stop-SignIn -Message ($Empty -f $Tenant, 'no Enabled subscription') -Advice ($Access + ' To collect a subscription that is not Enabled, pass -SubscriptionID.')
+                        Stop-SignIn -Message ($Empty -f $Tenant, 'no Enabled subscription') -Advice ('Without -SubscriptionID only Enabled subscriptions are collected. To collect a subscription that is not Enabled, pass -SubscriptionID.')
                     }
                 }
                 elseif (@($Listed | Where-Object { [string]$_.id -eq $SubscriptionID }).Count -eq 0)

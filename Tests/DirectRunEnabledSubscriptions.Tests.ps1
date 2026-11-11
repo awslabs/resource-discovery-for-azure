@@ -60,7 +60,10 @@ Describe 'A direct run lists the subscriptions it collects' {
     It 'stops without -SubscriptionID when no listed subscription is Enabled, and says how to collect one' {
         $SubscriptionID = $null
         $Off = [pscustomobject]@{ id = 'sub-off'; name = 'Off'; tenantId = 'tenant-1'; homeTenantId = 'tenant-1'; state = 'Disabled' }
-        { Invoke-Set -SubscriptionID $SubscriptionID -Listed @($Off) } | Should -Throw '*no Enabled subscription*ADVICE:*To collect a subscription that is not Enabled, pass -SubscriptionID.*'
+        $Err = $null
+        try { Invoke-Set -SubscriptionID $SubscriptionID -Listed @($Off) | Out-Null } catch { $Err = $_.Exception.Message }
+        $Err | Should -BeLike '*no Enabled subscription*ADVICE:*To collect a subscription that is not Enabled, pass -SubscriptionID.*'
+        $Err | Should -Not -BeLike '*ADVICE:*Reader*' -Because 'the tenant listed a subscription, so access is not the problem'
     }
 
     It 'stops without -SubscriptionID when nothing is listed, without the hint to pass -SubscriptionID' {
@@ -96,15 +99,17 @@ Describe 'A direct run with wrong arguments' {
         $Root = Split-Path $PSScriptRoot -Parent
         $script:RiAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
 
-        # Runs the one if statement whose test or body holds $Text in a child
-        # pwsh, after $Setup; Write-Log prints its message.
+        # Runs the one if statement whose body holds $Text in a child pwsh,
+        # after $Setup, with $Swap's text swapped in; Write-Log prints its message.
         function script:Invoke-Check
         {
-            param([string]$Text, [string]$Setup)
+            param([string]$Text, [string]$Setup, [hashtable]$Swap = @{})
             $Check = @($script:RiAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses.Count -eq 1 -and $N.Clauses[0].Item2.Extent.Text -like "*$Text*" -and $N.Clauses[0].Item2.Extent.Text -notlike '*if (*' }, $true))
             $Check.Count | Should -Be 1
+            $Body = $Check[0].Extent.Text
+            foreach ($Key in $Swap.Keys) { $Body.Contains($Key) | Should -BeTrue; $Body = $Body.Replace($Key, $Swap[$Key]) }
             $Script = Join-Path $TestDrive 'check.ps1'
-            Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) Write-Output `$Message }`n" + $Setup + "`n" + $Check[0].Extent.Text + "`n'NOT STOPPED'")
+            Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) Write-Output `$Message }`n" + $Setup + "`n" + $Body + "`n'NOT STOPPED'")
             $Pwsh = (Get-Process -Id $PID).Path
             $Out = @(& $Pwsh -NoProfile -NonInteractive -File $Script)
             return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $Out }
@@ -128,10 +133,22 @@ Describe 'A direct run with wrong arguments' {
         $Run.Output | Should -Contain 'NOT STOPPED'
     }
 
-    It 'stops with exit 1 for an -OutputDirectory that does not exist' {
-        $Run = Invoke-Check -Text 'Wrong OutputDirectory Path' -Setup ("`$OutputDirectory = '{0}'" -f (Join-Path $TestDrive 'no-such-folder'))
+    It 'stops with exit 1 for an -OutputDirectory that cannot be made' {
+        # The run makes a missing output folder before this check, so the
+        # check fails only for a folder that cannot be made: here one under a file.
+        $File = Join-Path $TestDrive 'a-file'
+        Set-Content -LiteralPath $File -Value 'x'
+        $Run = Invoke-Check -Text 'Wrong OutputDirectory Path' -Setup ("`$OutputDirectory = '{0}'" -f (Join-Path $File 'out'))
         $Run.ExitCode | Should -Be 1
         $Run.Output | Should -Contain 'Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.'
+        $Run.Output | Should -Not -Contain 'NOT STOPPED'
+    }
+
+    It 'stops with exit 1 on PowerShell before 7' {
+        # $PSVersionTable cannot be set, so the check reads a stand-in.
+        $Run = Invoke-Check -Text 'You must use Powershell 7' -Setup "`$FakeVersion = [version]'5.1'" -Swap @{ '$PSVersionTable.PSVersion.Major' = '$FakeVersion.Major' }
+        $Run.ExitCode | Should -Be 1
+        $Run.Output | Should -Contain 'You must use Powershell 7 to run the inventory script.'
         $Run.Output | Should -Not -Contain 'NOT STOPPED'
     }
 }

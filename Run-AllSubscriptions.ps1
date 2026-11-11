@@ -2166,6 +2166,13 @@ else
             # a clock moved.
             $PriorAttempts = @{}
             foreach ($P in @($FailedAttempts | Where-Object { $null -ne $_ })) { $PriorAttempts[[string]$P.Id] = [int]$P.Attempts }
+            # This run's streams start from the parent's entries and count on
+            # from them, so a stream entry with more failed runs than the
+            # parent's is the newer one, whatever the clocks say: the parent's
+            # is dropped before the merge picks by time.
+            $Counted = @{}
+            foreach ($E in @($AllFailedFromStreams | Where-Object { $null -ne $_ })) { $Id = [string]$E.Id; if ($PriorAttempts.ContainsKey($Id) -and [int]$E.Attempts -gt $PriorAttempts[$Id]) { $Counted[$Id] = $true } }
+            $FailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ -and -not $Counted.ContainsKey([string]$_.Id) })
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             $FailedThisRunIds = @($AllFailedFromStreams | Where-Object {
                     $null -ne $_ -and (

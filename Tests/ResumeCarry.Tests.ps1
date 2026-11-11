@@ -1034,6 +1034,21 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $script:ResumeStateSaveFailed = $false
     }
 
+    It 'parallel: a stream''s failure counts one more run even when the parent''s entry has a later time (a clock moved)' {
+        $S = script:Read-State -Path $script:State
+        # The parent's entry is dated in the future; this run's stream counted on from it.
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = (Get-Date).AddDays(2).ToUniversalTime().ToString('o'); Reason = 'earlier'; Attempts = 2 })
+        $Stream = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = (Get-Date).AddDays(-1).ToUniversalTime().ToString('o'); Reason = 'this run'; Attempts = 3 })
+        [pscustomobject]@{ RunId = 'run-1'; Tenant = 't'; StreamId = '0'; Completed = @(); FailedAttempts = $Stream; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ RunId = 'run-1'; StreamId = '0'; Tenant = 't'; Status = 'partial-failure'; Completed = @(); ResourceCounts = @(); Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'this run' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1; SubIds = @('sub-b') })
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 3 -Because 'the stream counted this run once, and no more'
+        [string](@($After | Where-Object Id -eq 'sub-b')[0].Reason) | Should -Be 'this run'
+    }
+
     It 'parallel: a subscription a stream''s summary lists as completed without a report record is not counted completed' {
         $S = script:Read-State -Path $script:State
         $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })

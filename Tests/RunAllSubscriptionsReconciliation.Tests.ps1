@@ -502,9 +502,12 @@ Describe 'Exit-Wrapper with no per-stream state file it could not read' {
     # later stop printed "Resume state ..., but not a clean run: the per-stream
     # state file  could not be read" with no file name.
     It 'says nothing about an unreadable per-stream state file' {
-        $Script = ". '{0}'; `$UnreadableStreamFiles = @(); `$WrapperTranscriptStarted = `$false; Exit-Wrapper -Code 1" -f $script:FunctionsPath.Replace("'", "''")
+        # Code 7, which pwsh never gives on its own, so a failed dot-source or a
+        # missing Exit-Wrapper cannot pass for it.
+        $Script = ". '{0}'; `$UnreadableStreamFiles = @(); `$WrapperTranscriptStarted = `$false; Exit-Wrapper -Code 7" -f $script:FunctionsPath.Replace("'", "''")
         $Output = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -Command $Script 2>&1 | Out-String
-        $LASTEXITCODE | Should -Be 1
+        $LASTEXITCODE | Should -Be 7 -Because $Output
         $Output | Should -Not -Match 'not a clean run' -Because $Output
+        $Output | Should -Not -Match 'Exception|is not recognized' -Because $Output
     }
 }

@@ -12,9 +12,11 @@
 #    tenant (Azure Lighthouse), whose HomeTenantId is another tenant, is kept.
 #    Filtering on HomeTenantId would drop it.
 #  - list a subscription once even when Az returns it twice.
-#  - keep every state, as `az account list` did (a Disabled or Warned
-#    subscription is still listed; the -RunAllSubs wrapper applies its own
-#    Enabled filter).
+#  - keep every state (a Disabled or Warned subscription is still listed).
+#    The callers choose: a direct run without -SubscriptionID keeps the
+#    Enabled ones, as `az account list` did by default
+#    (DirectRunEnabledSubscriptions.Tests.ps1), and the -RunAllSubs wrapper
+#    applies its own Enabled filter.
 #  - give callers the properties they read from the az objects: id, name,
 #    tenantId, homeTenantId, state.
 #
@@ -64,7 +66,7 @@ Describe 'Get-RdaTenantSubscriptions' {
         $Subs.Count | Should -Be 3
     }
 
-    It 'keeps every state, as az account list did, and gives the properties callers read' {
+    It 'keeps every state, and gives the properties callers read' {
         $Subs = @(Get-RdaTenantSubscriptions -Tenant $script:Tenant)
         $Old = $Subs | Where-Object { $_.id -eq $script:Disabled }
         $Old.state | Should -Be 'Disabled'

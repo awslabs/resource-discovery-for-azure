@@ -191,10 +191,14 @@ Describe 'A -ResourceGroup run on a Turkish host' {
         $Fn = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'ResourceInventoryLoop' }, $true))
         $Fn.Count | Should -Be 1
         # The loop runs with stand-ins that print each query; the group has no
-        # resource, so only the count query runs.
+        # resource, so only the count query runs. Any other command the loop
+        # calls (a helper another change adds) is a no-op, so the loop runs on.
+        # (CommandNotFoundAction is read by the child's own engine, so it is
+        # set there.)
         $Script = Join-Path $TestDrive 'rg-culture.ps1'
         Set-Content -LiteralPath $Script -Value ((@'
 [System.Globalization.CultureInfo]::CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('{0}')
+$ExecutionContext.InvokeCommand.CommandNotFoundAction = {{ param($Name, $EventArgs) $EventArgs.CommandScriptBlock = {{ }}; $EventArgs.StopSearch = $true }}
 function Write-Log {{ param([string]$Message, [string]$Severity) }}
 function Invoke-AzGraphQuerySafe {{ param([string]$Query, [string[]]$SubscriptionId, [switch]$Lowercase, [switch]$HideRawOutput) [Console]::WriteLine('QUERY: ' + $Query); return $null }}
 function Get-AzGraphCount {{ param($Result) 0 }}

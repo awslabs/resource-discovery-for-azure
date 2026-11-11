@@ -994,7 +994,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         (Get-Content -LiteralPath $Summary -Raw | ConvertFrom-Json).RunId | Should -Be 'run-1'
     }
 
-    It 'parallel: when the resume state does not take what only the summaries gave, the run says so and ends with the not-saved note' {
+    It 'parallel: when the resume state does not take what only the summaries gave, the run says so, and the end gives the not-saved note unless a clean run removes the file' {
         $S = script:Read-State -Path $script:State
         $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })
         $Zip = Join-Path $script:Root 'sub-b-report.zip'
@@ -1009,8 +1009,25 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $script:Said = @()
         Mock Write-Host { $script:Said += [string]$Object }
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports
-        @($script:Said | Where-Object { $_ -like "WARNING: The resume state file * does not hold every record this run's stream summaries gave, so it does not show this run's results; see the FAILED (resume state not saved) note*" }).Count | Should -Be 1
-        $Agg.ResumeStateSaveFailed | Should -BeTrue -Because 'the end-of-run note and exit 2 follow from it'
+        @($script:Said | Where-Object { $_ -like "WARNING: The resume state file * does not hold every record this run's stream summaries gave, so it does not show this run's results." }).Count | Should -Be 1
+        $Agg.ResumeStateSaveFailed | Should -BeTrue -Because 'the end-of-run note and exit 2 follow from it while the file is there'
+        # The end of the run, as the wrapper has it: the note and exit 2 while
+        # the file is there; a clean run (nothing failed or owed) removes it
+        # first, and then neither is said, since nothing is left to skip wrongly.
+        $Top = @([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null).EndBlock.Statements)
+        $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$FailedSubscriptions.Count -eq 0 -and $RetryOwedCount -eq 0*' })
+        $Note = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
+        $Clean.Count | Should -Be 1
+        $Note.Count | Should -Be 1
+        foreach ($Case in @(@{ Owed = 1; Shown = $true }, @{ Owed = 0; Shown = $false }))
+        {
+            Set-Content -LiteralPath $script:State -Value '{}'
+            $script:Said = @()
+            $End = [scriptblock]::Create("param(`$ResumeStateFile, `$RetryOwedCount)`n`$FailedSubscriptions = @(); `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @(); `$ResumeStateSaveFailed = `$true`n" + $Clean[0].Extent.Text + "`n" + $Note[0].Extent.Text)
+            & $End $script:State $Case.Owed
+            @($script:Said | Where-Object { $_ -like '*FAILED (resume state not saved)*' }).Count | Should -Be $(if ($Case.Shown) { 1 } else { 0 })
+            Test-Path -LiteralPath $script:State | Should -Be $Case.Shown
+        }
         $script:ResumeStateSaveFailed = $false
     }
 

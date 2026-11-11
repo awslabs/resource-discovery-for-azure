@@ -642,7 +642,7 @@ Describe 'The run''s exit code and stream summaries around a resume state that w
         $Pre[0].Extent.StartOffset | Should -BeLessThan $Launch[0].Extent.StartOffset
         @($script:Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ForStatementAst] -and $args[0].Body.Extent.Text.Contains('Start-Job') -and $args[0].Body.Extent.Text.Contains('Remove-Item -LiteralPath $SummaryPath') }, $true)) | Should -BeNullOrEmpty -Because 'no removal is left inside the launch loop'
         # A top-level statement of the script, before the sequential or
-        # parallel split: it runs on every run, sequential ones included.
+        # parallel split: every run that goes on to collect runs it, sequential ones included.
         $script:Ast.EndBlock.Statements | Should -Contain $Pre[0]
         $Split = @($script:Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ParallelStreams -le 1' })
         $Split.Count | Should -Be 1

@@ -1172,6 +1172,17 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         @(Get-FailedAttempts -Path $script:State -Tenant 't' | ForEach-Object Id) | Should -Be @('sub-c')
     }
 
+    It 'collects again a completed subscription the current-format state file lists without its report' {
+        # An older version could fold a stream file with no Reports and write
+        # the unified file with the id but no record (CompletedReports present).
+        [ordered]@{ TenantID = 't'; CompletedSubscriptionIds = @('sub-a', 'sub-b'); FailedAttempts = @(); CompletedReports = @(); LastUpdated = '2026-01-01T00:00:00Z' } | ConvertTo-Json | Set-Content -LiteralPath $script:State -Encoding utf8
+        $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>&1)
+        $Loaded = $Start | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['CompletedIds'] } | Select-Object -Last 1
+        $Lines = @($Start | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { [string]$_.MessageData } | Where-Object { $_ -like 'Resume mode:*' })
+        $Lines | Should -Be @('Resume mode: the resume state lists 2 completed subscription(s) with no recorded report, so they will be collected again for the bundle to hold their reports.')
+        @($Loaded.CompletedIds) | Should -BeNullOrEmpty
+    }
+
     It 'counts only what the state file lists, and no completion an interrupted parallel run left without a report' {
         # Two ids in the state file (the fold joins a one-id list and the stranded ids
         # into one string), and an older version's stream file: sub-x completed, no

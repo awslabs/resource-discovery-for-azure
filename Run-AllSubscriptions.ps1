@@ -749,10 +749,15 @@ $CompletedReports = Get-CompletedReports -Path $ResumeStateFile -Tenant $TenantI
 # -ResumeFailedOnly does not name them as never collected. Updated after this
 # run's access check below.
 $NotReadableIds = @(Get-NotReadableSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID)
-# The subscriptions a state file written before CompletedReports existed lists as
-# completed (see the -Resume block below). Read now, before the fold of per-stream
-# state can rewrite the file with the key.
-$IdsWithoutReports = if (Test-ResumeStateWithoutReports -Path $ResumeStateFile -Tenant $TenantID) { @($CompletedIds) } else { @() }
+# The subscriptions the state file lists as completed, checked in the -Resume
+# block below: one without a recorded report is collected again, so a later
+# -Resume never skips it with no zip to carry. That is every one in a state file
+# written before CompletedReports existed, and any other one the file lists
+# without its record (for example one an older version folded in from a stream
+# file that had no Reports). Read now, before the fold of per-stream state can
+# rewrite the file.
+$StateWithoutReports = Test-ResumeStateWithoutReports -Path $ResumeStateFile -Tenant $TenantID
+$IdsWithoutReports = @($CompletedIds)
 
 # Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
 # Per-stream resume state files that could not be read, at the start or in the
@@ -972,7 +977,8 @@ if ($Resume)
     }
     if ($RecollectIds.Count -gt 0)
     {
-        Write-Host ("Resume mode: the resume state was written by an older version, so {0} subscription(s) will be collected again for the bundle to hold their reports." -f $RecollectIds.Count) -ForegroundColor Cyan
+        if ($StateWithoutReports) { Write-Host ("Resume mode: the resume state was written by an older version, so {0} subscription(s) will be collected again for the bundle to hold their reports." -f $RecollectIds.Count) -ForegroundColor Cyan }
+        else { Write-Host ("Resume mode: the resume state lists {0} completed subscription(s) with no recorded report, so they will be collected again for the bundle to hold their reports." -f $RecollectIds.Count) -ForegroundColor Cyan }
     }
     if ($CompletedIds.Count -gt 0)
     {
@@ -1330,9 +1336,10 @@ $DiagFile = $null
 $SubResourceCounts = @()
 
 # Stream summaries earlier runs left are never read: each run names its own
-# with its run id (below) and reads only those. Every one is removed here,
-# before the sequential or parallel path, whatever its stream number and
-# whether or not this run uses streams, so they do not pile up: the older
+# with its run id (below) and reads only those. Every run that goes on to
+# collect removes every one here, before the sequential or parallel path,
+# whatever its stream number and whether or not it uses streams, so they do
+# not pile up (a run that stops earlier leaves them for the next): the older
 # shared name (.rda-stream-<N>-summary.json), earlier runs' run-named ones and
 # their temporary files. One that cannot be removed gets a warning and the
 # run goes on.

@@ -122,10 +122,11 @@ $Global:ResourceCount = 1
         if ($Body[$i] -is [System.Management.Automation.Language.ForEachStatementAst] -and $Body[$i].Condition.Extent.Text -eq '$StreamSummaries' -and $Body[$i].Body.Extent.Text -match 'ResourceCounts') { $AggAt = $i; break }
     }
     if ($AggAt -lt 0) { throw 'Expected the stream-summary aggregation loop in the wrapper.' }
-    # The pending list as the parallel path builds it before it slices (lifted below).
+    # The pending list as the parallel path builds it before it slices (lifted below),
+    # and the run id the wrapper makes just before the orchestration's try.
     $PendingAt = @($SeqIf[0].ElseClause.Statements | Where-Object { $_ -is [System.Management.Automation.Language.ForEachStatementAst] -and $_.Body.Extent.Text.Contains('$PendingSubscriptions += $Sub') })
     if ($PendingAt.Count -ne 1) { throw 'Expected the pending-subscription list of the parallel path in the wrapper.' }
-    $ParLaunchPrelude = "`$PendingSubscriptions = @()`n" + $PendingAt[0].Extent.Text + "`n`$StreamCount = [Math]::Min(`$ParallelStreams, `$PendingSubscriptions.Count); `$AzContextSnapshot = Join-Path `$InventoryRoot 'ctx.json'; `$Jobs = @(); `$StreamSummaries = @()`n"
+    $ParLaunchPrelude = "`$PendingSubscriptions = @()`n" + $PendingAt[0].Extent.Text + "`n`$StreamCount = [Math]::Min(`$ParallelStreams, `$PendingSubscriptions.Count); `$AzContextSnapshot = Join-Path `$InventoryRoot 'ctx.json'; `$Jobs = @(); `$StreamSummaries = @(); `$StreamRunId = [guid]::NewGuid().ToString('N')`n"
     $ParLaunchText = script:Set-TestPaths -Text (@($Body[0..($AggAt - 1)] | ForEach-Object { $_.Extent.Text }) -join "`n")
 
     # The resume-state cleanup: every statement after the main-summary build up to

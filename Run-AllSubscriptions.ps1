@@ -799,13 +799,14 @@ if ($Resume -or $ResumeFailedOnly)
         $UnreadableStreamFiles += $Aside.FullName
     }
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
-    # The run whose streams were cut off: a parallel run writes its id to this
-    # file before its streams start and removes it after its end-of-run merge,
-    # so the file names the interrupted run, if any. Only that run's per-stream
-    # files (and those of an older version, which carry no run id) are folded
-    # in; another run's (a worker that went on writing after its run ended) is
-    # put aside, so a late completion cannot end a newer failure.
-    $InterruptedRunId = Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
+    # The runs whose per-stream files are still to be folded in (see
+    # Get-StreamRunMarker): only those files are folded in. Another run's file
+    # (a worker that went on writing after its run ended) is put aside, so a
+    # late completion cannot end a newer failure. A file of an older version
+    # carries no run id, so its run cannot be told: only its failures are
+    # used, never its completions or reports (those subscriptions are
+    # collected again, the safe side).
+    $PendingRunIds = @(Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID)
     if ($StrandedStreamFiles.Count -gt 0)
     {
         $StrandedCompleted = @()
@@ -822,14 +823,17 @@ if ($Resume -or $ResumeFailedOnly)
                 $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
                 $FileRunId = [string]$Obj.RunId
-                if (-not [string]::IsNullOrEmpty($FileRunId) -and $FileRunId -ne [string]$InterruptedRunId)
+                if (-not [string]::IsNullOrEmpty($FileRunId) -and $PendingRunIds -notcontains $FileRunId)
                 {
                     $UnreadableStreamFiles += Move-OtherRunStreamFile -Path $StreamFile.FullName -FileRunId $FileRunId
                     continue
                 }
-                if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+                if (-not [string]::IsNullOrEmpty($FileRunId))
+                {
+                    if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+                    if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
+                }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
-                if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
                 $FoldedStreamFiles += $StreamFile
             }
             catch
@@ -974,9 +978,9 @@ else
         }
     }
 }
-# The per-stream files of the run the marker named are folded in or removed
-# above, so it no longer names a run whose files are still to come.
-Remove-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
+# The runs whose per-stream files the fold above folded in and removed are
+# taken off the list (Update-StreamRunMarker); one with a file still there stays.
+Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
 
 if ($Resume)
 {
@@ -1794,7 +1798,7 @@ else
 
             # This run's id, for the start-up fold of the next run should these
             # streams be cut off (removed again after the end-of-run merge).
-            Set-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId
+            Add-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId
 
             # Build per-stream output paths up front so we know where to look later.
             for ($S = 0; $S -lt $StreamCount; $S++)
@@ -2216,8 +2220,10 @@ else
                 # calls itself clean while they wait for the next run (exit 2).
                 $LeftStreamFiles += @($MergedStreamFiles | ForEach-Object { $_.FullName })
             }
-            # The merge is done: no later run is to fold this run's files.
-            Remove-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
+            # The merge is done: this run is taken off the list once none of its
+            # per-stream files is left (a file kept above stays to be folded in
+            # by the next run, so its run stays on the list).
+            Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
         }
         finally
         {

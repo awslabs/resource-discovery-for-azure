@@ -492,7 +492,7 @@ Describe 'Parallel path, end to end: interrupted stream, then -Resume' {
             if ($Resume) { $WorkerArgs.Resume = $true }
             # As the parent does before its streams start: the run marker names
             # this run, so a cut-off run's files are folded in at the next start.
-            Set-StreamRunMarker -InventoryRoot $Root -Tenant 't' -RunId 'run-1'
+            Add-StreamRunMarker -InventoryRoot $Root -Tenant 't' -RunId 'run-1'
             & $script:WorkerPath @WorkerArgs 6>$null
             return (Get-Content -LiteralPath $WorkerArgs.StreamSummaryPath -Raw | ConvertFrom-Json)
         }
@@ -1198,11 +1198,11 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         $Lines | Should -Be @('Resume mode: no completed subscriptions to skip; processing all subscriptions.') -Because 'a state file is there, so the run does not say none was found'
     }
 
-    It 'folds in at the start only the per-stream files of the run the marker names (<Case>)' -ForEach @(
-        @{ Case = 'the cut-off run'; Marker = 'run-a'; FileRunId = 'run-a'; Folded = $true }
-        @{ Case = 'another run'; Marker = 'run-a'; FileRunId = 'run-b'; Folded = $false }
-        @{ Case = 'no marker'; Marker = ''; FileRunId = 'run-a'; Folded = $false }
-        @{ Case = 'an older version (no run id)'; Marker = ''; FileRunId = ''; Folded = $true }
+    It 'folds in at the start only the per-stream files of the runs the marker lists (<Case>)' -ForEach @(
+        @{ Case = 'the cut-off run'; Marker = 'run-a'; FileRunId = 'run-a'; Folded = $true; Aside = $false }
+        @{ Case = 'another run'; Marker = 'run-a'; FileRunId = 'run-b'; Folded = $false; Aside = $true }
+        @{ Case = 'no marker'; Marker = ''; FileRunId = 'run-a'; Folded = $false; Aside = $true }
+        @{ Case = 'an older version (no run id: failures only)'; Marker = ''; FileRunId = ''; Folded = $false; Aside = $false }
     ) {
         Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = (Get-Date).ToUniversalTime().ToString('o'); Reason = 'newer failure'; Attempts = 1 }) -Reports @()
         $Zip = Join-Path $script:Root 'sub-x-report.zip'
@@ -1212,7 +1212,7 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         $Obj = [ordered]@{ Tenant = 't'; StreamId = '0'; Completed = @('sub-x'); FailedAttempts = @(); Reports = @($Record) }
         if ($FileRunId) { $Obj.RunId = $FileRunId }
         $Obj | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $File -Encoding utf8
-        if ($Marker) { Set-StreamRunMarker -InventoryRoot $script:Root -Tenant 't' -RunId $Marker }
+        if ($Marker) { Add-StreamRunMarker -InventoryRoot $script:Root -Tenant 't' -RunId $Marker }
         $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>$null)
         $Loaded = $Start | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['CompletedIds'] } | Select-Object -Last 1
         if ($Folded)
@@ -1223,9 +1223,34 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         {
             @($Loaded.CompletedIds) | Should -Not -Contain 'sub-x' -Because "a late file of $Case does not end the newer failure"
             @(Get-FailedAttempts -Path $script:State -Tenant 't' | ForEach-Object { [string]$_.Id }) | Should -Contain 'sub-x'
-            @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t-stream-0.json.other-run-*' -Force).Count | Should -Be 1
+            @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t-stream-0.json.other-run-*' -Force).Count | Should -Be $(if ($Aside) { 1 } else { 0 })
         }
         Test-Path -LiteralPath (Get-StreamRunMarkerPath -InventoryRoot $script:Root -Tenant 't') | Should -BeFalse -Because 'the fold is done, so the marker names no run any more'
+    }
+
+    It 'keeps a run on the marker while a per-stream file of it is kept, so the next start folds it in' {
+        # The end-of-run merge kept this run's file (the unified save did not take
+        # its records), so its run stays on the list and the next start folds it.
+        Add-StreamRunMarker -InventoryRoot $script:Root -Tenant 't' -RunId 'run-k'
+        $Zip = Join-Path $script:Root 'sub-k-report.zip'
+        Set-Content -LiteralPath $Zip -Value 'zip'
+        $Record = New-CompletedReportRecord -InventoryRoot $script:Root -Id 'sub-k' -Name 'Sub K' -ZipPath $Zip -Obfuscated $false
+        @{ RunId = 'run-k'; Tenant = 't'; StreamId = '0'; Completed = @('sub-k'); FailedAttempts = @(@{ Id = 'sub-f'; Name = 'Sub F'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'kept failure'; Attempts = 1 }); Reports = @($Record) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        Update-StreamRunMarker -InventoryRoot $script:Root -Tenant 't'
+        @(Get-StreamRunMarker -InventoryRoot $script:Root -Tenant 't') | Should -Be @('run-k') -Because 'its file is still there'
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @() -Reports @()
+        $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>$null)
+        $Loaded = $Start | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['CompletedIds'] } | Select-Object -Last 1
+        @($Loaded.CompletedIds) | Should -Contain 'sub-k'
+        @($Loaded.FailedAttempts | ForEach-Object { [string]$_.Id }) | Should -Contain 'sub-f'
+        @(Get-StreamRunMarker -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty -Because 'its file is folded in and removed'
+    }
+
+    It 'keeps every run on the marker while a per-stream file put aside as unreadable is there, so renamed back it is folded in' {
+        Add-StreamRunMarker -InventoryRoot $script:Root -Tenant 't' -RunId 'run-u'
+        Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json.unreadable-20260101000000000') -Value 'not json'
+        Update-StreamRunMarker -InventoryRoot $script:Root -Tenant 't'
+        @(Get-StreamRunMarker -InventoryRoot $script:Root -Tenant 't') | Should -Be @('run-u')
     }
 
     It 'counts only what the state file lists, and no completion an interrupted parallel run left without a report' {

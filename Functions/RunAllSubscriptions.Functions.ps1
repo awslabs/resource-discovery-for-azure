@@ -770,44 +770,6 @@ function Remove-FailedAttempt
 # Get-ChildItem hides dot-files by default on Unix. Pulled out to its own
 # function purely so it can be exercised by a Pester test against a temp
 # directory without spinning up any streams.
-# The id of the parallel run whose streams are running or were cut off, in
-# .rda-stream-run-<tenant>.json: written before the streams start and removed
-# after the end-of-run merge, so the next run's start-up fold folds in only
-# that run's per-stream files. A write or read that fails only loses the
-# folding of that run's files (their subscriptions are collected again).
-function Get-StreamRunMarkerPath
-{
-    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
-    return (Join-Path $InventoryRoot ('.rda-stream-run-{0}.json' -f $Tenant))
-}
-
-function Set-StreamRunMarker
-{
-    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant, [string]$RunId)
-    if ([string]::IsNullOrEmpty($RunId)) { return }
-    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
-    try { @{ RunId = $RunId } | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding utf8 -ErrorAction Stop }
-    catch { Write-Host ("WARNING: Could not write {0}: {1} If this run is cut off, the next -Resume does not fold in its streams' records; those subscriptions are collected again." -f $Path, (([string]$_.Exception.Message).TrimEnd('.', ' ') + '.')) -ForegroundColor Yellow }
-}
-
-function Get-StreamRunMarker
-{
-    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
-    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
-    try { return [string](Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).RunId }
-    catch { return '' }
-}
-
-function Remove-StreamRunMarker
-{
-    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
-    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
-    try { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
-    catch { Write-Host ("WARNING: Could not remove {0}: {1} Remove it before the next run." -f $Path, (([string]$_.Exception.Message).TrimEnd('.', ' ') + '.')) -ForegroundColor Yellow }
-}
-
 # Put aside a per-stream resume state file of another run (its run id is not
 # the one expected): its records are not used. Returns the path it now has,
 # for the caller's list of files that keep the state (exit 2).
@@ -835,6 +797,64 @@ function Get-StreamResumeStateFiles
         [Parameter(Mandatory = $true)][string]$Tenant
     )
     return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+}
+
+# The ids of the parallel runs whose per-stream resume state files are still to
+# be folded in, in .rda-stream-run-<tenant>.json: a run adds its id before its
+# streams start and takes it off once none of its per-stream files is left
+# (after its end-of-run merge, or after the next run's start-up fold). The
+# start-up fold folds in only the files of these runs, so a file a worker
+# wrote after its run ended is put aside. A write or read that fails only
+# loses the folding of those files (their subscriptions are collected again).
+function Get-StreamRunMarkerPath
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
+    return (Join-Path $InventoryRoot ('.rda-stream-run-{0}.json' -f $Tenant))
+}
+
+function Get-StreamRunMarker
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
+    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    try { return @(@((Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).RunIds) | Where-Object { -not [string]::IsNullOrEmpty([string]$_) } | ForEach-Object { [string]$_ }) }
+    catch { return @() }
+}
+
+function Save-StreamRunMarker
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant, [string[]]$RunIds = @())
+    $Path = Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $Tenant
+    $Ids = @($RunIds | Where-Object { -not [string]::IsNullOrEmpty($_) } | Select-Object -Unique)
+    try
+    {
+        if ($Ids.Count -eq 0) { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop } }
+        else { @{ RunIds = $Ids } | ConvertTo-Json | Set-Content -LiteralPath $Path -Encoding utf8 -ErrorAction Stop }
+    }
+    catch { Write-Host ("WARNING: Could not update {0}: {1} A later -Resume may not fold in the per-stream state of an interrupted run; those subscriptions are then collected again." -f $Path, (([string]$_.Exception.Message).TrimEnd('.', ' ') + '.')) -ForegroundColor Yellow }
+}
+
+function Add-StreamRunMarker
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant, [string]$RunId)
+    if ([string]::IsNullOrEmpty($RunId)) { return }
+    Save-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $Tenant -RunIds @(@(Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $Tenant) + $RunId)
+}
+
+# Take off the runs none of whose per-stream files is left. While a per-stream
+# file put aside as unreadable is there, every id stays: it may be renamed back
+# for the next -Resume to fold in.
+function Update-StreamRunMarker
+{
+    param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
+    $Ids = @(Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $Tenant)
+    if ($Ids.Count -eq 0) { return }
+    if (@(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $Tenant) -File -Force -ErrorAction SilentlyContinue).Count -gt 0) { return }
+    $Left = @(foreach ($File in @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $Tenant))
+        {
+            try { [string](Get-Content -LiteralPath $File.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).RunId } catch { $null }
+        })
+    Save-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $Tenant -RunIds @($Ids | Where-Object { $Left -contains $_ })
 }
 
 # Reconcile FailedAttempts entries gathered from multiple streams (plus any

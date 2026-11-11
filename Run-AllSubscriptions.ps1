@@ -799,19 +799,13 @@ if ($Resume -or $ResumeFailedOnly)
         $UnreadableStreamFiles += $Aside.FullName
     }
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
-    # The runs whose per-stream files are still to be folded in (see
-    # Get-StreamRunMarker): only those files are folded in. Another run's file
-    # (a worker that went on writing after its run ended) is put aside, so a
-    # late completion cannot end a newer failure. A file of an older version
-    # carries no run id, so its run cannot be told: only its failures are
-    # used, never its completions or reports (those subscriptions are
-    # collected again, the safe side).
-    $RunMarker = Get-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID
+    # Fail-safe rule (see the end-of-run merge): a per-stream file left here
+    # belongs to a run whose parent was cut off, so that run never proved its
+    # results saved. Only its failures are folded in; its completions and
+    # reports are not, so those subscriptions are collected again.
     if ($StrandedStreamFiles.Count -gt 0)
     {
-        $StrandedCompleted = @()
         $StrandedFailed = @()
-        $StrandedReports = @()
         # The files read: only these are removed once their records are saved.
         $FoldedStreamFiles = @()
         foreach ($StreamFile in $StrandedStreamFiles)
@@ -822,17 +816,6 @@ if ($Resume -or $ResumeFailedOnly)
                 # otherwise read as a file with no record, and be removed.
                 $Obj = Get-Content -LiteralPath $StreamFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                 if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
-                $FileRunId = [string]$Obj.RunId
-                if (-not [string]::IsNullOrEmpty($FileRunId) -and $RunMarker.Known -and @($RunMarker.RunIds) -notcontains $FileRunId)
-                {
-                    $UnreadableStreamFiles += Move-OtherRunStreamFile -Path $StreamFile.FullName -FileRunId $FileRunId
-                    continue
-                }
-                if (-not [string]::IsNullOrEmpty($FileRunId))
-                {
-                    if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
-                    if ($null -ne $Obj.Reports) { $StrandedReports += @($Obj.Reports) }
-                }
                 if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
                 $FoldedStreamFiles += $StreamFile
             }
@@ -856,25 +839,12 @@ if ($Resume -or $ResumeFailedOnly)
         $StrandedFailedIds = @($StrandedFailed | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
         $CompletedIds = @($CompletedIds | Where-Object { $StrandedFailedIds -notcontains [string]$_ })
         $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and $StrandedFailedIds -notcontains [string]$_.Id })
-        $StrandedCompleted = @($StrandedCompleted | Where-Object { $StrandedFailedIds -notcontains [string]$_ })
-        $StrandedReports = @($StrandedReports | Where-Object { $null -ne $_ -and $StrandedFailedIds -notcontains [string]$_.Id })
-        # A completed sub counts only with its report record, so a later
-        # -Resume can carry its zip; one without is collected again (as at the
-        # end-of-run merge).
-        $StrandedReportIds = Get-LatestCompletedReports -Reports $StrandedReports
-        $StrandedCompleted = @($StrandedCompleted | Where-Object { $_ -and $StrandedReportIds.ContainsKey([string]$_) })
-        if ($StrandedCompleted.Count -gt 0)
-        {
-            $CompletedIds = @($CompletedIds + $StrandedCompleted | Sort-Object -Unique)
-            # After the unified file's own records, so the interrupted run's newer report wins.
-            $CompletedReports = @(@($CompletedReports) + @($StrandedReports))
-        }
         # Same recency-wins / prune-on-completed reconciliation the end-of-run
         # merge uses, so a sub that later succeeded in another stream is dropped.
         $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StrandedFailed -CompletedIds $CompletedIds
-        if ($StrandedCompleted.Count -gt 0 -or @($StrandedFailed).Count -gt 0)
+        if (@($StrandedFailed).Count -gt 0)
         {
-            Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} completed, {1} failed subscription record(s)." -f $StrandedCompleted.Count, @($StrandedFailed).Count) -ForegroundColor Cyan
+            Write-Host ("Recovered per-stream state from an interrupted parallel run: {0} failed subscription record(s); what it completed is collected again, since it never saved those results itself." -f @($StrandedFailed).Count) -ForegroundColor Cyan
         }
         # Heal the unified file immediately so even a re-interrupted run keeps
         # the recovered picture. Saved whenever a file was read, also one with no
@@ -978,10 +948,6 @@ else
         }
     }
 }
-# The runs whose per-stream files the fold above folded in and removed are
-# taken off the list (Update-StreamRunMarker); one with a file still there stays.
-# A list that cannot be written keeps the resume state (exit 2) and is named.
-if (-not (Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID)) { $UnreadableStreamFiles += (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID) }
 
 if ($Resume)
 {
@@ -1769,9 +1735,9 @@ else
         $Jobs = @()
         $StreamSummaries = @()
         # This run's id: it names this run's stream summaries, and each stream
-        # writes it into its summary and its state file; a summary or state
-        # file without it (placed or copied under this run's name, or written
-        # by a worker of an earlier run) is not used.
+        # writes it into its summary and its state file. A summary without it
+        # is not used; a state file without it gives its failures only (see the
+        # fail-safe rule at the end-of-run merge).
         $StreamRunId = [guid]::NewGuid().ToString('N')
         try
         {
@@ -1797,17 +1763,6 @@ else
                 $Slices[$i % $StreamCount].Add($PendingSubscriptions[$i])
             }
 
-            # This run's id, for the start-up fold of the next run should these
-            # streams be cut off (taken off once none of its per-stream files is
-            # left). A list that cannot be written keeps the resume state (exit 2).
-            # One that cannot be written stops the run before any stream starts:
-            # cut off, its streams' files could not be folded in by the next run.
-            if (-not (Add-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId))
-            {
-                Write-Host ("ERROR: Could not write {0}, so a cut-off run's per-stream state could not be recovered. Fix the folder (for example, free up disk space), then run again. Nothing was collected (exit 1)." -f (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID)) -ForegroundColor Red
-                Exit-Wrapper -Code 1
-            }
-
             # Build per-stream output paths up front so we know where to look later.
             for ($S = 0; $S -lt $StreamCount; $S++)
             {
@@ -1825,8 +1780,6 @@ else
                     SummaryPath  = $SummaryPath
                     FailuresPath = $FailuresPath
                     SubCount     = $SliceList.Count
-                    # The ids this stream was given, for the summary check below.
-                    SubIds       = @($SliceIds)
                 }
 
                 Write-Host ("[stream-{0}] queued: {1} subscription(s)" -f $S, $SliceList.Count) -ForegroundColor DarkCyan
@@ -1915,8 +1868,9 @@ else
             # retry list when a stream's own state file cannot be read.
             $StreamFailedEntries = @()
             $StreamNoReportIds = @()
-            $StreamCompletedIds = @()
-            $StreamCompletedReports = @()
+            # The subs the summaries list as completed this run, to check at
+            # the merge below that their results were saved (fail-safe rule).
+            $StreamSummaryCompleted = @()
             foreach ($S in $StreamSummaries)
             {
                 if (-not (Test-Path -LiteralPath $S.SummaryPath -PathType Leaf))
@@ -1991,29 +1945,15 @@ else
                     $StreamNoReportIds += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
                 }
 
-                # The subs the summary lists as completed (only this run's: the
-                # start-up fold has removed or put aside every earlier run's
-                # per-stream file, and the stream reads only a file of this run), each with
-                # the report zip it recorded, for the merge below: the stream's
-                # own state file on disk misses some when a save of it did not
-                # reach the disk. Only the subs this stream was given count. One
-                # without a record is left out, so it is collected again.
+                # The subs this stream says it completed: each must also be in its
+                # own saved state file, with its report, to count (see the merge).
                 if ($StreamSummary.Status -ne 'failed-to-start' -and $StreamSummary.Completed)
                 {
-                    $SummaryReports = Get-LatestCompletedReports -Reports @($StreamSummary.Reports)
-                    $GivenIds = if ($S.PSObject.Properties['SubIds']) { @($S.SubIds | ForEach-Object { [string]$_ }) } else { @() }
-                    foreach ($DoneId in @($StreamSummary.Completed | Where-Object { $_ } | ForEach-Object { [string]$_ }))
-                    {
-                        if ($GivenIds -notcontains $DoneId -or -not $SummaryReports.ContainsKey($DoneId)) { continue }
-                        $StreamCompletedIds += $DoneId
-                        $StreamCompletedReports += $SummaryReports[$DoneId]
-                    }
+                    $StreamSummaryCompleted += @($StreamSummary.Completed | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ Id = [string]$_; StreamId = $S.StreamId } })
                 }
 
-                # A stream skips (on -Resume) the subs its own state file lists as
-                # completed. Its file is read only when it is this run's, and the
-                # start-up fold has removed or put aside every per-stream file, so
-                # this list is empty today; it stays for a stream that skips.
+                # Each stream skips (on -Resume) the subs its own state file lists
+                # as completed, so only the stream knows which ones it skipped.
                 if ($StreamSummary.Skipped)
                 {
                     foreach ($k in @($StreamSummary.Skipped))
@@ -2069,6 +2009,18 @@ else
                 }
             }
 
+            # Clean up per-stream summary JSON files (the data is now folded into
+            # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
+            # they are referenced from the merged $DiagFile via Append above. The
+            # Az context snapshot cleanup lives in the `finally` block below so it
+            # runs even on failure paths.
+            foreach ($S in $StreamSummaries)
+            {
+                if (Test-Path -LiteralPath $S.SummaryPath)
+                {
+                    try { Remove-Item -LiteralPath $S.SummaryPath -Force } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
+                }
+            }
 
             # When parallel streams have completed (clean or otherwise), merge each
             # stream's resume-state file into the unified resume-state file so a
@@ -2092,23 +2044,28 @@ else
                     # As at the start: a read error or an empty file is unreadable.
                     $Obj = Get-Content -LiteralPath $PerStreamFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                     if ($null -eq $Obj -or $Obj -isnot [System.Management.Automation.PSCustomObject] -or -not $Obj.PSObject.Properties['Completed']) { throw 'the file is empty or is not a per-stream resume state' }
-                    # Another run's file (a worker of an earlier run that still
-                    # writes; the start-up fold removed every file before this
-                    # run's streams began): its records are not used, and it is
-                    # put aside like an unreadable file, so the next run's
-                    # start-up fold does not take it either (exit 2 names it).
-                    if ([string]$Obj.RunId -ne [string]$StreamRunId)
-                    {
-                        $UnreadableStreamFiles += Move-OtherRunStreamFile -Path $PerStreamFile -FileRunId ([string]$Obj.RunId)
-                        continue
-                    }
                     $MergedStreamFiles += $StreamFile
-                    # A completed sub counts only with its report record, so a
-                    # later -Resume can carry its zip; one without is collected
-                    # again (as for the summaries, checked above, appended below).
-                    $FileReports = Get-LatestCompletedReports -Reports @($Obj.Reports)
-                    $AllCompletedFromStreams += @($Obj.Completed | Where-Object { $_ -and $FileReports.ContainsKey([string]$_) } | ForEach-Object { [string]$_ })
-                    $AllReportsFromStreams += @($FileReports.Values)
+                    # FAIL-SAFE RULE. A subscription counts as done (taken off the
+                    # retry list, skipped by a later -Resume, its report carried)
+                    # only when this run can prove its result was saved: it is in
+                    # a per-stream state file of THIS run (its RunId) with its
+                    # report record, and the unified resume state is then saved
+                    # and read back (Test-ResumeStateSaved). Anything else (a
+                    # state or report write that failed, a file of another run or
+                    # of a parent that was cut off, a completion only a summary
+                    # names) is not done: it stays on, or goes on, the retry list
+                    # and the next -Resume or -ResumeFailedOnly collects it again.
+                    # Collecting again adds no duplicate row: the bundle takes
+                    # only this run's zips and the reports of subs it skipped as
+                    # done, so a sub not done has no carried report. The retry
+                    # limit ends a sub that keeps failing this way. This one rule
+                    # covers every case where a save cannot be proven.
+                    if ([string]$Obj.RunId -eq [string]$StreamRunId)
+                    {
+                        $FileReports = Get-LatestCompletedReports -Reports @($Obj.Reports)
+                        $AllCompletedFromStreams += @($Obj.Completed | Where-Object { $_ -and $FileReports.ContainsKey([string]$_) } | ForEach-Object { [string]$_ })
+                        $AllReportsFromStreams += @($FileReports.Values)
+                    }
                     # Per-stream files written by workers also carry their
                     # FailedAttempts entries. Merge by Id so the unified
                     # state file reflects every stream's failures, with the
@@ -2127,11 +2084,21 @@ else
                     $UnreadableStreamFiles += $Aside
                 }
             }
-            # What the summaries list as completed (see above), after the files,
-            # so their reports win; the rules below still end any that failed or
-            # left no zip.
-            $AllCompletedFromStreams += @($StreamCompletedIds | Where-Object { $_ })
-            $AllReportsFromStreams += @($StreamCompletedReports | Where-Object { $null -ne $_ })
+            # A sub a stream says it completed whose result no state file of
+            # this run holds (its stream could not save it) is not done: it
+            # counts as one more failed run, so it stays on the retry list and
+            # the retry limit ends it if this keeps happening. Named below.
+            $SavedDoneIds = @($AllCompletedFromStreams | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            $UnsavedDone = @($StreamSummaryCompleted | Where-Object { $null -ne $_ -and $SavedDoneIds -notcontains [string]$_.Id -and $GoneIds -notcontains [string]$_.Id } | Sort-Object -Property Id -Unique)
+            $UnsavedReason = 'its stream could not save its result, so it is collected again'
+            foreach ($U in $UnsavedDone)
+            {
+                # Its name as this run lists it, else as the retry list has it, else its id.
+                $UName = [string](@(@($PendingSubscriptions) + @($FailedAttempts) | Where-Object { $null -ne $_ -and [string]$_.Id -eq $U.Id -and $_.Name } | Select-Object -First 1).Name)
+                $U | Add-Member -NotePropertyName Name -NotePropertyValue $(if ($UName) { $UName } else { $U.Id })
+                Write-Host ("[stream-{0}] WARNING: {1} was collected, but {2}." -f $U.StreamId, $U.Name, $UnsavedReason) -ForegroundColor Yellow
+                $FailedSubscriptions += ("{0} (stream-{1}: {2})" -f $U.Name, $U.StreamId, $UnsavedReason)
+            }
             if ($AllCompletedFromStreams.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
@@ -2144,7 +2111,7 @@ else
             # failure and a later -Resume collects the sub again. The same goes for
             # a sub a stream collected this run without a zip being written.
             $FailedThisRun = @($StreamFailedIds | Where-Object { $_ })
-            $NotCompletedThisRun = @(@($FailedThisRun) + @($StreamNoReportIds | Where-Object { $_ }))
+            $NotCompletedThisRun = @(@($FailedThisRun) + @($StreamNoReportIds | Where-Object { $_ }) + @($UnsavedDone | ForEach-Object { [string]$_.Id }))
             if ($NotCompletedThisRun.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds | Where-Object { $NotCompletedThisRun -notcontains $_ })
@@ -2187,6 +2154,12 @@ else
                 $EntryReason = if ($FailedEntry.PSObject.Properties['Reason']) { [string]$FailedEntry.Reason } else { '' }
                 $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$FailedEntry.Id) -Name $EntryName -Reason $EntryReason
             }
+            # Fail-safe rule: a collected sub whose result was not saved is one
+            # more failed run (counted once), so the retry limit ends it.
+            foreach ($U in @($UnsavedDone | Where-Object { $FailedThisRunIds -notcontains [string]$_.Id }))
+            {
+                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id ([string]$U.Id) -Name $U.Name -Reason $UnsavedReason
+            }
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $NotCompletedThisRun.Count -gt 0)
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
@@ -2219,8 +2192,11 @@ else
             }
             else
             {
+                # Fail-safe rule: the save is not proven, so nothing this run did
+                # counts as done. Its per-stream files are kept, and the next
+                # run's start folds in only their failures.
                 if (@($MergedStreamFiles).Count -gt 0) { Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($MergedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow }
-                else { Write-Host ("WARNING: The resume state file {0} does not hold every record this run's stream summaries gave, so it does not show this run's results." -f $ResumeStateFile) -ForegroundColor Yellow }
+                else { Write-Host ("WARNING: The resume state file {0} could not be saved with this run's results, so none of them counts as done; the next -Resume collects them again." -f $ResumeStateFile) -ForegroundColor Yellow }
                 # The file does not hold this run's results, as after a save that
                 # failed: while it is still there at the end of the run, the
                 # FAILED (resume state not saved) note and exit 2 say how to run
@@ -2231,27 +2207,6 @@ else
                 # calls itself clean while they wait for the next run (exit 2).
                 $LeftStreamFiles += @($MergedStreamFiles | ForEach-Object { $_.FullName })
             }
-            # Clean up per-stream summary JSON files once the resume state holds
-            # what they gave (they are the only record of a completion whose
-            # stream could not save its own file); otherwise they stay until
-            # the next run removes them at its start. Per-stream failures logs
-            # are NOT deleted - they are referenced from the merged $DiagFile via
-            # Append above. The Az context snapshot cleanup lives in the
-            # `finally` block below so it runs even on failure paths.
-            if ($StreamStateSaved)
-            {
-                foreach ($S in $StreamSummaries)
-                {
-                    if (Test-Path -LiteralPath $S.SummaryPath)
-                    {
-                        try { Remove-Item -LiteralPath $S.SummaryPath -Force -ErrorAction Stop } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
-                    }
-                }
-            }
-            # The merge is done: this run is taken off the list once none of its
-            # per-stream files is left (a file kept above stays to be folded in
-            # by the next run, so its run stays on the list).
-            if (-not (Update-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID)) { $UnreadableStreamFiles += (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID) }
         }
         finally
         {

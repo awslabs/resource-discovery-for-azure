@@ -59,8 +59,6 @@ BeforeAll {
                 New-CompletedReportRecord -InventoryRoot $Root -Id $Id -Name $Id -ZipPath $Zip -Obfuscated $false
             })
         [pscustomobject]@{ RunId = 'run-1'; Tenant = 't'; StreamId = '0'; Completed = @($Completed); FailedAttempts = @($Failed); Reports = @($Reports) } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Path -Encoding utf8
-        # The file of an interrupted run 'run-1', which the run marker names.
-        $null = Add-StreamRunMarker -InventoryRoot $Root -Tenant 't' -RunId 'run-1'
         $Path
     }
 
@@ -96,7 +94,9 @@ Describe 'The per-stream resume state files at the start of a run' {
         $null = script:New-StreamFile -Root $script:Root -N 1 -Failed @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 3 })
         $R = script:Invoke-Fold -Root $script:Root -Resume $Resume -ResumeFailedOnly $Rfo
         @($R.Lines | Where-Object { $_ -like 'Recovered per-stream state*' }).Count | Should -Be 1
-        $R.Completed | Should -Be @('sub-a')
+        # Fail-safe rule: the cut-off run never proved its results saved, so its
+        # completion is not folded in (sub-a is collected again); its failure is.
+        $R.Completed | Should -BeNullOrEmpty
         $R.Failed | Should -Be @('sub-x')
         @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty
         $R2 = script:Invoke-Fold -Root $script:Root -Resume $true
@@ -104,7 +104,7 @@ Describe 'The per-stream resume state files at the start of a run' {
     }
 
     It 'are kept and named, and the run stops before any stream could write over them, when the unified file does not hold their records afterwards' {
-        $Path = script:New-StreamFile -Root $script:Root -N 0 -Completed @('sub-a')
+        $Path = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 })
         Mock Save-CompletedSubscriptionIds { }
         Mock Exit-Wrapper { throw ('Exit-Wrapper ' + $Code) }
         $script:Out = @()

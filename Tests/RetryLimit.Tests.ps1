@@ -534,23 +534,18 @@ Describe 'Retry limit on the parallel path' {
         @($R2.Calls | Sort-Object -Unique) | Should -Be @('sub-a', 'sub-b', 'sub-x')
     }
 
-    It 'stops before any stream starts when the run marker cannot be written' {
-        $Global:RdaRlFailIds = @()
-        Mock Add-StreamRunMarker { $false }
-        $R = script:Invoke-Run -Subs @($script:A, $script:B) -Streams 2 -Interrupted
-        $R.ExitCode | Should -Be 1
-        @(script:Get-Lines -Run $R -Like 'ERROR: Could not write * so a cut-off run''s per-stream state could not be recovered.*Nothing was collected (exit 1).').Count | Should -Be 1
-        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty -Because 'no stream started'
-    }
-
     It 'a parallel -Resume with nothing left says so, and does not call it one eligible subscription' {
         $Subs = @($script:A, $script:B)
         $Global:RdaRlFailIds = @()
         $null = script:Invoke-Run -Subs $Subs -Streams 2 -Interrupted
-        # The cut-off run is on the marker (the wrapper's own launch wrote it).
-        @((Get-StreamRunMarker -InventoryRoot $script:Root -Tenant 't').RunIds).Count | Should -Be 1
+        # Fail-safe rule: the cut-off run never proved its results saved, so the
+        # first -Resume collects both again, once each (sub-x fails, so the
+        # state is kept for the next -Resume).
+        $Global:RdaRlFailIds = @('sub-x')
+        $R1 = script:Invoke-Run -Subs @($script:A, $script:B, $script:X) -Streams 2 -Resume
+        @($R1.Calls | Sort-Object) | Should -Be @('sub-a', 'sub-b', 'sub-x')
+        $Global:RdaRlFailIds = @()
         $R = script:Invoke-Run -Subs $Subs -Streams 2 -Resume
-        Test-Path -LiteralPath (Get-StreamRunMarkerPath -InventoryRoot $script:Root -Tenant 't') | Should -BeFalse -Because 'its files are folded in, so no run is left on the marker'
         @($R.Calls) | Should -BeNullOrEmpty
         @(script:Get-Lines -Run $R -Like 'No subscription left to process.').Count | Should -Be 1
         @(script:Get-Lines -Run $R -Like 'Only one*') | Should -BeNullOrEmpty
@@ -564,8 +559,6 @@ Describe 'Retry limit on the parallel path' {
         $R = script:Invoke-Run -Subs @($script:A, $script:B, $script:X) -Streams 2
         @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't').Count | Should -BeGreaterThan 0
         @(script:Get-Lines -Run $R -Like "WARNING: The resume state file * does not hold every record of this run's per-stream files*").Count | Should -Be 1
-        # The kept files keep their run on the marker, so the next start folds them in.
-        @((Get-StreamRunMarker -InventoryRoot $script:Root -Tenant 't').RunIds).Count | Should -Be 1
     }
 
     It 'with a per-stream file it cannot read, -ResumeFailedOnly names it and ends with exit 2, not a clean exit 0' {

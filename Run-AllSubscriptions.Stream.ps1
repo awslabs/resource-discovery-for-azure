@@ -157,9 +157,7 @@ $FailedAttempts = @()
 # The report zip recorded per completed sub (New-CompletedReportRecord), kept in
 # this stream's state so the parent can carry it on a later -Resume.
 $Reports = @()
-# The parent's start-up fold has removed or put aside every per-stream file
-# before this stream starts, so this reads a file only if one of this run is
-# there (none today); another run's file reads as empty.
+# Read only when it is this run's file; another run's file reads as empty.
 if ($Resume -or $ResumeFailedOnly)
 {
     $State = Read-StreamState -Path $StreamStateFile -RunId $RunId
@@ -388,10 +386,6 @@ $Summary = [pscustomobject]@{
     Status                 = if ($FailedSubs.Count -eq 0) { 'ok' } else { 'partial-failure' }
     SubsProcessed          = $PairCount
     Completed              = @($Completed)
-    # The report zip of each completed sub, so the parent can record them when
-    # the stream's own state file on disk misses some of them (a save did not
-    # reach the disk).
-    Reports                = @($Reports)
     Failed                 = $FailedSubs
     Skipped                = @($SkippedSubs)
     NoReport               = @($NoReportSubs)

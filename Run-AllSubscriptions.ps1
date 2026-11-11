@@ -1543,7 +1543,7 @@ else
     #   - Its own resume-state file at
     #     $InventoryRoot/.resume-state-<TenantID>-stream-<N>.json
     #     so concurrent state writes cannot race.
-    #   - Its own per-stream summary JSON (Stream_<N>_Summary.json) which the
+    #   - Its own per-stream summary JSON (.rda-stream-<N>-summary.json) which the
     #     parent aggregates at the end.
     #   - Its own per-stream failures log (RunAllSubscriptions_failures_*_stream-<N>.log).
     #
@@ -1885,6 +1885,15 @@ else
                     $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
                     continue
                 }
+                # A summary of another tenant or stream (another run wrote the
+                # shared path) is not this stream's: none of it is used, and
+                # the stream counts as one with a corrupt summary.
+                if ([string]$StreamSummary.Tenant -ne [string]$TenantID -or [string]$StreamSummary.StreamId -ne [string]$S.StreamId)
+                {
+                    Write-Host ("[stream-{0}] ERROR: summary file {1} is not this stream's (tenant {2}, stream {3}); it is not used." -f $S.StreamId, $S.SummaryPath, $StreamSummary.Tenant, $StreamSummary.StreamId) -ForegroundColor Red
+                    $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
+                    continue
+                }
 
                 # Surface stream-level failures (failed-to-start, etc.) so the
                 # wrapper transcript distinguishes "the whole stream broke" from
@@ -1932,16 +1941,14 @@ else
                     $StreamNoReportIds += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
                 }
 
-                # The subs the summary lists as completed (this run's, plus those
-                # the stream's own state file held), each with the report zip it
-                # recorded, for the merge below: the stream's own state file on
-                # disk misses some when a save of it did not reach the disk. Only
-                # a summary of this tenant and this stream counts, and only for
-                # the subs this stream was given, so a summary another run wrote
-                # at the same path cannot end other subscriptions' retries. One
-                # without a record is left out, so it is collected again.
-                $SummaryIsThisStream = [string]$StreamSummary.Tenant -eq [string]$TenantID -and [string]$StreamSummary.StreamId -eq [string]$S.StreamId
-                if ($SummaryIsThisStream -and $StreamSummary.Status -ne 'failed-to-start' -and $StreamSummary.Completed)
+                # The subs the summary lists as completed (this run's, plus, on
+                # -Resume or -ResumeFailedOnly, those the stream's own state file
+                # held), each with the report zip it recorded, for the merge
+                # below: the stream's own state file on disk misses some when a
+                # save of it did not reach the disk. Only the subs this stream
+                # was given count. One without a record is left out, so it is
+                # collected again.
+                if ($StreamSummary.Status -ne 'failed-to-start' -and $StreamSummary.Completed)
                 {
                     $SummaryReports = Get-LatestCompletedReports -Reports @($StreamSummary.Reports)
                     $GivenIds = if ($S.PSObject.Properties['SubIds']) { @($S.SubIds | ForEach-Object { [string]$_ }) } else { @() }

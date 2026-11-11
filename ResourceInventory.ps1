@@ -351,7 +351,7 @@ Function RunInventorySetup()
 
             if ($PSVersionTable.PSVersion.Major -lt 7)
             {
-                Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
+                Write-Log -Message ("You must use PowerShell 7 to run the inventory script.") -Severity 'Error'
                 Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell") -Severity 'Error'
                 exit 1
             }
@@ -378,7 +378,7 @@ Function RunInventorySetup()
             }
             catch
             {
-                Write-Log -Message ("Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.") -Severity 'Error'
+                Write-Log -Message ("The output directory {0} could not be found or made. Pass -OutputDirectory as the full path of a folder you can write to." -f $OutputDirectory) -Severity 'Error'
                 exit 1
             }
         }
@@ -389,8 +389,8 @@ Function RunInventorySetup()
         # tenant for a run that cannot go on.
         if (![string]::IsNullOrEmpty($ResourceGroup) -and [string]::IsNullOrEmpty($SubscriptionID))
         {
-            Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
-            Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
+            Write-Log -Message ("-ResourceGroup was given without -SubscriptionID.") -Severity 'Error'
+            Write-Log -Message ("Pass -SubscriptionID when you use -ResourceGroup.") -Severity 'Error'
             exit 1
         }
 

@@ -495,3 +495,16 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
                 -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
     }
 }
+
+Describe 'Exit-Wrapper with no per-stream state file it could not read' {
+    # The wrapper sets $UnreadableStreamFiles = @() before its start-up fold.
+    # Read as one object, that empty list passed the $null filter, so every
+    # later stop printed "Resume state ..., but not a clean run: the per-stream
+    # state file  could not be read" with no file name.
+    It 'says nothing about an unreadable per-stream state file' {
+        $Script = ". '{0}'; `$UnreadableStreamFiles = @(); `$WrapperTranscriptStarted = `$false; Exit-Wrapper -Code 1" -f $script:FunctionsPath.Replace("'", "''")
+        $Output = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -Command $Script 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 1
+        $Output | Should -Not -Match 'not a clean run' -Because $Output
+    }
+}

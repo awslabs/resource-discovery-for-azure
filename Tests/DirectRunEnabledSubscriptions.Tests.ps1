@@ -145,7 +145,7 @@ Describe 'A direct run with wrong arguments' {
         $Run.Output | Should -Not -Contain 'NOT STOPPED'
     }
 
-    It 'stops with exit 1 on PowerShell before 7, on <Platform>' -ForEach @(
+    It 'requires PowerShell 7, and stops with exit 1 before it (<Platform> <Version>)' -ForEach @(
         @{ Platform = 'Unix'; Version = '6.2'; Stops = $true }
         @{ Platform = 'Win32NT'; Version = '5.1'; Stops = $true }
         @{ Platform = 'Unix'; Version = '7.4'; Stops = $false }

@@ -91,18 +91,47 @@ Describe 'A direct run lists the subscriptions it collects' {
     }
 }
 
-Describe 'A direct run with -ResourceGroup and no -SubscriptionID' {
-    It 'stops with exit 1' {
+Describe 'A direct run with wrong arguments' {
+    BeforeAll {
         $Root = Split-Path $PSScriptRoot -Parent
-        $Ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
-        # The refusal is found by its message, wherever in the script it sits.
-        $Check = @($Ast.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses[0].Item2.Extent.Text -like '*must also put SubscriptionId*' }, $true))
-        $Check.Count | Should -Be 1
-        $Script = Join-Path $TestDrive 'rg.ps1'
-        Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) }`n`$ResourceGroup = 'rg-1'`n`$SubscriptionID = `$null`n" + $Check[0].Extent.Text + "`n'NOT STOPPED'")
-        $Pwsh = (Get-Process -Id $PID).Path
-        $Out = & $Pwsh -NoProfile -NonInteractive -File $Script
-        $LASTEXITCODE | Should -Be 1
-        $Out | Should -Not -Contain 'NOT STOPPED'
+        $script:RiAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'ResourceInventory.ps1'), [ref]$null, [ref]$null)
+
+        # Runs the one if statement whose test or body holds $Text in a child
+        # pwsh, after $Setup; Write-Log prints its message.
+        function script:Invoke-Check
+        {
+            param([string]$Text, [string]$Setup)
+            $Check = @($script:RiAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.IfStatementAst] -and $N.Clauses.Count -eq 1 -and $N.Clauses[0].Item2.Extent.Text -like "*$Text*" -and $N.Clauses[0].Item2.Extent.Text -notlike '*if (*' }, $true))
+            $Check.Count | Should -Be 1
+            $Script = Join-Path $TestDrive 'check.ps1'
+            Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) Write-Output `$Message }`n" + $Setup + "`n" + $Check[0].Extent.Text + "`n'NOT STOPPED'")
+            $Pwsh = (Get-Process -Id $PID).Path
+            $Out = @(& $Pwsh -NoProfile -NonInteractive -File $Script)
+            return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $Out }
+        }
+    }
+
+    It 'stops with exit 1 for -ResourceGroup without -SubscriptionID, before sign-in' {
+        $Run = Invoke-Check -Text 'must also put SubscriptionId' -Setup "`$ResourceGroup = 'rg-1'`n`$SubscriptionID = `$null"
+        $Run.ExitCode | Should -Be 1
+        $Run.Output | Should -Contain 'Resource Group Name present, but missing Subscription ID.'
+        $Run.Output | Should -Not -Contain 'NOT STOPPED'
+
+        $Setup = @($script:RiAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'RunInventorySetup' }, $true))[0].Extent.Text
+        $Setup.IndexOf('must also put SubscriptionId') | Should -BeGreaterThan -1
+        $Setup.IndexOf('must also put SubscriptionId') | Should -BeLessThan $Setup.IndexOf("`n            LoginSession")
+    }
+
+    It 'goes on for -ResourceGroup with -SubscriptionID' {
+        $Run = Invoke-Check -Text 'must also put SubscriptionId' -Setup "`$ResourceGroup = 'rg-1'`n`$SubscriptionID = 'sub-1'"
+        $Run.ExitCode | Should -Be 0
+        $Run.Output | Should -Contain 'NOT STOPPED'
+    }
+
+    It 'stops with exit 1 for an -OutputDirectory that does not exist' {
+        $Run = Invoke-Check -Text 'Wrong OutputDirectory Path' -Setup ("`$OutputDirectory = '{0}'" -f (Join-Path $TestDrive 'no-such-folder'))
+        $Run.ExitCode | Should -Be 1
+        $Run.Output | Should -Contain 'Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.'
+        $Run.Output | Should -Not -Contain 'NOT STOPPED'
     }
 }

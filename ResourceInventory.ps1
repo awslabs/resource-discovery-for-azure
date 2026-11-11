@@ -378,11 +378,20 @@ Function RunInventorySetup()
             catch
             {
                 Write-Log -Message ("Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.") -Severity 'Error'
-                Exit
+                exit 1
             }
         }
 
         $Global:DefaultPath = if ($OutputDirectory) { $OutputDirectory } else { $DefaultOutputDir }
+
+        # Refused before sign-in, so nobody is asked to sign in or pick a
+        # tenant for a run that cannot go on.
+        if (![string]::IsNullOrEmpty($ResourceGroup) -and [string]::IsNullOrEmpty($SubscriptionID))
+        {
+            Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
+            Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
+            exit 1
+        }
 
         # Every environment signs in through LoginSession. In Cloud Shell the
         # sign-in Cloud Shell made is a cached sign-in like any other (rule 2),
@@ -805,13 +814,6 @@ Function RunInventorySetup()
     # page edge is lost or listed twice with it.
     function ResourceInventoryLoop()
     {
-        if (![string]::IsNullOrEmpty($ResourceGroup) -and [string]::IsNullOrEmpty($SubscriptionID))
-        {
-            Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
-            Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            exit 1
-        }
-
         if (![string]::IsNullOrEmpty($ResourceGroup))
         {
             $ResourceGroup = $ResourceGroup.ToLower()

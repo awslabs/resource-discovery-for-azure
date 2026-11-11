@@ -343,16 +343,17 @@ Function RunInventorySetup()
             {
                 Write-Log -Message ('Identified Environment as PowerShell Desktop') -Severity 'Success'
                 $Global:PlatformOS = 'PowerShell Desktop'
+            }
 
-                $PsVersion = $PSVersionTable.PSVersion.Major
-                Write-Log -Message ("PowerShell Version {0}" -f $PsVersion) -Severity 'Info'
+            # PowerShell 7 on every platform, Cloud Shell and Unix included.
+            $PsVersion = $PSVersionTable.PSVersion.Major
+            Write-Log -Message ("PowerShell Version {0}" -f $PsVersion) -Severity 'Info'
 
-                if ($PSVersionTable.PSVersion.Major -lt 7)
-                {
-                    Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
-                    Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                    exit 1
-                }
+            if ($PSVersionTable.PSVersion.Major -lt 7)
+            {
+                Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
+                Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell") -Severity 'Error'
+                exit 1
             }
         }
 

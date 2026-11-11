@@ -7,8 +7,10 @@
 # subscriptions the sign-in lists. It used to list them with `az account list`,
 # which by default lists only Enabled subscriptions. Get-AzSubscription lists
 # every state, so a Disabled or Warned subscription was collected too. The run
-# now keeps only the Enabled ones of that list, as before; -SubscriptionID still collects the one it
-# names, whatever its state (the wrapper's -IncludeDisabled relies on that).
+# now keeps only the Enabled ones of that list, as before. A direct run with
+# -SubscriptionID still collects the one it names, whatever its state;
+# -IncludeDisabled runs go through the -RunAllSubs path, which keeps every
+# state.
 #
 # Set-RdaRunSubscriptions is lifted from ResourceInventory.ps1; the listing
 # and the stop are stand-ins. No live Azure.
@@ -134,9 +136,10 @@ Describe 'A direct run with wrong arguments' {
     }
 
     It 'stops with exit 1 for an -OutputDirectory that cannot be made' {
-        # A direct run makes a missing output folder before this check, so
-        # there the check fails only for a folder that cannot be made: here
-        # one under a file.
+        # The check alone, as a fallback: a direct run's pre-flight makes the
+        # output folder first and stops if it cannot write there, so this
+        # check is reached with a bad folder only if that changes or races.
+        # The folder here is under a file, so it cannot be found or made.
         $File = Join-Path $TestDrive 'a-file'
         Set-Content -LiteralPath $File -Value 'x'
         $Run = Invoke-Check -Text 'could not be found or made' -Setup ("`$OutputDirectory = '{0}'" -f (Join-Path $File 'out'))
@@ -145,21 +148,25 @@ Describe 'A direct run with wrong arguments' {
         $Run.Output | Should -Not -Contain 'NOT STOPPED'
     }
 
-    It 'requires PowerShell 7, and stops with exit 1 before it (<Platform> <Version>)' -ForEach @(
-        @{ Platform = 'Unix'; Version = '6.2'; Stops = $true }
-        @{ Platform = 'Win32NT'; Version = '5.1'; Stops = $true }
-        @{ Platform = 'Unix'; Version = '7.4'; Stops = $false }
+    It 'checks PowerShell 7 first, before any other statement of the script' {
+        $First = $script:RiAst.EndBlock.Statements[0]
+        $First | Should -BeOfType ([System.Management.Automation.Language.IfStatementAst])
+        $First.Extent.Text | Should -BeLike '*$PSVersionTable.PSVersion.Major -lt 7*You must use PowerShell 7*exit 1*'
+    }
+
+    It 'requires PowerShell 7, and stops with exit 1 before it (<Version>)' -ForEach @(
+        @{ Version = '6.2'; Stops = $true }
+        @{ Version = '5.1'; Stops = $true }
+        @{ Version = '7.4'; Stops = $false }
     ) {
-        # The whole CheckPowerShell runs; $PSVersionTable cannot be set, so it
-        # reads stand-ins, and no Cloud Shell drive is found.
-        $Fn = @($script:RiAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'CheckPowerShell' }, $true))
-        $Fn.Count | Should -Be 1
-        $Body = $Fn[0].Extent.Text.Replace('$PSVersionTable.PSVersion.Major', '$FakeVersion.Major').Replace('$PSVersionTable.Platform', '$FakePlatform')
-        $Body | Should -Not -Match '\$PSVersionTable'
+        # $PSVersionTable cannot be set, so the check reads a stand-in.
+        $Body = $script:RiAst.EndBlock.Statements[0].Extent.Text
+        $Body.Contains('$PSVersionTable.PSVersion.Major') | Should -BeTrue
+        $Body = $Body.Replace('$PSVersionTable.PSVersion.Major', '$FakeVersion.Major')
         $Script = Join-Path $TestDrive 'ps.ps1'
-        Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) Write-Output `$Message }`nfunction Get-CloudDrive { throw 'no drive' }`n`$Global:RdaSessionInitialized = `$false`n`$FakeVersion = [version]'$Version'`n`$FakePlatform = '$Platform'`n" + $Body + "`ntry { CheckPowerShell } catch { }`n'NOT STOPPED'")
+        Set-Content -LiteralPath $Script -Value ("`$FakeVersion = [version]'$Version'`n" + $Body + "`n'NOT STOPPED'")
         $Pwsh = (Get-Process -Id $PID).Path
-        $Out = @(& $Pwsh -NoProfile -NonInteractive -File $Script)
+        $Out = @(& $Pwsh -NoProfile -NonInteractive -File $Script 6>&1 | ForEach-Object { [string]$_ })
         if ($Stops)
         {
             $LASTEXITCODE | Should -Be 1

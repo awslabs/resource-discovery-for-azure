@@ -549,7 +549,7 @@ Function RunInventorySetup()
                     $Listed = @($Listed | Where-Object { [string]$_.state -eq 'Enabled' })
                     if ($Listed.Count -eq 0)
                     {
-                        Stop-SignIn -Message ($Empty -f $Tenant, 'no Enabled subscription') -Advice ('Without -SubscriptionID only Enabled subscriptions are collected. To collect a subscription that is not Enabled, pass -SubscriptionID.')
+                        Stop-SignIn -Message ($Empty -f $Tenant, 'no Enabled subscription') -Advice ('Without -SubscriptionID only Enabled subscriptions are collected. To collect a subscription that is not Enabled, pass -SubscriptionID; or pass -TenantID for a tenant with Enabled subscriptions.')
                     }
                 }
                 elseif (@($Listed | Where-Object { [string]$_.id -eq $SubscriptionID }).Count -eq 0)

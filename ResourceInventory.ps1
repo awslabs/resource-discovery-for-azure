@@ -435,7 +435,8 @@ Function RunInventorySetup()
         #     the same checks, so it cannot loop either.
         # Whatever the rule, the run goes on only when the context is on the
         # target tenant (Invoke-AzRestMethod and Get-AzSubscription use the
-        # context's tenant) and the tenant lists at least one subscription.
+        # context's tenant) and the tenant lists a subscription to collect:
+        # an Enabled one without -SubscriptionID, else the one it names.
         # With nothing usable and no -TenantID, the sign-in is made without a
         # tenant and the tenant is chosen afterwards. A usable sign-in is never
         # disconnected; a tenant switch applies to this process only, and so

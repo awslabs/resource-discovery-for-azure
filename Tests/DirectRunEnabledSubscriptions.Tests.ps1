@@ -134,8 +134,9 @@ Describe 'A direct run with wrong arguments' {
     }
 
     It 'stops with exit 1 for an -OutputDirectory that cannot be made' {
-        # The run makes a missing output folder before this check, so the
-        # check fails only for a folder that cannot be made: here one under a file.
+        # A direct run makes a missing output folder before this check, so
+        # there the check fails only for a folder that cannot be made: here
+        # one under a file.
         $File = Join-Path $TestDrive 'a-file'
         Set-Content -LiteralPath $File -Value 'x'
         $Run = Invoke-Check -Text 'Wrong OutputDirectory Path' -Setup ("`$OutputDirectory = '{0}'" -f (Join-Path $File 'out'))
@@ -144,11 +145,31 @@ Describe 'A direct run with wrong arguments' {
         $Run.Output | Should -Not -Contain 'NOT STOPPED'
     }
 
-    It 'stops with exit 1 on PowerShell before 7' {
-        # $PSVersionTable cannot be set, so the check reads a stand-in.
-        $Run = Invoke-Check -Text 'You must use Powershell 7' -Setup "`$FakeVersion = [version]'5.1'" -Swap @{ '$PSVersionTable.PSVersion.Major' = '$FakeVersion.Major' }
-        $Run.ExitCode | Should -Be 1
-        $Run.Output | Should -Contain 'You must use Powershell 7 to run the inventory script.'
-        $Run.Output | Should -Not -Contain 'NOT STOPPED'
+    It 'stops with exit 1 on PowerShell before 7, on <Platform>' -ForEach @(
+        @{ Platform = 'Unix'; Version = '6.2'; Stops = $true }
+        @{ Platform = 'Win32NT'; Version = '5.1'; Stops = $true }
+        @{ Platform = 'Unix'; Version = '7.4'; Stops = $false }
+    ) {
+        # The whole CheckPowerShell runs; $PSVersionTable cannot be set, so it
+        # reads stand-ins, and no Cloud Shell drive is found.
+        $Fn = @($script:RiAst.FindAll({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'CheckPowerShell' }, $true))
+        $Fn.Count | Should -Be 1
+        $Body = $Fn[0].Extent.Text.Replace('$PSVersionTable.PSVersion.Major', '$FakeVersion.Major').Replace('$PSVersionTable.Platform', '$FakePlatform')
+        $Body | Should -Not -Match '\$PSVersionTable'
+        $Script = Join-Path $TestDrive 'ps.ps1'
+        Set-Content -LiteralPath $Script -Value ("function Write-Log { param([string]`$Message, [string]`$Severity) Write-Output `$Message }`nfunction Get-CloudDrive { throw 'no drive' }`n`$Global:RdaSessionInitialized = `$false`n`$FakeVersion = [version]'$Version'`n`$FakePlatform = '$Platform'`n" + $Body + "`ntry { CheckPowerShell } catch { }`n'NOT STOPPED'")
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Out = @(& $Pwsh -NoProfile -NonInteractive -File $Script)
+        if ($Stops)
+        {
+            $LASTEXITCODE | Should -Be 1
+            $Out | Should -Contain 'You must use Powershell 7 to run the inventory script.'
+            $Out | Should -Not -Contain 'NOT STOPPED'
+        }
+        else
+        {
+            $Out | Should -Not -Contain 'You must use Powershell 7 to run the inventory script.'
+            $Out | Should -Contain 'NOT STOPPED'
+        }
     }
 }

@@ -1737,6 +1737,10 @@ else
         # Declared outside the try so the finally can always see them.
         $Jobs = @()
         $StreamSummaries = @()
+        # This run's id: each stream writes it into its summary, and a summary
+        # without it (a worker of an earlier run that is still running wrote
+        # the shared path) is not used.
+        $StreamRunId = [guid]::NewGuid().ToString('N')
         try
         {
             $WorkerScript = Join-Path $PSScriptRoot 'Run-AllSubscriptions.Stream.ps1'
@@ -1802,6 +1806,7 @@ else
                     PriorFailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ -and $SliceIds -contains [string]$_.Id })
                     SubscriptionNames  = $SliceNames
                     ConcurrencyLimit   = $ConcurrencyLimit
+                    RunId              = $StreamRunId
                 }
                 if ($Resume) { $WorkerArgs.Resume = $true }
                 if ($ResumeFailedOnly) { $WorkerArgs.ResumeFailedOnly = $true }
@@ -1885,12 +1890,13 @@ else
                     $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
                     continue
                 }
-                # A summary of another tenant or stream (another run wrote the
-                # shared path) is not this stream's: none of it is used, and
-                # the stream counts as one with a corrupt summary.
-                if ([string]$StreamSummary.Tenant -ne [string]$TenantID -or [string]$StreamSummary.StreamId -ne [string]$S.StreamId)
+                # A summary of another run, tenant or stream (a worker of an
+                # earlier run wrote the shared path) is not this stream's: none
+                # of it is used, and the stream counts as one with a corrupt
+                # summary.
+                if ([string]$StreamSummary.RunId -ne [string]$StreamRunId -or [string]$StreamSummary.Tenant -ne [string]$TenantID -or [string]$StreamSummary.StreamId -ne [string]$S.StreamId)
                 {
-                    Write-Host ("[stream-{0}] ERROR: summary file {1} is not this stream's (tenant {2}, stream {3}); it is not used." -f $S.StreamId, $S.SummaryPath, $StreamSummary.Tenant, $StreamSummary.StreamId) -ForegroundColor Red
+                    Write-Host ("[stream-{0}] ERROR: summary file {1} is not this run's summary of this stream (tenant {2}, stream {3}); it is not used." -f $S.StreamId, $S.SummaryPath, $StreamSummary.Tenant, $StreamSummary.StreamId) -ForegroundColor Red
                     $FailedSubscriptions += ("stream-{0} (corrupt summary)" -f $S.StreamId)
                     continue
                 }
@@ -2157,7 +2163,8 @@ else
             }
             else
             {
-                Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($MergedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow
+                if (@($MergedStreamFiles).Count -gt 0) { Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($MergedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow }
+                else { Write-Host ("WARNING: The resume state file {0} does not hold every record this run's stream summaries gave; the next run collects those subscriptions again." -f $ResumeStateFile) -ForegroundColor Yellow }
                 # They keep the resume state too: the run neither clears it nor
                 # calls itself clean while they wait for the next run (exit 2).
                 $LeftStreamFiles += @($MergedStreamFiles | ForEach-Object { $_.FullName })

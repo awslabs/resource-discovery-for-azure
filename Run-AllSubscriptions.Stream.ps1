@@ -54,7 +54,10 @@ param (
     [switch] $Obfuscate,
     [switch] $SkipMetrics,
     [switch] $SkipConsumption,
-    [int]    $ConcurrencyLimit = 6
+    [int]    $ConcurrencyLimit = 6,
+    # The parent run's id, written into the summary so the parent uses only
+    # its own run's summaries (a worker of an earlier run may still write).
+    [string] $RunId = ''
 )
 
 # ---------------------------------------------------------------------------
@@ -83,6 +86,7 @@ if ($SubscriptionIds.Count -eq 0)
 {
     Write-Stream "no subscriptions in slice; exiting cleanly" 'Yellow'
     @{
+        RunId                 = $RunId
         StreamId              = $StreamId
         Tenant                = $TenantID
         Status                = 'ok'
@@ -123,6 +127,7 @@ catch
     # Write a minimum stream summary so the parent doesn't think the stream
     # disappeared silently.
     @{
+        RunId         = $RunId
         StreamId      = $StreamId
         Tenant        = $TenantID
         Status        = 'failed-to-start'
@@ -373,6 +378,7 @@ $MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:Metric
 $CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
 
 $Summary = [pscustomobject]@{
+    RunId                  = $RunId
     StreamId               = $StreamId
     Tenant                 = $TenantID
     Status                 = if ($FailedSubs.Count -eq 0) { 'ok' } else { 'partial-failure' }

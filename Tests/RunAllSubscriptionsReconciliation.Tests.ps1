@@ -496,7 +496,7 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
     }
 }
 
-Describe 'Exit-Wrapper with no per-stream state file it could not read' {
+Describe 'Exit-Wrapper and unreadable per-stream state files' {
     # The wrapper sets $UnreadableStreamFiles = @() before its start-up fold.
     # Read as one object, that empty list passed the $null filter, so every
     # later stop printed "Resume state ..., but not a clean run: the per-stream
@@ -514,7 +514,8 @@ Describe 'Exit-Wrapper with no per-stream state file it could not read' {
     It 'says once that a moved-aside state file made the run not clean, and whether the state was kept' {
         $State = Join-Path $TestDrive 'state.json'
         Set-Content -LiteralPath $State -Value '{}'
-        # The end-of-run summary says it first; the stop after it does not repeat it.
+        # Checks the once-only guard: if a stop ever follows the end-of-run
+        # summary, it does not repeat the line (no such stop exists today).
         $Script = (". '{0}'; `$UnreadableStreamFiles = @([pscustomobject]@{{ Name = 'stream-1.json'; MovedTo = 'stream-1.json.unreadable' }}); `$ResumeStateFile = '{1}'; `$WrapperTranscriptStarted = `$false; " +
             "Write-UnreadableStreamStateSummary -Unreadable `$UnreadableStreamFiles -StateKept `$true | Out-Null; Exit-Wrapper -Code 7") -f $script:FunctionsPath.Replace("'", "''"), $State.Replace("'", "''")
         $Output = & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -Command $Script 2>&1 | Out-String

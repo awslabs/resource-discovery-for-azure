@@ -883,7 +883,8 @@ function Get-StreamFileRunId
 
 # Take off the runs none of whose per-stream files is left: a file under its
 # own name, or one put aside as unreadable (it may be fixed and renamed back
-# for the next -Resume). Returns as Save-StreamRunMarker does.
+# for the next -Resume). While a file is there whose run cannot be read from
+# it, every run stays on the list. Returns as Save-StreamRunMarker does.
 function Update-StreamRunMarker
 {
     param([Parameter(Mandatory = $true)][string]$InventoryRoot, [Parameter(Mandatory = $true)][string]$Tenant)
@@ -891,6 +892,7 @@ function Update-StreamRunMarker
     if (-not $Now.Known -or @($Now.RunIds).Count -eq 0) { return $true }
     $Files = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $Tenant) + @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json.unreadable-*" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
     $Left = @(foreach ($File in $Files) { Get-StreamFileRunId -Path $File.FullName })
+    if ($Left -contains '') { return $true }
     return (Save-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $Tenant -RunIds @($Now.RunIds | Where-Object { $Left -contains $_ }))
 }
 

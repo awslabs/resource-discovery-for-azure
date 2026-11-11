@@ -534,6 +534,15 @@ Describe 'Retry limit on the parallel path' {
         @($R2.Calls | Sort-Object -Unique) | Should -Be @('sub-a', 'sub-b', 'sub-x')
     }
 
+    It 'stops before any stream starts when the run marker cannot be written' {
+        $Global:RdaRlFailIds = @()
+        Mock Add-StreamRunMarker { $false }
+        $R = script:Invoke-Run -Subs @($script:A, $script:B) -Streams 2 -Interrupted
+        $R.ExitCode | Should -Be 1
+        @(script:Get-Lines -Run $R -Like 'ERROR: Could not write * so a cut-off run''s per-stream state could not be recovered.*Nothing was collected (exit 1).').Count | Should -Be 1
+        @(Get-StreamResumeStateFiles -InventoryRoot $script:Root -Tenant 't') | Should -BeNullOrEmpty -Because 'no stream started'
+    }
+
     It 'a parallel -Resume with nothing left says so, and does not call it one eligible subscription' {
         $Subs = @($script:A, $script:B)
         $Global:RdaRlFailIds = @()

@@ -1800,7 +1800,13 @@ else
             # This run's id, for the start-up fold of the next run should these
             # streams be cut off (taken off once none of its per-stream files is
             # left). A list that cannot be written keeps the resume state (exit 2).
-            if (-not (Add-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId)) { $UnreadableStreamFiles += (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID) }
+            # One that cannot be written stops the run before any stream starts:
+            # cut off, its streams' files could not be folded in by the next run.
+            if (-not (Add-StreamRunMarker -InventoryRoot $InventoryRoot -Tenant $TenantID -RunId $StreamRunId))
+            {
+                Write-Host ("ERROR: Could not write {0}, so a cut-off run's per-stream state could not be recovered. Fix the folder (for example, free up disk space), then run again. Nothing was collected (exit 1)." -f (Get-StreamRunMarkerPath -InventoryRoot $InventoryRoot -Tenant $TenantID)) -ForegroundColor Red
+                Exit-Wrapper -Code 1
+            }
 
             # Build per-stream output paths up front so we know where to look later.
             for ($S = 0; $S -lt $StreamCount; $S++)
@@ -2063,18 +2069,6 @@ else
                 }
             }
 
-            # Clean up per-stream summary JSON files (the data is now folded into
-            # the wrapper's accumulators). Per-stream failures logs are NOT deleted -
-            # they are referenced from the merged $DiagFile via Append above. The
-            # Az context snapshot cleanup lives in the `finally` block below so it
-            # runs even on failure paths.
-            foreach ($S in $StreamSummaries)
-            {
-                if (Test-Path -LiteralPath $S.SummaryPath)
-                {
-                    try { Remove-Item -LiteralPath $S.SummaryPath -Force -ErrorAction Stop } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
-                }
-            }
 
             # When parallel streams have completed (clean or otherwise), merge each
             # stream's resume-state file into the unified resume-state file so a
@@ -2161,23 +2155,23 @@ else
             # A stream reads its own file, which can still hold an entry this
             # run dropped as gone at the start (an interrupted run left it).
             $AllFailedFromStreams = @($AllFailedFromStreams | Where-Object { $null -ne $_ -and $GoneIds -notcontains [string]$_.Id })
-            # The parent's count per sub, before the merge, so a stream entry
-            # that counts one more failed run is known as this run's even when
-            # a clock moved.
+            # The parent's count per sub, before the merge: a stream entry that
+            # counts more failed runs than the parent's is this run's failure
+            # (a worker always counts on from the parent's entry), whatever the
+            # clocks say. Counts are read as everywhere (Get-FailedAttemptCount).
             $PriorAttempts = @{}
-            foreach ($P in @($FailedAttempts | Where-Object { $null -ne $_ })) { $PriorAttempts[[string]$P.Id] = [int]$P.Attempts }
+            foreach ($P in @($FailedAttempts | Where-Object { $null -ne $_ })) { $PriorAttempts[[string]$P.Id] = Get-FailedAttemptCount -Entry $P }
             # This run's streams start from the parent's entries and count on
             # from them, so a stream entry with more failed runs than the
             # parent's is the newer one, whatever the clocks say: the parent's
             # is dropped before the merge picks by time.
             $Counted = @{}
-            foreach ($E in @($AllFailedFromStreams | Where-Object { $null -ne $_ })) { $Id = [string]$E.Id; if ($PriorAttempts.ContainsKey($Id) -and [int]$E.Attempts -gt $PriorAttempts[$Id]) { $Counted[$Id] = $true } }
+            foreach ($E in @($AllFailedFromStreams | Where-Object { $null -ne $_ })) { $Id = [string]$E.Id; if ($PriorAttempts.ContainsKey($Id) -and (Get-FailedAttemptCount -Entry $E) -gt $PriorAttempts[$Id]) { $Counted[$Id] = $true } }
             $FailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ -and -not $Counted.ContainsKey([string]$_.Id) })
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
+            # A sub with no parent entry counts from 0, so its first failure counts.
             $FailedThisRunIds = @($AllFailedFromStreams | Where-Object {
-                    $null -ne $_ -and (
-                        ([int]$_.Attempts -gt [int]$PriorAttempts[[string]$_.Id]) -or
-                        ($_.PSObject.Properties['LastFailedAt'] -and $(try { ([datetime]$_.LastFailedAt).ToUniversalTime() -ge ([datetime]$RunStartTime).ToUniversalTime() } catch { $false })))
+                    $null -ne $_ -and (Get-FailedAttemptCount -Entry $_) -gt $(if ($PriorAttempts.ContainsKey([string]$_.Id)) { $PriorAttempts[[string]$_.Id] } else { 0 })
                 } | ForEach-Object { [string]$_.Id })
             # A sub a stream's summary lists as failed whose failure this run its
             # stream's own file does not hold (that file could not be read, or
@@ -2185,7 +2179,8 @@ else
             # goes on the retry list here as one more failed run, so
             # -ResumeFailedOnly retries it and the count stays right. A stream
             # starts from the parent's entries for its slice and saves them as
-            # they are, so only an entry with a time from this run counts.
+            # they are, so only an entry that counts one more failed run than
+            # the parent's (or a first one) is this run's.
             foreach ($FailedEntry in @($StreamFailedEntries | Where-Object { $null -ne $_ -and $FailedThisRunIds -notcontains [string]$_.Id -and $GoneIds -notcontains [string]$_.Id }))
             {
                 $EntryName = if ($FailedEntry.PSObject.Properties['Name']) { [string]$FailedEntry.Name } else { '' }
@@ -2235,6 +2230,23 @@ else
                 # They keep the resume state too: the run neither clears it nor
                 # calls itself clean while they wait for the next run (exit 2).
                 $LeftStreamFiles += @($MergedStreamFiles | ForEach-Object { $_.FullName })
+            }
+            # Clean up per-stream summary JSON files once the resume state holds
+            # what they gave (they are the only record of a completion whose
+            # stream could not save its own file); otherwise they stay until
+            # the next run removes them at its start. Per-stream failures logs
+            # are NOT deleted - they are referenced from the merged $DiagFile via
+            # Append above. The Az context snapshot cleanup lives in the
+            # `finally` block below so it runs even on failure paths.
+            if ($StreamStateSaved)
+            {
+                foreach ($S in $StreamSummaries)
+                {
+                    if (Test-Path -LiteralPath $S.SummaryPath)
+                    {
+                        try { Remove-Item -LiteralPath $S.SummaryPath -Force -ErrorAction Stop } catch { Write-Verbose ("Could not remove stream summary {0}: {1}" -f $S.SummaryPath, $_.Exception.Message) }
+                    }
+                }
             }
             # The merge is done: this run is taken off the list once none of its
             # per-stream files is left (a file kept above stays to be folded in

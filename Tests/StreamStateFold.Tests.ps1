@@ -103,6 +103,27 @@ Describe 'The per-stream resume state files at the start of a run' {
         @($R2.Lines | Where-Object { $_ -like 'Recovered per-stream state*' }) | Should -BeNullOrEmpty
     }
 
+    It 'keep the higher count of failed runs over an entry dated later (a clock moved back)' {
+        Save-CompletedSubscriptionIds -Path (Join-Path $script:Root '.resume-state-t.json') -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = (Get-Date).AddDays(2).ToUniversalTime().ToString('o'); Reason = 'parent'; Attempts = 1 }) -Reports @()
+        $null = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = (Get-Date).AddDays(-1).ToUniversalTime().ToString('o'); Reason = 'stream'; Attempts = 2 })
+        $null = script:Invoke-Fold -Root $script:Root -Resume $true
+        $E = @(Get-FailedAttempts -Path (Join-Path $script:Root '.resume-state-t.json') -Tenant 't' | Where-Object Id -eq 'sub-x')
+        [int]$E[0].Attempts | Should -Be 2
+        [string]$E[0].Reason | Should -Be 'stream'
+    }
+
+    It 'Merge-RecoveredFailedAttempts picks the most failed runs, then the latest time, and drops completed ids' {
+        $Old = [pscustomobject]@{ Id = 'a'; Name = 'A'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'old'; Attempts = 3 }
+        $New = [pscustomobject]@{ Id = 'a'; Name = 'A'; LastFailedAt = '2030-01-01T00:00:00Z'; Reason = 'new'; Attempts = 1 }
+        $T1 = [pscustomobject]@{ Id = 'b'; Name = 'B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'b1'; Attempts = 2 }
+        $T2 = [pscustomobject]@{ Id = 'b'; Name = 'B'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'b2'; Attempts = 2 }
+        $C = [pscustomobject]@{ Id = 'c'; Name = 'C'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'c'; Attempts = 1 }
+        $R = @(Merge-RecoveredFailedAttempts -ExistingFailedAttempts @($New, $T1, $C) -RecoveredFailedAttempts @($Old, $T2) -CompletedIds @('c'))
+        @($R | ForEach-Object Id | Sort-Object) | Should -Be @('a', 'b')
+        @($R | Where-Object Id -eq 'a')[0].Reason | Should -Be 'old'
+        @($R | Where-Object Id -eq 'b')[0].Reason | Should -Be 'b2'
+    }
+
     It 'are kept and named, and the run stops before any stream could write over them, when the unified file does not hold their records afterwards' {
         $Path = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 })
         Mock Save-CompletedSubscriptionIds { }

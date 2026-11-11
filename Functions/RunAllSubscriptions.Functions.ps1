@@ -820,6 +820,24 @@ function Merge-FailedAttempts
     return $Reconciled
 }
 
+# For the start-up folds of recovered state (a kept per-stream file, a state put
+# aside as not saved): the entries are counts of failed runs that only grow, so
+# per sub the one with the most failed runs wins, and the time only breaks a tie
+# (a clock moved back cannot undo a counted run). An entry for a completed id is
+# dropped, as Merge-FailedAttempts does.
+function Merge-RecoveredFailedAttempts
+{
+    param([object]$ExistingFailedAttempts, [object]$RecoveredFailedAttempts, [object]$CompletedIds)
+    $Done = @(@($CompletedIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $Result = @()
+    foreach ($g in @(@(@($ExistingFailedAttempts) + @($RecoveredFailedAttempts)) | Where-Object { $_ } | Group-Object -Property Id))
+    {
+        if ($Done -contains [string]$g.Name) { continue }
+        $Result += $g.Group | Sort-Object -Property @{ Expression = { Get-FailedAttemptCount -Entry $_ } ; Descending = $true }, @{ Expression = { try { [datetime]$_.LastFailedAt } catch { [datetime]::MinValue } } ; Descending = $true } | Select-Object -First 1
+    }
+    return $Result
+}
+
 # The eligible subscriptions that no run has completed and that are not on the
 # retry list: after an interrupted run, the ones it never reached.
 # -ResumeFailedOnly retries only the retry list, so it does not collect these;

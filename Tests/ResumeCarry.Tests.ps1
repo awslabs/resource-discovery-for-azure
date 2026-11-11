@@ -1310,11 +1310,24 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @()
         $IsClean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$RunClean' })
         $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
-        $Marks = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
+        $Marks = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '-not $ResumeStateSaveFailed -and ($RunClean -or (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))' })
         $Marks.Count | Should -Be 1
-        $End = [scriptblock]::Create("param(`$ResumeStateFile, `$StatePutAside)`n`$FailedSubscriptions = @(); `$RetryOwedCount = 0; `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Marks[0].Extent.Text)
-        & $End $script:State @($Mark) 6>$null
+        $End = [scriptblock]::Create("param(`$ResumeStateFile, `$StatePutAside, `$Owed)`n`$FailedSubscriptions = @(); `$RetryOwedCount = `$Owed; `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @(); `$ResumeStateSaveFailed = `$false`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Marks[0].Extent.Text)
+        & $End $script:State @($Mark) 0 6>$null
         Test-Path -LiteralPath $Mark | Should -BeFalse
+        # A run that is not clean but saved its state (which holds the mark's
+        # failures) removes the mark too, so an older mark cannot bring back a
+        # failure a later run cleared.
+        Set-Content -LiteralPath $Mark -Value '{}'
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 }) -Reports @()
+        & $End $script:State @($Mark) 1 6>$null
+        Test-Path -LiteralPath $script:State | Should -BeTrue
+        Test-Path -LiteralPath $Mark | Should -BeFalse
+        # One that cannot be removed is named.
+        Set-Content -LiteralPath $Mark -Value '{}'
+        Mock Remove-Item -ParameterFilter { [string]$LiteralPath -eq $Mark } -MockWith { throw 'stand-in: locked' }
+        $Said = @(& $End $script:State @($Mark) 1 6>&1 | ForEach-Object { [string]$_ })
+        @($Said | Where-Object { $_ -like ('WARNING: Could not remove {0}*stand-in: locked*Delete it*' -f $Mark) }).Count | Should -Be 1
     }
 
     It 'reads only the failures of a state put aside as not saved, never its completions, so no retry entry is lost' {

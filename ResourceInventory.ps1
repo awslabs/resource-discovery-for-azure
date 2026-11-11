@@ -19,6 +19,15 @@ param ($TenantID,
     $ReportName = 'ResourcesReport',
     $OutputDirectory)
 
+# PowerShell 7 on every platform, checked first, before any module or sign-in
+# step can stop the run with other advice.
+if ($PSVersionTable.PSVersion.Major -lt 7)
+{
+    Write-Host "You must use PowerShell 7 to run the inventory script." -ForegroundColor Red
+    Write-Host "https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell" -ForegroundColor Yellow
+    exit 1
+}
+
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
 if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 {
@@ -345,16 +354,8 @@ Function RunInventorySetup()
                 $Global:PlatformOS = 'PowerShell Desktop'
             }
 
-            # PowerShell 7 on every platform, Cloud Shell and Unix included.
-            $PsVersion = $PSVersionTable.PSVersion.Major
-            Write-Log -Message ("PowerShell Version {0}" -f $PsVersion) -Severity 'Info'
-
-            if ($PSVersionTable.PSVersion.Major -lt 7)
-            {
-                Write-Log -Message ("You must use PowerShell 7 to run the inventory script.") -Severity 'Error'
-                Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell") -Severity 'Error'
-                exit 1
-            }
+            # PowerShell 7 is checked at the top of the script.
+            Write-Log -Message ("PowerShell Version {0}" -f $PSVersionTable.PSVersion.Major) -Severity 'Info'
         }
 
         $ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))

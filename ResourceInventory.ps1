@@ -56,103 +56,313 @@ function Variables
     $Global:ResourceResourceGroupDictionary = $null
     $Global:TagValueDictionary = $null
     $Global:FreeTextDictionary = $null
+    $Global:ObfuscationSubscriptionTokens = $null
+    $Global:ObfuscationResourceGroupTokens = $null
+    $Global:ObfuscationSubscriptionIndex = $null
+    # New-ObfuscatedRowIdWithoutId's count of no-id rows and name index, per run.
+    $script:RdaNoIdRowsSeen = $null
+    $script:RdaNoIdNameIndex = $null
+    # Stand-in path -> the row's real name (the path writes a '/' as '_'),
+    # for the shareable diagnostics log's scrub.
+    $Global:RdaNoIdRealNames = $null
 
     if ($Obfuscate.IsPresent)
     {
-        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        # Keyed by real resource id, ignoring case: Azure ids are not case
+        # sensitive, Resource Graph gives them in lower case and consumption
+        # and metrics can give the same id in other casing. A case miss would
+        # give the same resource a second name token and break the join.
+        $Global:ResourceIdDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceNameDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceSubscriptionDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $Global:ResourceResourceGroupDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::OrdinalIgnoreCase)
         $Global:TagValueDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
         $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        # Subscription id -> token (the prefix from its display name) and
+        # resource group name -> token, shared by the inventory and the
+        # consumption rows.
+        $Global:ObfuscationSubscriptionTokens = @{}
+        $Global:ObfuscationResourceGroupTokens = @{}
     }
 
     $Global:RawRepo = 'https://raw.githubusercontent.com/awslabs/resource-discovery-for-azure/main'
     $Global:TableStyle = "Medium15"
 }
 
-function Resolve-ObfuscationToken
+# 'nonprod_' when a name looks like a non-production one, else 'prod_'.
+function Get-ObfuscationPrefix
 {
-    param(
-        [string]$RealValue,
-        [string]$LookupKey,
-        $SharedDictionary,
-        [hashtable]$LocalCache,
-        [string]$TokenPrefix
-    )
-
-    if ($null -ne $SharedDictionary -and $SharedDictionary.ContainsKey($LookupKey)) { return $SharedDictionary[$LookupKey] }
-    if ($LocalCache.ContainsKey($RealValue)) { return $LocalCache[$RealValue] }
-
-    $Token = $TokenPrefix + [guid]::NewGuid().ToString()
-    $LocalCache[$RealValue] = $Token
-    return $Token
+    param([string]$Value)
+    if ($Value -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $Value -match '(^|-)([dts])-') { return 'nonprod_' }
+    return 'prod_'
 }
 
-function Build-ObfuscatedResourceUri
+# A new token for the resource name $Name of resource $ResourceId, with the type
+# hint the report uses for Databricks, AKS-managed and scale set resources. This
+# defines the name token format; the per-resource loop of RunInventorySetup builds
+# the same token inline.
+function New-ObfuscatedNameToken
 {
-    param(
-        [string]$RawUri,
-        [string]$Prefix,
-        $SubscriptionDictionary,
-        $ResourceGroupDictionary,
-        $NameDictionary,
-        [hashtable]$SubCache,
-        [hashtable]$RgCache,
-        [hashtable]$NameCache
-    )
+    param([string]$ResourceId, [string]$Name)
+    $Hint = if ($ResourceId -match 'databricks') { 'databricks_' } elseif ($ResourceId -match '/resourcegroups/mc_') { 'aks_' } elseif ($ResourceId -match 'virtualmachinescalesets') { 'vmss_' } else { '' }
+    return (Get-ObfuscationPrefix $Name) + $Hint + [guid]::NewGuid().ToString()
+}
 
-    if ([string]::IsNullOrEmpty($RawUri))
+# The $Global:Subscriptions entries by subscription id, in list order, so a lookup
+# per resource does not scan the list. Built once per list, and again when the list
+# is replaced. Ids compare as the -eq scans this replaces did (ignoring case,
+# invariant culture); entries with no id are kept apart in NoId, the entries a
+# missing subscription id matched.
+function Get-ObfuscationSubscriptionIndex
+{
+    $Index = $Global:ObfuscationSubscriptionIndex
+    if ($null -ne $Index -and [object]::ReferenceEquals($Index.Source, $Global:Subscriptions)) { return $Index }
+
+    $ById = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::InvariantCultureIgnoreCase)
+    $NoId = [System.Collections.Generic.List[object]]::new()
+    foreach ($Sub in @($Global:Subscriptions))
     {
-        return 'obfuscated'
+        if ($null -eq $Sub -or $null -eq $Sub.id) { $NoId.Add($Sub); continue }
+        $Key = [string]$Sub.id
+        if (-not $ById.ContainsKey($Key)) { $ById[$Key] = [System.Collections.Generic.List[object]]::new() }
+        $ById[$Key].Add($Sub)
     }
+    $Global:ObfuscationSubscriptionIndex = @{ Source = $Global:Subscriptions; ById = $ById; NoId = $NoId }
+    return $Global:ObfuscationSubscriptionIndex
+}
 
-    if ($RawUri -notmatch '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
+# Whether Get-ObfuscatedResourceId keeps $ResourceId as a tenant-scope path
+# ('/providers/<namespace>/<type>/<name>...': each type has a name, no
+# segment is empty or '$system'); any other '/providers/...' value gets one
+# flat token. The seed check asks the same, so it treats a seeded value the
+# way this run would write it.
+function Test-RdaTenantScopeIdMaskable
+{
+    param([string]$ResourceId)
+    if ([string]::IsNullOrEmpty($ResourceId)) { return $false }
+    $Parts = $ResourceId.Split('/')
+    if ($Parts.Count -lt 5 -or ($Parts.Count % 2) -ne 1 -or $Parts[0] -ne '' -or $Parts[1] -ine 'providers') { return $false }
+    foreach ($Part in $Parts[1..($Parts.Count - 1)]) { if ([string]::IsNullOrEmpty($Part) -or $Part -eq '$system') { return $false } }
+    return $true
+}
+
+# The masked form of a resource id. Every name segment is replaced (the
+# subscription, the resource group and each resource name, a parent's
+# included) and the 'subscriptions', 'resourcegroups', 'providers', namespace
+# and type segments are kept, so the id keeps its ARM shape. Each segment uses
+# the token its own subscription, resource group or resource already has, so a
+# child's id holds its parent's masked name and ids join across the inventory,
+# metrics and consumption files. A segment with no token yet gets one, recorded
+# in the run's dictionaries (a name keyed by the real id up to that segment), so
+# the obfuscation dictionary can reverse every segment. A caller that masks many
+# ids passes the index from Get-ObfuscationSubscriptionIndex once as
+# $SubscriptionIndex; without it the function gets the index itself.
+function Get-ObfuscatedResourceId
+{
+    param([string]$ResourceId, [hashtable]$SubscriptionIndex)
+
+    if ([string]::IsNullOrEmpty($ResourceId)) { return 'obfuscated' }
+    $Parts = $ResourceId.Split('/')
+    $Masked = [System.Collections.Generic.List[string]]::new()
+    $Masked.Add('')
+    # A tenant-scope id with no subscription (a reservation order, a
+    # management group): '/providers/<namespace>/<type>/<name>...'. It keeps
+    # its own path, every name segment masked as below, but only when every
+    # name segment can be a token: each type has a name, and no segment is
+    # empty or the fixed name '$system'. Any other '/providers/...' value
+    # gets one flat token, as before (not changed here).
+    $IsTenantScope = Test-RdaTenantScopeIdMaskable -ResourceId $ResourceId
+    if ($IsTenantScope)
     {
-        if (-not $NameCache.ContainsKey($RawUri))
+        $i = 1
+    }
+    elseif ($Parts.Count -lt 3 -or $Parts[0] -ne '' -or $Parts[1] -ine 'subscriptions' -or [string]::IsNullOrEmpty($Parts[2]))
+    {
+        return (Get-ObfuscationPrefix $ResourceId) + [guid]::NewGuid().ToString()
+    }
+    else
+    {
+        if ($null -eq $SubscriptionIndex) { $SubscriptionIndex = Get-ObfuscationSubscriptionIndex }
+        $SubEntries = $SubscriptionIndex.ById[$Parts[2]]
+        $SubName = if ($null -ne $SubEntries) { [string]$SubEntries[0].name } else { '' }
+        if ([string]::IsNullOrEmpty($SubName)) { $SubName = $Parts[2] }
+        # One token per subscription id (two subscriptions may share a
+        # display name); its prod_/nonprod_ prefix comes from the name.
+        if (-not $Global:ObfuscationSubscriptionTokens.ContainsKey($Parts[2])) { $Global:ObfuscationSubscriptionTokens[$Parts[2]] = (Get-ObfuscationPrefix $SubName) + [guid]::NewGuid().ToString() }
+        $SubToken = $Global:ObfuscationSubscriptionTokens[$Parts[2]]
+        if (-not $ResourceSubscriptionDictionary.ContainsKey($ResourceId)) { $ResourceSubscriptionDictionary[$ResourceId] = $SubToken }
+
+        $Masked.Add($Parts[1])
+        $Masked.Add($SubToken)
+        $i = 3
+    }
+    while ($i -lt $Parts.Count)
+    {
+        $Segment = $Parts[$i]
+        $Masked.Add($Segment)
+        if ($i + 1 -ge $Parts.Count) { break }
+        $Next = $Parts[$i + 1]
+        if ($i -eq 3 -and $Segment -ieq 'resourcegroups')
         {
-            $NameCache[$RawUri] = $Prefix + [guid]::NewGuid().ToString()
+            if (-not $Global:ObfuscationResourceGroupTokens.ContainsKey($Next)) { $Global:ObfuscationResourceGroupTokens[$Next] = (Get-ObfuscationPrefix $Next) + [guid]::NewGuid().ToString() }
+            $Masked.Add($Global:ObfuscationResourceGroupTokens[$Next])
+            if (-not $ResourceResourceGroupDictionary.ContainsKey($ResourceId)) { $ResourceResourceGroupDictionary[$ResourceId] = $Global:ObfuscationResourceGroupTokens[$Next] }
         }
-        return $NameCache[$RawUri]
-    }
-
-    $RealSub = $Matches[1]
-    $RealRg = $Matches[3]
-    $RealProv = $Matches[5]
-
-    $ObfSub = Resolve-ObfuscationToken -RealValue $RealSub -LookupKey $RawUri -SharedDictionary $SubscriptionDictionary -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
-
-    $RebuiltUri = '/subscriptions/' + $ObfSub
-
-    if (-not [string]::IsNullOrEmpty($RealRg))
-    {
-        $RgTag = if ($RealRg -match '^mc_') { 'mc_' } else { '' }
-        $ObfRg = Resolve-ObfuscationToken -RealValue $RealRg -LookupKey $RawUri -SharedDictionary $ResourceGroupDictionary -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
-        $RebuiltUri += '/resourcegroups/' + $ObfRg
-    }
-
-    if (-not [string]::IsNullOrEmpty($RealProv))
-    {
-        $ProvParts = $RealProv -split '/'
-        $Rebuilt = @()
-        for ($Pi = 0; $Pi -lt $ProvParts.Count; $Pi++)
+        elseif ($Segment -ieq 'providers' -or [string]::IsNullOrEmpty($Next) -or $Next -eq '$system')
         {
-            $Part = $ProvParts[$Pi]
-            $IsNameSegment = ($Pi -ge 2 -and ($Pi % 2 -eq 0))
-            if ($IsNameSegment -and -not [string]::IsNullOrEmpty($Part) -and $Part -ne '$system')
+            # A provider namespace, an empty segment, or the fixed name '$system'.
+            $Masked.Add($Next)
+        }
+        else
+        {
+            $UpToName = $Parts[0..($i + 1)] -join '/'
+            if (-not $ResourceNameDictionary.ContainsKey($UpToName) -or [string]::IsNullOrEmpty($ResourceNameDictionary[$UpToName])) { $ResourceNameDictionary[$UpToName] = New-ObfuscatedNameToken -ResourceId $UpToName -Name $Next }
+            $Masked.Add($ResourceNameDictionary[$UpToName])
+        }
+        $i += 2
+    }
+    return ($Masked -join '/')
+}
+
+# Whether $MaskedId is the masked form of $RealId that Get-ObfuscatedResourceId
+# writes: the same segments, with the subscription, the resource group and
+# every name segment a prod_/nonprod_ token (a '$system' name kept), and the
+# 'subscriptions', 'resourcegroups', 'providers', namespace and type segments
+# as in the real id (ignoring case). A seeded id from an older dictionary
+# (which masked only the last name, so a parent's real name was left) or a
+# flat seeded token fails, and the run masks the real id again.
+function Test-ObfuscatedIdShape
+{
+    param([string]$RealId, [string]$MaskedId)
+    if ([string]::IsNullOrEmpty($RealId) -or [string]::IsNullOrEmpty($MaskedId)) { return $false }
+    $R = $RealId.Split('/')
+    $M = $MaskedId.Split('/')
+    if ($R.Count -ne $M.Count -or $R.Count -lt 3 -or $R[0] -ne '' -or $M[0] -ne '') { return $false }
+    # The tokens each slot takes: a subscription token has no hint, a resource
+    # group token at most the older 'mc_' one, a name token at most the
+    # databricks_/aks_/vmss_ hint. So the metric step's old sub_/rg_ tokens,
+    # or any other word in a token, fail.
+    $Guid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    $SubToken = '^(prod|nonprod)_' + $Guid + '$'
+    $RgToken = '^(prod|nonprod)_(mc_)?' + $Guid + '$'
+    $Token = '^(prod|nonprod)_(databricks_|aks_|vmss_)?' + $Guid + '$'
+    if ($R[1] -ieq 'subscriptions')
+    {
+        if ($M[1] -ine 'subscriptions' -or $M[2] -cnotmatch $SubToken) { return $false }
+        $i = 3
+    }
+    elseif ($R[1] -ieq 'providers') { $i = 1 }
+    else { return $false }
+    while ($i -lt $R.Count)
+    {
+        if ($M[$i] -ine $R[$i]) { return $false }
+        if ($i + 1 -ge $R.Count) { break }
+        $Next = $R[$i + 1]
+        if ($R[$i] -ieq 'providers' -or [string]::IsNullOrEmpty($Next) -or $Next -eq '$system')
+        {
+            if ($M[$i + 1] -ine $Next) { return $false }
+        }
+        elseif ($i -eq 3 -and $R[$i] -ieq 'resourcegroups' -and $R[1] -ieq 'subscriptions')
+        {
+            if ($M[$i + 1] -cnotmatch $RgToken) { return $false }
+        }
+        elseif ($M[$i + 1] -cnotmatch $Token) { return $false }
+        $i += 2
+    }
+    return $true
+}
+
+# A masked ARM path for a collector row with no resource id under -Obfuscate,
+# so the inventory never holds an empty or flat ID. The row gets a stand-in
+# real id, which goes through Get-ObfuscatedResourceId and into the run's
+# dictionaries like any other id, so its ResourceIdMap entry reverses it:
+#   real:   /subscriptions/<sub id>/resourcegroups/<group>/providers/rda.noid/<collector>/<name>~<8 hex>
+#   masked: /subscriptions/<sub tok>/resourcegroups/<rg tok>/providers/rda.noid/<collector>/<name tok>
+# The subscription is the row's Subscription (display name) looked up in the
+# run's list, so the tokens are the ones the subscription's other rows get.
+# 'rda.noid' names no Azure provider: the row has no real id. A missing
+# subscription, group or name is written '~nosub', '~norg', '~noname' ('~' is
+# in no Azure name, so it never meets a real one). The 8 hex are the start of
+# a SHA-256 of collector, subscription, group and name, so the same row gets
+# the same stand-in every run and a seeded run (-ObfuscationDictionary) reuses
+# its masked id; a second row with all four the same in one run adds -2, -3...
+# Returns the masked id and the three tokens, which are its own segments.
+function New-ObfuscatedRowIdWithoutId
+{
+    param([string]$Subscription, [string]$ResourceGroup, [string]$Name, [string]$Collector)
+
+    $SubSegment = '~nosub'
+    if (-not [string]::IsNullOrEmpty($Subscription))
+    {
+        $SubSegment = $Subscription
+        # Display name -> ids in list order, built once per subscription list.
+        if ($null -eq $script:RdaNoIdNameIndex -or -not [object]::ReferenceEquals($script:RdaNoIdNameIndex.Source, $Global:Subscriptions))
+        {
+            $ByName = @{}
+            foreach ($Sub in @($Global:Subscriptions))
             {
-                $NameSharedDict = if ($Pi -eq $ProvParts.Count - 1) { $NameDictionary } else { $null }
-                $Rebuilt += Resolve-ObfuscationToken -RealValue $Part -LookupKey $RawUri -SharedDictionary $NameSharedDict -LocalCache $NameCache -TokenPrefix $Prefix
+                if ($null -eq $Sub -or [string]::IsNullOrEmpty([string]$Sub.id) -or [string]::IsNullOrEmpty([string]$Sub.name)) { continue }
+                if (-not $ByName.ContainsKey([string]$Sub.name)) { $ByName[[string]$Sub.name] = [System.Collections.Generic.List[string]]::new() }
+                if (-not $ByName[[string]$Sub.name].Contains([string]$Sub.id)) { $ByName[[string]$Sub.name].Add([string]$Sub.id) }
             }
-            else
+            $script:RdaNoIdNameIndex = @{ Source = $Global:Subscriptions; ByName = $ByName; Warned = @{} }
+        }
+        $NameIds = @(if ($script:RdaNoIdNameIndex.ByName.ContainsKey($Subscription)) { $script:RdaNoIdNameIndex.ByName[$Subscription] })
+        if ($NameIds.Count -ge 1) { $SubSegment = $NameIds[0] }
+        # The row names its subscription only by display name: with two
+        # subscriptions of that name it is filed under the first one (said
+        # once per name).
+        if ($NameIds.Count -gt 1 -and -not $script:RdaNoIdNameIndex.Warned.ContainsKey($Subscription))
+        {
+            $script:RdaNoIdNameIndex.Warned[$Subscription] = $true
+            if (Get-Command -Name Write-Log -ErrorAction SilentlyContinue)
             {
-                $Rebuilt += $Part
+                Write-Log -Message ("A collector row with no id names subscription '{0}', which {1} subscriptions share; its masked id is filed under the first of them." -f $Subscription, $NameIds.Count) -Severity 'Warning'
             }
         }
-        $RebuiltUri += '/providers/' + ($Rebuilt -join '/')
+    }
+    $RgSegment = if ([string]::IsNullOrEmpty($ResourceGroup)) { '~norg' } else { $ResourceGroup }
+    $Type = ([string]$Collector).ToLowerInvariant() -replace '[^a-z0-9.]', ''
+    if ($Type -notmatch '^[a-z]') { $Type = 'unknown' }
+    $NameBase = if ([string]::IsNullOrEmpty($Name)) { '~noname' } else { $Name -replace '/', '_' }
+    $SubSegment = $SubSegment -replace '/', '_'
+    $RgSegment = $RgSegment -replace '/', '_'
+    $Key = ('{0}|{1}|{2}|{3}' -f $Type, $SubSegment, $RgSegment, $NameBase).ToLowerInvariant()
+    # SHA256.Create() and ComputeHash, because SHA256.HashData and
+    # Convert.ToHexString need .NET 5, which PowerShell 7.0 does not have.
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Key)) }
+    finally { $Sha.Dispose() }
+    $Hash = -join @($HashBytes[0..3] | ForEach-Object { $_.ToString('x2') })
+    if ($null -eq $script:RdaNoIdRowsSeen) { $script:RdaNoIdRowsSeen = @{} }
+    $script:RdaNoIdRowsSeen[$Key] = 1 + [int]$script:RdaNoIdRowsSeen[$Key]
+    $Suffix = if ($script:RdaNoIdRowsSeen[$Key] -gt 1) { '{0}-{1}' -f $Hash, $script:RdaNoIdRowsSeen[$Key] } else { $Hash }
+    $StandIn = '/subscriptions/{0}/resourcegroups/{1}/providers/rda.noid/{2}/{3}~{4}' -f $SubSegment, $RgSegment, $Type, $NameBase, $Suffix
+    if (-not [string]::IsNullOrEmpty($Name))
+    {
+        if ($null -eq $Global:RdaNoIdRealNames) { $Global:RdaNoIdRealNames = @{} }
+        $Global:RdaNoIdRealNames[$StandIn] = $Name
     }
 
-    return $RebuiltUri
+    # A seeded run already holds this stand-in's masked id: keep it.
+    $Masked = $null
+    if (-not ($ResourceIdDictionary.TryGetValue($StandIn, [ref]$Masked) -and (Test-ObfuscatedIdShape -RealId $StandIn -MaskedId $Masked)))
+    {
+        $Masked = Get-ObfuscatedResourceId -ResourceId $StandIn
+    }
+    $ResourceIdDictionary[$StandIn] = $Masked
+    $Parts = $Masked.Split('/')
+    # The id's own tokens, recorded as Get-ObfuscatedResourceId records them,
+    # also when a seeded id was kept, so the dictionary file reverses them.
+    $ResourceNameDictionary[$StandIn] = $Parts[-1]
+    $ResourceSubscriptionDictionary[$StandIn] = $Parts[2]
+    $ResourceResourceGroupDictionary[$StandIn] = $Parts[4]
+    return [pscustomobject]@{
+        Id            = $Masked
+        Name          = $Parts[-1]
+        Subscription  = $Parts[2]
+        ResourceGroup = $Parts[4]
+    }
 }
 
 Function RunInventorySetup()
@@ -686,8 +896,11 @@ Function RunInventorySetup()
 
     if ($Obfuscate.IsPresent)
     {
-        $SubLookup = @{}
-        $RgLookup = @{}
+        $SubLookup = $Global:ObfuscationSubscriptionTokens
+        $RgLookup = $Global:ObfuscationResourceGroupTokens
+        # Ids are built once every resource has its name token, so a child's id
+        # can use its parent's token (Get-ObfuscatedResourceId).
+        $IdsToMask = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
         if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
         {
@@ -695,7 +908,24 @@ Function RunInventorySetup()
 
             if ($null -ne $SeedDictionary.ResourceIdMap)
             {
-                foreach ($SeedProp in $SeedDictionary.ResourceIdMap.PSObject.Properties) { $ResourceIdDictionary[$SeedProp.Value] = $SeedProp.Name }
+                # Ids are looked up ignoring case, so two seeded entries for one
+                # real id in two casings (an older build's dictionary) become
+                # one: say so now, before a recovery merge meets it.
+                $SeedCaseTwice = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                foreach ($SeedProp in $SeedDictionary.ResourceIdMap.PSObject.Properties)
+                {
+                    if ($ResourceIdDictionary.ContainsKey($SeedProp.Value) -and $ResourceIdDictionary[$SeedProp.Value] -cne $SeedProp.Name)
+                    {
+                        [void]$SeedCaseTwice.Add([string]$SeedProp.Value)
+                        # Of two casings, keep one of the right shape if there is one.
+                        if ((Test-ObfuscatedIdShape -RealId $SeedProp.Value -MaskedId $ResourceIdDictionary[$SeedProp.Value]) -and -not (Test-ObfuscatedIdShape -RealId $SeedProp.Value -MaskedId $SeedProp.Name)) { continue }
+                    }
+                    $ResourceIdDictionary[$SeedProp.Value] = $SeedProp.Name
+                }
+                if ($SeedCaseTwice.Count -gt 0)
+                {
+                    Write-Log -Message ("Obfuscation dictionary: it gives {0} resource(s) two masked ids by case (an older build's file); only one can be kept for each. A recovery merge (Merge-RecoveryData) of a later bundle with this run's could then give such a resource two ids: collect the gap bundle on this build, then run the recovery with that bundle's ObfuscationDictionary_*.json." -f $SeedCaseTwice.Count) -Severity 'Warning'
+                }
             }
             if ($null -ne $SeedDictionary.ResourceNameMap)
             {
@@ -709,13 +939,11 @@ Function RunInventorySetup()
             {
                 foreach ($SeedProp in $SeedDictionary.FreeTextMap.PSObject.Properties) { $Global:FreeTextDictionary[$SeedProp.Value] = $SeedProp.Name }
             }
-            if ($null -ne $SeedDictionary.SubscriptionNameMap)
-            {
-                foreach ($SeedProp in $SeedDictionary.SubscriptionNameMap.PSObject.Properties)
-                {
-                    if (-not [string]::IsNullOrEmpty($SeedProp.Value)) { $SubLookup[$SeedProp.Value] = $SeedProp.Name }
-                }
-            }
+            # The seed's SubscriptionNameMap (token -> display name) is not read
+            # for tokens: a display name can belong to two subscriptions, or to
+            # another one after a rename. A subscription's token comes from the
+            # seeded ids of that subscription id (the seed check below); one
+            # with no seeded id gets a new token, and has no seeded id to join.
             if ($null -ne $SeedDictionary.ResourceGroupMap)
             {
                 foreach ($SeedProp in $SeedDictionary.ResourceGroupMap.PSObject.Properties)
@@ -724,39 +952,221 @@ Function RunInventorySetup()
                 }
             }
 
-            Write-Log -Message ("Obfuscation dictionary seeded from '{0}': {1} id, {2} name, {3} subscription, {4} resource-group, {5} tag, {6} free-text mappings preloaded; matching real values will reuse their existing tokens." -f $ObfuscationDictionary, @($ResourceIdDictionary.Keys).Count, @($ResourceNameDictionary.Keys).Count, @($SubLookup.Keys).Count, @($RgLookup.Keys).Count, @($Global:TagValueDictionary.Keys).Count, @($Global:FreeTextDictionary.Keys).Count) -Severity 'Info'
+            Write-Log -Message ("Obfuscation dictionary seeded from '{0}': {1} id, {2} name, {3} resource-group, {4} tag, {5} free-text mappings preloaded; matching real values will reuse their existing tokens (subscription tokens come from the seeded ids, checked below)." -f $ObfuscationDictionary, @($ResourceIdDictionary.Keys).Count, @($ResourceNameDictionary.Keys).Count, @($RgLookup.Keys).Count, @($Global:TagValueDictionary.Keys).Count, @($Global:FreeTextDictionary.Keys).Count) -Severity 'Info'
+            # The parsed seed file is not needed past here: free it before the
+            # token loop (a recovery run's seed can hold every id of a tenant).
+            $SeedDictionary = $null
+            $SeedProp = $null
+        }
+
+        $SubIndex = Get-ObfuscationSubscriptionIndex
+
+        # The seed's ids, checked once here, so every place that reuses a
+        # seeded id (the token loop, the collector rows, consumption, metrics)
+        # and the dictionary file this run writes see only good ones:
+        # - an id of another shape (Test-ObfuscatedIdShape: an older
+        #   dictionary's child id with a real parent name, a flat token, the
+        #   metric step's old sub_/rg_ tokens) is dropped, and masked again
+        #   wherever this run meets its resource;
+        # - every token slot of the good ids (the subscription, the resource
+        #   group, each parent and the resource's own name) wins over the
+        #   seed's maps, so seeded and new rows share one token per
+        #   subscription, group and parent;
+        # - a subscription, group or parent that the good ids give two tokens
+        #   (a seed written before this check) has every id that holds it
+        #   dropped, and gets one new token. The dictionary this run writes is
+        #   then consistent, so the next seeded run keeps every id: no repeat;
+        # - a token that the seed gives two real subscriptions, groups or
+        #   resources (in any slots) is the same: kept for none, every id
+        #   holding it dropped. A SQL VM and its VM count as one resource.
+        if (-not [string]::IsNullOrEmpty($ObfuscationDictionary))
+        {
+            # The seed's maps first: a group or name token that is not of its
+            # slot's form (the metric step's old rg_ tokens, say) is not kept,
+            # so no id is built from it again. (Subscription tokens come only
+            # from good seeded ids, checked below.)
+            $SeedGuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+            foreach ($K in @($RgLookup.Keys)) { if ([string]$RgLookup[$K] -cnotmatch ('^(prod|nonprod)_(mc_)?' + $SeedGuid + '$')) { [void]$RgLookup.Remove($K) } }
+            foreach ($K in @($ResourceNameDictionary.Keys)) { if ([string]$ResourceNameDictionary[$K] -cnotmatch ('^(prod|nonprod)_(databricks_|aks_|vmss_)?' + $SeedGuid + '$')) { [void]$ResourceNameDictionary.Remove($K) } }
+            $SeedSlotTokens = @{}
+            $SeedSlotsOf = @{}
+            $SeedSubTokenIds = @{}
+            # Each token stands for one real subscription, group or resource:
+            # token -> the '<kind>|<real>' values it is given, from the seed's
+            # maps and the good ids' slots. A token given to two (a hand-merged
+            # seed, or one token in a subscription and a group slot) would give
+            # two resources one masked id. A SQL VM's id is its VM's id with
+            # the provider swapped, and the two share one name token on
+            # purpose, so a SQL VM path counts as its VM's path here.
+            # (Inline, not a helper: this runs once per slot of every seeded id.)
+            $SeedTokenReals = @{}
+            foreach ($K in @($RgLookup.Keys))
+            {
+                $T = [string]$RgLookup[$K]
+                if (-not $SeedTokenReals.ContainsKey($T)) { $SeedTokenReals[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                [void]$SeedTokenReals[$T].Add('rg|' + [string]$K)
+            }
+            foreach ($K in @($ResourceNameDictionary.Keys))
+            {
+                $T = [string]$ResourceNameDictionary[$K]
+                if (-not $SeedTokenReals.ContainsKey($T)) { $SeedTokenReals[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                [void]$SeedTokenReals[$T].Add('name|' + ([string]$K -replace '(?i)/providers/microsoft\.sqlvirtualmachine/sqlvirtualmachines/', '/providers/microsoft.compute/virtualmachines/'))
+            }
+            $SeedDropped = 0
+            foreach ($SeedRealId in @($ResourceIdDictionary.Keys))
+            {
+                $SeedMasked = $ResourceIdDictionary[$SeedRealId]
+                # A real id that is not an ARM path has one flat token (not
+                # changed here); a seeded flat token of that form is kept as
+                # it is, so it stays the same across seeded runs. Any other
+                # value (empty, plain text) is not kept.
+                if ($SeedRealId -notmatch '(?i)^/subscriptions/[^/]' -and -not (Test-RdaTenantScopeIdMaskable -ResourceId $SeedRealId))
+                {
+                    if ([string]$SeedMasked -cnotmatch ('^(prod|nonprod)_' + $SeedGuid + '$'))
+                    {
+                        [void]$ResourceIdDictionary.Remove($SeedRealId)
+                        $SeedDropped++
+                    }
+                    continue
+                }
+                if (-not (Test-ObfuscatedIdShape -RealId $SeedRealId -MaskedId $SeedMasked))
+                {
+                    [void]$ResourceIdDictionary.Remove($SeedRealId)
+                    $SeedDropped++
+                    continue
+                }
+                # The id's token slots: kind, the real value the token stands
+                # for (subscription name, group name, or the real id up to
+                # that name, as Get-ObfuscatedResourceId keys it) and token.
+                $RealParts = $SeedRealId.Split('/')
+                $MaskedParts = $SeedMasked.Split('/')
+                $Slots = [System.Collections.Generic.List[object]]::new()
+                if ($RealParts[1] -ieq 'subscriptions')
+                {
+                    # Keyed by subscription id, as Get-ObfuscatedResourceId keys it.
+                    $Slots.Add([pscustomobject]@{ Kind = 'sub'; Real = $RealParts[2]; Token = $MaskedParts[2] })
+                    $i = 3
+                }
+                else { $i = 1 }
+                while ($i + 1 -lt $RealParts.Count)
+                {
+                    $Next = $RealParts[$i + 1]
+                    if ($i -eq 3 -and $RealParts[1] -ieq 'subscriptions' -and $RealParts[$i] -ieq 'resourcegroups') { $Slots.Add([pscustomobject]@{ Kind = 'rg'; Real = $Next; Token = $MaskedParts[$i + 1] }) }
+                    elseif (-not ($RealParts[$i] -ieq 'providers' -or [string]::IsNullOrEmpty($Next) -or $Next -eq '$system')) { $Slots.Add([pscustomobject]@{ Kind = 'name'; Real = ($RealParts[0..($i + 1)] -join '/'); Token = $MaskedParts[$i + 1] }) }
+                    $i += 2
+                }
+                $SeedSlotsOf[$SeedRealId] = $Slots
+                foreach ($Slot in $Slots)
+                {
+                    $SlotKey = $Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()
+                    if (-not $SeedSlotTokens.ContainsKey($SlotKey)) { $SeedSlotTokens[$SlotKey] = @{} }
+                    $SeedSlotTokens[$SlotKey][$Slot.Token] = $true
+                    $T = [string]$Slot.Token
+                    if (-not $SeedTokenReals.ContainsKey($T)) { $SeedTokenReals[$T] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                    $SlotReal = if ($Slot.Kind -eq 'name') { [string]$Slot.Real -replace '(?i)/providers/microsoft\.sqlvirtualmachine/sqlvirtualmachines/', '/providers/microsoft.compute/virtualmachines/' } else { [string]$Slot.Real }
+                    [void]$SeedTokenReals[$T].Add($Slot.Kind + '|' + $SlotReal)
+                    # A subscription token is one subscription's: a seed from
+                    # before tokens were keyed by id can give two subscriptions
+                    # with one display name the same token.
+                    if ($Slot.Kind -eq 'sub')
+                    {
+                        if (-not $SeedSubTokenIds.ContainsKey($Slot.Token)) { $SeedSubTokenIds[$Slot.Token] = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase) }
+                        [void]$SeedSubTokenIds[$Slot.Token].Add($Slot.Real)
+                    }
+                }
+            }
+            foreach ($SeedRealId in @($SeedSlotsOf.Keys))
+            {
+                $Conflict = $false
+                foreach ($Slot in $SeedSlotsOf[$SeedRealId])
+                {
+                    if ($SeedSlotTokens[$Slot.Kind + '|' + $Slot.Real.ToLowerInvariant()].Count -gt 1) { $Conflict = $true; break }
+                    if ($Slot.Kind -eq 'sub' -and $SeedSubTokenIds[$Slot.Token].Count -gt 1) { $Conflict = $true; break }
+                    if ($SeedTokenReals[[string]$Slot.Token].Count -gt 1) { $Conflict = $true; break }
+                }
+                if ($Conflict)
+                {
+                    [void]$ResourceIdDictionary.Remove($SeedRealId)
+                    $SeedDropped++
+                    continue
+                }
+                foreach ($Slot in $SeedSlotsOf[$SeedRealId])
+                {
+                    switch ($Slot.Kind)
+                    {
+                        # The id's own subscription and group entries too, so a
+                        # row or metric that reuses this seeded id outside the
+                        # token loop gets the fields of its own path.
+                        'sub' { $SubLookup[$Slot.Real] = $Slot.Token; $ResourceSubscriptionDictionary[$SeedRealId] = $Slot.Token }
+                        'rg' { $RgLookup[$Slot.Real] = $Slot.Token; $ResourceResourceGroupDictionary[$SeedRealId] = $Slot.Token }
+                        'name' { $ResourceNameDictionary[$Slot.Real] = $Slot.Token }
+                    }
+                }
+            }
+            # A slot with two tokens starts again with no token at all.
+            foreach ($SlotKey in @($SeedSlotTokens.Keys))
+            {
+                if ($SeedSlotTokens[$SlotKey].Count -le 1) { continue }
+                $Kind, $Real = $SlotKey.Split('|', 2)
+                switch ($Kind)
+                {
+                    'rg' { foreach ($K in @($RgLookup.Keys)) { if ($K -ieq $Real) { [void]$RgLookup.Remove($K) } } }
+                    'name' { [void]$ResourceNameDictionary.Remove($Real) }
+                }
+            }
+            # A token given to two reals is kept for none of them.
+            $SharedTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($T in @($SeedTokenReals.Keys)) { if ($SeedTokenReals[$T].Count -gt 1) { [void]$SharedTokens.Add($T) } }
+            if ($SharedTokens.Count -gt 0)
+            {
+                foreach ($K in @($RgLookup.Keys)) { if ($SharedTokens.Contains([string]$RgLookup[$K])) { [void]$RgLookup.Remove($K) } }
+                foreach ($K in @($ResourceNameDictionary.Keys)) { if ($SharedTokens.Contains([string]$ResourceNameDictionary[$K])) { [void]$ResourceNameDictionary.Remove($K) } }
+            }
+            Write-Log -Message ("Obfuscation dictionary: {0} subscription token(s) kept from the seeded ids." -f @($SubLookup.Keys).Count) -Severity 'Info'
+            if ($SeedDropped -gt 0)
+            {
+                Write-Log -Message ("Obfuscation dictionary: {0} seeded id(s) of another shape, or holding a subscription, resource group or parent with two tokens, or a token two subscriptions, groups or resources share, were not kept; their resources get new masked ids this run." -f $SeedDropped) -Severity 'Warning'
+            }
+            # The slot index is only for this check: free it before the token loop.
+            $SeedSlotsOf = $null
+            $SeedSlotTokens = $null
+            $SeedSubTokenIds = $null
+            $SeedTokenReals = $null
+            $SharedTokens = $null
         }
 
         foreach ($resourceItem in $Global:Resources)
         {
-            $IsNonProd = $resourceItem.name -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $resourceItem.name -match '(^|-)([dts])-'
-            $Prefix = if ($IsNonProd) { "nonprod_" } else { "prod_" }
+            if ($IdsToMask.Contains($resourceItem.ID)) { continue }
 
-            if ($resourceItem.id -match 'databricks')
-            {
-                $ObfuscatedName = $Prefix + 'databricks_' + [guid]::NewGuid().ToString()
-            }
-            elseif ($resourceItem.id -match '/resourcegroups/mc_')
-            {
-                $ObfuscatedName = $Prefix + 'aks_' + [guid]::NewGuid().ToString()
-            }
-            elseif ($resourceItem.id -match 'virtualmachinescalesets')
-            {
-                $ObfuscatedName = $Prefix + 'vmss_' + [guid]::NewGuid().ToString()
-            }
-            else
-            {
-                $ObfuscatedName = $Prefix + [guid]::NewGuid().ToString()
-            }
+            # The token New-ObfuscatedNameToken writes, built inline because this loop
+            # runs once per resource.
+            $TokenId = [string]$resourceItem.id
+            $TokenName = [string]$resourceItem.name
+            $Hint = if ($TokenId -match 'databricks') { 'databricks_' } elseif ($TokenId -match '/resourcegroups/mc_') { 'aks_' } elseif ($TokenId -match 'virtualmachinescalesets') { 'vmss_' } else { '' }
+            $Prefix = if ($TokenName -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $TokenName -match '(^|-)([dts])-') { 'nonprod_' } else { 'prod_' }
+            $ObfuscatedName = $Prefix + $Hint + [guid]::NewGuid().ToString()
 
-            $RealSub = ($Global:Subscriptions | Where-Object { $_.id -eq $resourceItem.subscriptionId }).Name
-            if ([string]::IsNullOrEmpty($RealSub)) { $RealSub = $resourceItem.subscriptionId }
-            if (-not $SubLookup.ContainsKey($RealSub))
+            # The subscription is read from the id's own /subscriptions/<id>/
+            # segment first, as Get-ObfuscatedResourceId reads it, so the row's
+            # field matches its id; then from subscriptionId.
+            $SubIdOfRow = if ([string]$resourceItem.id -match '(?i)^/subscriptions/([^/]+)') { $Matches[1] } elseif (-not [string]::IsNullOrEmpty([string]$resourceItem.subscriptionId)) { [string]$resourceItem.subscriptionId } else { $null }
+            $SubEntries = if ($null -eq $SubIdOfRow) { if ($null -eq $resourceItem.subscriptionId) { $SubIndex.NoId } else { $null } } else { $SubIndex.ById[$SubIdOfRow] }
+            # The first entry's name, as Get-ObfuscatedResourceId reads it: a
+            # subscription listed twice would give an array here otherwise.
+            # (A plain loop: this runs once per resource.)
+            $RealSub = ''
+            foreach ($SubEntry in @($SubEntries)) { if ($null -ne $SubEntry) { $RealSub = [string]$SubEntry.Name; break } }
+            if ([string]::IsNullOrEmpty($RealSub)) { $RealSub = if ($null -ne $SubIdOfRow) { $SubIdOfRow } else { [string]$resourceItem.subscriptionId } }
+            # The token is keyed by subscription id, as Get-ObfuscatedResourceId
+            # keys it; the prefix comes from the display name.
+            $SubKey = if ($null -ne $SubIdOfRow) { $SubIdOfRow } elseif (-not [string]::IsNullOrEmpty($RealSub)) { $RealSub } else { '~nosub' }
+            if (-not $SubLookup.ContainsKey($SubKey))
             {
                 $SubPrefix = if ($RealSub -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $RealSub -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
-                $SubLookup[$RealSub] = $SubPrefix + [guid]::NewGuid().ToString()
+                $SubLookup[$SubKey] = $SubPrefix + [guid]::NewGuid().ToString()
             }
-            $ObfuscatedSubscription = $SubLookup[$RealSub]
+            $ObfuscatedSubscription = $SubLookup[$SubKey]
 
             $RealRG = $resourceItem.resourceGroup
             if ([string]::IsNullOrEmpty($RealRG)) { $RealRG = '__none__' }
@@ -767,33 +1177,51 @@ Function RunInventorySetup()
             }
             $ObfuscatedResourceGroup = $RgLookup[$RealRG]
 
+            # A seeded id is kept when it has the right shape, or when the real
+            # id is not an ARM path and the seed check kept its flat token.
+            $SeedKept = $false
             if ($ResourceIdDictionary.ContainsKey($resourceItem.ID))
             {
+                $SeedKept = (Test-ObfuscatedIdShape -RealId $resourceItem.ID -MaskedId $ResourceIdDictionary[$resourceItem.ID]) -or ([string]$resourceItem.ID -notmatch '(?i)^/subscriptions/[^/]' -and -not (Test-RdaTenantScopeIdMaskable -ResourceId $resourceItem.ID))
+            }
+            if ($SeedKept)
+            {
+                # A seeded id (-ObfuscationDictionary): the seed gives its
+                # masked id but no subscription or resource group entry, so
+                # reading those dictionaries gave empty values and every row
+                # then got random tokens. The name, subscription and resource
+                # group tokens are the seeded path's own segments, so the
+                # row's fields always equal its id.
                 $ObfuscatedID = $ResourceIdDictionary[$resourceItem.ID]
-                $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID]
-                $ObfuscatedSubscription = $ResourceSubscriptionDictionary[$resourceItem.ID]
-                $ObfuscatedResourceGroup = $ResourceResourceGroupDictionary[$resourceItem.ID]
+                $SeedParts = ([string]$ObfuscatedID).Split('/')
+                if ($SeedParts.Count -ge 3 -and $SeedParts[1] -ieq 'subscriptions' -and -not [string]::IsNullOrEmpty($SeedParts[2])) { $ObfuscatedSubscription = $SeedParts[2] }
+                if ($SeedParts.Count -ge 5 -and $SeedParts[3] -ieq 'resourcegroups' -and -not [string]::IsNullOrEmpty($SeedParts[4])) { $ObfuscatedResourceGroup = $SeedParts[4] }
+                if ($SeedParts.Count -ge 2 -and -not [string]::IsNullOrEmpty($SeedParts[-1])) { $ObfuscatedName = $SeedParts[-1] }
+                elseif ($ResourceNameDictionary.ContainsKey($resourceItem.ID) -and -not [string]::IsNullOrEmpty($ResourceNameDictionary[$resourceItem.ID])) { $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID] }
             }
             else
             {
-                # Build a structured ARM-shaped obfuscated ID (not a flat GUID token) by
-                # substituting the real subscription/resource-group/name segments with the
-                # SAME tokens stored in the sibling dictionaries below, so a downstream
-                # consumption record that matches this exact resource ID reconstructs an
-                # identically-shaped, identically-tokenized path.
-                $ObfuscatedID = $resourceItem.ID -replace '(?i)/subscriptions/[^/]+', ('/subscriptions/' + $ObfuscatedSubscription)
-                if ($ObfuscatedID -match '(?i)/resourcegroups/[^/]+')
-                {
-                    $ObfuscatedID = $ObfuscatedID -replace '(?i)/resourcegroups/[^/]+', ('/resourcegroups/' + $ObfuscatedResourceGroup)
-                }
-                $ObfuscatedID = $ObfuscatedID -replace '/[^/]+$', ('/' + $ObfuscatedName)
+                # Not seeded, or seeded with an id of another shape (see
+                # Test-ObfuscatedIdShape): masked below like a new id, which
+                # still reuses the seed's subscription, group and parent tokens.
+                # A name token the seed already gave this resource (its name map
+                # entry, or its slot as the parent of a kept seeded id) is kept,
+                # so the resource's own id and every id under it share one token.
+                $ObfuscatedID = $null
+                if ($ResourceNameDictionary.ContainsKey($resourceItem.ID) -and -not [string]::IsNullOrEmpty($ResourceNameDictionary[$resourceItem.ID])) { $ObfuscatedName = $ResourceNameDictionary[$resourceItem.ID] }
+                [void]$IdsToMask.Add($resourceItem.ID)
             }
 
-            $ResourceIdDictionary[$resourceItem.ID] = $ObfuscatedID
+            if ($null -ne $ObfuscatedID) { $ResourceIdDictionary[$resourceItem.ID] = $ObfuscatedID }
             $ResourceNameDictionary[$resourceItem.ID] = $ObfuscatedName
             $ResourceSubscriptionDictionary[$resourceItem.ID] = $ObfuscatedSubscription
             $ResourceResourceGroupDictionary[$resourceItem.ID] = $ObfuscatedResourceGroup
 
+        }
+
+        foreach ($MaskId in $IdsToMask)
+        {
+            $ResourceIdDictionary[$MaskId] = Get-ObfuscatedResourceId -ResourceId $MaskId -SubscriptionIndex $SubIndex
         }
     }
 }
@@ -1100,70 +1528,48 @@ function ExecuteInventoryProcessing()
 
                     if ([string]::IsNullOrEmpty($OrigID))
                     {
-                        $Fallback = 'obfuscated_' + [guid]::NewGuid().ToString()
-                        $resourceItem.ID = $Fallback
-                        $resourceItem.Name = $Fallback
-                        $resourceItem.Subscription = $Fallback
-                        $resourceItem.ResourceGroup = $Fallback
+                        # No id to mask: a masked ARM path from the row's own
+                        # subscription, resource group and name (never empty).
+                        $NoId = New-ObfuscatedRowIdWithoutId -Subscription ([string]$resourceItem.Subscription) -ResourceGroup ([string]$resourceItem.ResourceGroup) -Name ([string]$resourceItem.Name) -Collector $ModName
+                        $resourceItem.ID = $NoId.Id
+                        $resourceItem.Name = $NoId.Name
+                        $resourceItem.Subscription = $NoId.Subscription
+                        $resourceItem.ResourceGroup = $NoId.ResourceGroup
                         if ($resourceItem.ContainsKey('tags')) { $resourceItem.tags = $null }
                         if ($resourceItem.ContainsKey('Tags')) { $resourceItem.Tags = $null }
                         continue
                     }
 
-                    if ($ResourceIdDictionary.ContainsKey($OrigID))
+                    # An id the token loop did not mask (a collector row that is
+                    # not a discovered resource) gets the masked ARM path
+                    # Get-ObfuscatedResourceId gives it, which also records its
+                    # name, subscription and resource group tokens, so the row's
+                    # fields match its own id path.
+                    if (-not $ResourceIdDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceIdDictionary[$OrigID]))
                     {
-                        $ObfuscatedID = $ResourceIdDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedID)) { $ObfuscatedID = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.ID = $ObfuscatedID
+                        $ResourceIdDictionary[$OrigID] = Get-ObfuscatedResourceId -ResourceId $OrigID
                     }
-                    else
-                    {
-                        $Prefix = if ($OrigID -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $OrigID -match '(^|-)([dts])-') { "nonprod_" } else { "prod_" }
-                        $Fallback = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceIdDictionary[$OrigID] = $Fallback
-                        $resourceItem.ID = $Fallback
-                    }
+                    $resourceItem.ID = $ResourceIdDictionary[$OrigID]
 
-                    $Prefix = $resourceItem.ID.Split('_')[0] + '_'
+                    $Prefix = Get-ObfuscationPrefix $OrigID
 
-                    if ($ResourceNameDictionary.ContainsKey($OrigID))
+                    if (-not $ResourceNameDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceNameDictionary[$OrigID]))
                     {
-                        $ObfuscatedName = $ResourceNameDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedName)) { $ObfuscatedName = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.Name = $ObfuscatedName
+                        $ResourceNameDictionary[$OrigID] = $Prefix + [guid]::NewGuid().ToString()
                     }
-                    else
-                    {
-                        $FbName = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceNameDictionary[$OrigID] = $FbName
-                        $resourceItem.Name = $FbName
-                    }
+                    $resourceItem.Name = $ResourceNameDictionary[$OrigID]
 
-                    if ($ResourceSubscriptionDictionary.ContainsKey($OrigID))
+                    if (-not $ResourceSubscriptionDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceSubscriptionDictionary[$OrigID]))
                     {
-                        $ObfuscatedSub = $ResourceSubscriptionDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedSub)) { $ObfuscatedSub = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.Subscription = $ObfuscatedSub
+                        $ResourceSubscriptionDictionary[$OrigID] = $Prefix + [guid]::NewGuid().ToString()
                     }
-                    else
-                    {
-                        $FbSub = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceSubscriptionDictionary[$OrigID] = $FbSub
-                        $resourceItem.Subscription = $FbSub
-                    }
+                    $resourceItem.Subscription = $ResourceSubscriptionDictionary[$OrigID]
 
-                    if ($ResourceResourceGroupDictionary.ContainsKey($OrigID))
+                    if (-not $ResourceResourceGroupDictionary.ContainsKey($OrigID) -or [string]::IsNullOrEmpty($ResourceResourceGroupDictionary[$OrigID]))
                     {
-                        $ObfuscatedRG = $ResourceResourceGroupDictionary[$OrigID]
-                        if ([string]::IsNullOrEmpty($ObfuscatedRG)) { $ObfuscatedRG = 'obfuscated_' + [guid]::NewGuid().ToString() }
-                        $resourceItem.ResourceGroup = $ObfuscatedRG
+                        $ResourceResourceGroupDictionary[$OrigID] = $Prefix + [guid]::NewGuid().ToString()
                     }
-                    else
-                    {
-                        $FbRG = $Prefix + [guid]::NewGuid().ToString()
-                        $ResourceResourceGroupDictionary[$OrigID] = $FbRG
-                        $resourceItem.ResourceGroup = $FbRG
-                    }
+                    $resourceItem.ResourceGroup = $ResourceResourceGroupDictionary[$OrigID]
 
                     if ($resourceItem.ContainsKey('Tags') -and $null -ne $resourceItem.Tags)
                     {
@@ -1381,14 +1787,7 @@ function ExecuteInventoryProcessing()
 
                         if ($Obfuscate.IsPresent)
                         {
-                            $Prefix = if ($UsageDataExport[$Item].ResourceId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b' -or $UsageDataExport[$Item].ResourceId -match '(^|/|-)([dts])-') { 'nonprod_' } else { 'prod_' }
-
                             $RawUri = $InstanceObject.'Microsoft.Resources'.resourceUri
-
-                            if (-not $script:ConsumptionSubCache) { $script:ConsumptionSubCache = @{} }
-                            if (-not $script:ConsumptionRgCache) { $script:ConsumptionRgCache = @{} }
-                            if (-not $script:ConsumptionNameCache) { $script:ConsumptionNameCache = @{} }
-
 
                             if (![string]::IsNullOrEmpty($RawUri) -and $ResourceIdDictionary.ContainsKey($RawUri))
                             {
@@ -1396,7 +1795,10 @@ function ExecuteInventoryProcessing()
                             }
                             else
                             {
-                                $ObfuscatedUri = Build-ObfuscatedResourceUri -RawUri $RawUri -Prefix $Prefix -SubscriptionDictionary $ResourceSubscriptionDictionary -ResourceGroupDictionary $ResourceResourceGroupDictionary -NameDictionary $ResourceNameDictionary -SubCache $script:ConsumptionSubCache -RgCache $script:ConsumptionRgCache -NameCache $script:ConsumptionNameCache
+                                # A resource that is not in the inventory: its segments reuse the
+                                # inventory's tokens where they exist (subscription, resource
+                                # group, parent resource), and new ones go into the dictionary.
+                                $ObfuscatedUri = Get-ObfuscatedResourceId -ResourceId $RawUri
 
                                 if (![string]::IsNullOrEmpty($RawUri))
                                 {

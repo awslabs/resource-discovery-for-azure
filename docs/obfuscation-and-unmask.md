@@ -24,7 +24,7 @@ they appear in the report:
 
 | Class | Example real value | Example obfuscated token |
 |---|---|---|
-| Resource ID | `/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01` | `prod_a1b2c3d4-...` |
+| Resource ID | `/subscriptions/<guid>/resourceGroups/rg-app/providers/.../vm01` | `/subscriptions/prod_2b2b.../resourcegroups/prod_4c4c.../providers/.../prod_9f8e...` |
 | Resource Name | `vm01` | `prod_9f8e7d6c-...` |
 | Subscription | `Contoso Production` | `prod_2b2b2b2b-...` |
 | Resource Group | `rg-app` | `prod_4c4c4c4c-...` |
@@ -112,6 +112,15 @@ obfuscation.
 - **Resource ID** and **Resource Name** tokens are generated once per real
   resource ID during the build pass, so each resource keeps one stable ID token
   and one stable name token for the rest of the run.
+- A masked **Resource ID** keeps the ARM shape: every name segment is replaced
+  with the token of what it names (the subscription, the resource group, and
+  each resource, a parent included), and the type and provider segments are
+  kept. A child's id therefore carries its parent's own name token
+  (`.../servers/<server token>/databases/<database token>`), so ids still join
+  across the inventory, metrics and consumption files. A consumption row for a
+  resource that is not in the inventory is masked the same way, reusing the
+  inventory's tokens where they exist; any new segment token is stored in the
+  dictionary (a name token is keyed by the real id up to that segment).
 - **Tag values** are looked up by the real value, so the same value always
   yields the same token across every resource that carries it.
 
@@ -171,6 +180,9 @@ value** directly; and `FreeTextMap` stores the real **free-text value**
 That is how the reveal step derives the friendly values:
 - Resource Group name is parsed from `/resourceGroups/<name>` in the ID.
 - Subscription name is read from `SubscriptionNameMap` when present (offline).
+  Inside a resource id (after `/subscriptions/`) the subscription token is
+  revealed as the subscription GUID from the `SubscriptionMap` id instead, as
+  a run without `-Obfuscate` writes it.
   Older dictionaries that predate this map only carry the `/subscriptions/<guid>`
   GUID, so the reveal step falls back to the subscription **GUID**.
 - Tag value is read directly from `TagMap`. Older dictionaries that predate tag
@@ -234,7 +246,16 @@ By default only `ResourceGroup` and `Subscription` are revealed; anything you do
 not name in `-Fields` stays masked. Tokens that are not part of a selected
 dimension are left untouched, so selecting one dimension never bleeds another.
 Revealing `ResourceId` un-masks the full ARM path, which embeds the real
-subscription GUID and resource group name for that resource.
+subscription GUID and resource group name for that resource: every segment
+token inside a resource id is revealed, and a whole masked id found in
+`ResourceIdMap` is replaced by its real id (this also restores ids from older
+dictionaries whose segment tokens were not stored one by one). The other
+dimensions reveal their tokens inside ids too: `Subscription` the subscription
+GUID, `ResourceGroup` the group, `ResourceName` the name segments.
+
+The report HTML's "Obfuscated report" banner is replaced with one that names
+the dimensions revealed. The HTML is not re-rendered: it still lacks the ID
+column an obfuscated report leaves out.
 
 ### How it stays valid
 

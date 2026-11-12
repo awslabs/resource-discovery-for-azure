@@ -264,6 +264,15 @@ function Write-RdaShareableDiagnosticsLog
                 if (-not $DiagScrubMap.ContainsKey($realId)) { $DiagScrubMap[$realId] = $Global:ResourceIdDictionary[$realId] }
 
                 $ShortName = ($realId -split '/')[-1]
+                # A collector row with no id is filed under a stand-in path whose
+                # last segment is <name>~<hash>, with a '/' in the name written
+                # '_': take the real name the run recorded for it, else the part
+                # before '~'.
+                if ($realId -match '(?i)/providers/rda\.noid/')
+                {
+                    if ($null -ne $Global:RdaNoIdRealNames -and $Global:RdaNoIdRealNames.ContainsKey($realId)) { $ShortName = [string]$Global:RdaNoIdRealNames[$realId] }
+                    elseif ($ShortName -match '^(.+)~[0-9a-f]{8}(-\d+)?$' -and $Matches[1] -ne '~noname') { $ShortName = $Matches[1] }
+                }
                 if (-not [string]::IsNullOrEmpty($ShortName) -and $null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($realId) -and -not $DiagScrubMap.ContainsKey($ShortName))
                 {
                     $DiagScrubMap[$ShortName] = $Global:ResourceNameDictionary[$realId]

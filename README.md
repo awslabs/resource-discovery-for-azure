@@ -395,7 +395,7 @@ When using `-Obfuscate`, the following data is masked in all output files:
 
 | Category | What is masked | Masked Format |
 |----------|---------------|---------------|
-| Resource ID | All resource IDs across inventory, metrics, and consumption | `prod_<guid>` or `nonprod_<guid>` |
+| Resource ID | All resource IDs across inventory, metrics, and consumption: every name segment (subscription, resource group, each resource name, a parent's included) | ARM-shaped path of `prod_<guid>` / `nonprod_<guid>` tokens |
 | Resource Name | All resource names | `prod_<guid>` or `nonprod_<guid>` |
 | Subscription | Subscription names (deterministic — same real sub always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |
 | Resource Group | Resource group names (deterministic — same real RG always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |

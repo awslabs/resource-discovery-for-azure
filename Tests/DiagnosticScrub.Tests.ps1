@@ -165,3 +165,60 @@ Describe "Protect-DiagnosticText preserves already-obfuscated tokens and edge ca
         $Out | Should -Not -Match ([regex]::Escape($script:Email))
     }
 }
+
+Describe "The shareable diagnostics log masks the bare name of a collector row with no id" {
+    BeforeAll {
+        $script:DiagDir = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-diag-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:DiagDir -Force | Out-Null
+        # The log writer calls Write-Log, which ResourceInventory.ps1 defines.
+        Set-Item -Path Function:\Write-Log -Value { param($Message, $Severity) }
+        $script:Saved = @{}
+        foreach ($N in 'ResourceIdDictionary', 'ResourceNameDictionary', 'ResourceResourceGroupDictionary', 'ResourceSubscriptionDictionary', 'TagValueDictionary', 'FreeTextDictionary', 'CollectorFailures', 'MetricsFailedSubs', 'ConsumptionFailedSubs', 'RdaNoIdRealNames')
+        {
+            $script:Saved[$N] = Get-Variable -Name $N -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+        }
+    }
+
+    AfterAll {
+        foreach ($N in $script:Saved.Keys) { Set-Variable -Name $N -Scope Global -Value $script:Saved[$N] }
+        Remove-Item -LiteralPath $script:DiagDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path Function:\Write-Log -ErrorAction SilentlyContinue
+    }
+
+    It 'replaces the row''s real name in a failure message with its name token' {
+        # The stand-in path a row with no id gets: its last segment is <name>~<hash>.
+        $StandIn = "/subscriptions/$script:SubGuid/resourcegroups/rg-demo/providers/rda.noid/avd/hostpool-alpha~0a1b2c3d"
+        $NameTok = 'prod_' + [guid]::NewGuid().ToString()
+        $Global:ResourceIdDictionary = @{ $StandIn = '/subscriptions/' + $script:SubToken + '/resourcegroups/' + $script:RgToken + '/providers/rda.noid/avd/' + $NameTok }
+        $Global:ResourceNameDictionary = @{ $StandIn = $NameTok }
+        $Global:ResourceResourceGroupDictionary = @{ $StandIn = $script:RgToken }
+        $Global:ResourceSubscriptionDictionary = @{ $StandIn = $script:SubToken }
+        $Global:TagValueDictionary = @{}
+        $Global:FreeTextDictionary = @{}
+        $Global:CollectorFailures = @([pscustomobject]@{ Id = $script:SubGuid; Module = 'AVD'; Message = 'Could not read hostpool-alpha' })
+        $Global:MetricsFailedSubs = @()
+        $Global:ConsumptionFailedSubs = @()
+        $File = Write-RdaShareableDiagnosticsLog -DefaultPath ($script:DiagDir + [System.IO.Path]::DirectorySeparatorChar) -ReportName 'ResourcesReport' -RunDateTime 'test' -Version '0.0.0' -Obfuscated
+        $File | Should -Not -BeNullOrEmpty
+        $Text = Get-Content -LiteralPath $File -Raw
+        $Text | Should -Not -Match 'hostpool-alpha'
+        $Text | Should -Match ([regex]::Escape("Could not read $NameTok"))
+    }
+
+    It 'replaces a no-id row''s real name that holds a _ and a / (the / written _ in its stand-in path)' {
+        # The run records the real name of each stand-in as it builds it.
+        $StandIn = "/subscriptions/$script:SubGuid/resourcegroups/rg-demo/providers/rda.noid/sqldb/srv_alpha_db-alpha~0a1b2c3d"
+        $NameTok = 'prod_' + [guid]::NewGuid().ToString()
+        $Global:RdaNoIdRealNames = @{ $StandIn = 'srv_alpha/db-alpha' }
+        $Global:ResourceIdDictionary = @{ $StandIn = '/subscriptions/' + $script:SubToken + '/resourcegroups/' + $script:RgToken + '/providers/rda.noid/sqldb/' + $NameTok }
+        $Global:ResourceNameDictionary = @{ $StandIn = $NameTok }
+        $Global:ResourceResourceGroupDictionary = @{ $StandIn = $script:RgToken }
+        $Global:ResourceSubscriptionDictionary = @{ $StandIn = $script:SubToken }
+        $Global:CollectorFailures = @([pscustomobject]@{ Id = $script:SubGuid; Module = 'SQLDB'; Message = 'Could not read srv_alpha/db-alpha' })
+        $File = Write-RdaShareableDiagnosticsLog -DefaultPath ($script:DiagDir + [System.IO.Path]::DirectorySeparatorChar) -ReportName 'ResourcesReport' -RunDateTime 'test2' -Version '0.0.0' -Obfuscated
+        $Text = Get-Content -LiteralPath $File -Raw
+        $Text | Should -Not -Match 'srv_alpha'
+        $Text | Should -Match ([regex]::Escape("Could not read $NameTok"))
+        $Global:RdaNoIdRealNames = $null
+    }
+}

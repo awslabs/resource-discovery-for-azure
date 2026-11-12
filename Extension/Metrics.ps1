@@ -24,94 +24,14 @@ if (-not (Get-Command -Name 'Write-RdaProgress' -ErrorAction SilentlyContinue))
 }
 
 
-if (-not (Get-Command -Name 'Resolve-ObfuscationToken' -ErrorAction SilentlyContinue))
+# Under -Obfuscate a metric row whose resource the inventory does not hold is
+# masked with Get-ObfuscatedResourceId from ResourceInventory.ps1, so its id
+# and fields match the inventory and consumption rows. This script is run by
+# ResourceInventory.ps1, which defines it; run on its own, the rows could not
+# be masked that way, so it stops before any Azure call.
+if ($Obfuscate -and $Task -eq 'Processing' -and -not (Get-Command -Name 'Get-ObfuscatedResourceId' -CommandType Function -ErrorAction SilentlyContinue))
 {
-    function Resolve-ObfuscationToken
-    {
-        param(
-            [string]$RealValue,
-            [string]$LookupKey,
-            $SharedDictionary,
-            [hashtable]$LocalCache,
-            [string]$TokenPrefix
-        )
-
-        if ($null -ne $SharedDictionary -and $SharedDictionary.ContainsKey($LookupKey)) { return $SharedDictionary[$LookupKey] }
-        if ($LocalCache.ContainsKey($RealValue)) { return $LocalCache[$RealValue] }
-
-        $Token = $TokenPrefix + [guid]::NewGuid().ToString()
-        $LocalCache[$RealValue] = $Token
-        return $Token
-    }
-}
-
-if (-not (Get-Command -Name 'Build-ObfuscatedResourceUri' -ErrorAction SilentlyContinue))
-{
-    function Build-ObfuscatedResourceUri
-    {
-        param(
-            [string]$RawUri,
-            [string]$Prefix,
-            $SubscriptionDictionary,
-            $ResourceGroupDictionary,
-            $NameDictionary,
-            [hashtable]$SubCache,
-            [hashtable]$RgCache,
-            [hashtable]$NameCache
-        )
-
-        if ([string]::IsNullOrEmpty($RawUri))
-        {
-            return 'obfuscated'
-        }
-
-        if ($RawUri -notmatch '^/subscriptions/([^/]+)(/resourcegroups/([^/]+))?(/providers/(.+))?$')
-        {
-            if (-not $NameCache.ContainsKey($RawUri))
-            {
-                $NameCache[$RawUri] = $Prefix + [guid]::NewGuid().ToString()
-            }
-            return $NameCache[$RawUri]
-        }
-
-        $RealSub = $Matches[1]
-        $RealRg = $Matches[3]
-        $RealProv = $Matches[5]
-
-        $ObfSub = Resolve-ObfuscationToken -RealValue $RealSub -LookupKey $RawUri -SharedDictionary $SubscriptionDictionary -LocalCache $SubCache -TokenPrefix ($Prefix + 'sub_')
-
-        $RebuiltUri = '/subscriptions/' + $ObfSub
-
-        if (-not [string]::IsNullOrEmpty($RealRg))
-        {
-            $RgTag = if ($RealRg -match '^mc_') { 'mc_' } else { '' }
-            $ObfRg = Resolve-ObfuscationToken -RealValue $RealRg -LookupKey $RawUri -SharedDictionary $ResourceGroupDictionary -LocalCache $RgCache -TokenPrefix ($Prefix + 'rg_' + $RgTag)
-            $RebuiltUri += '/resourcegroups/' + $ObfRg
-        }
-
-        if (-not [string]::IsNullOrEmpty($RealProv))
-        {
-            $ProvParts = $RealProv -split '/'
-            $Rebuilt = @()
-            for ($Pi = 0; $Pi -lt $ProvParts.Count; $Pi++)
-            {
-                $Part = $ProvParts[$Pi]
-                $IsNameSegment = ($Pi -ge 2 -and ($Pi % 2 -eq 0))
-                if ($IsNameSegment -and -not [string]::IsNullOrEmpty($Part) -and $Part -ne '$system')
-                {
-                    $NameSharedDict = if ($Pi -eq $ProvParts.Count - 1) { $NameDictionary } else { $null }
-                    $Rebuilt += Resolve-ObfuscationToken -RealValue $Part -LookupKey $RawUri -SharedDictionary $NameSharedDict -LocalCache $NameCache -TokenPrefix $Prefix
-                }
-                else
-                {
-                    $Rebuilt += $Part
-                }
-            }
-            $RebuiltUri += '/providers/' + ($Rebuilt -join '/')
-        }
-
-        return $RebuiltUri
-    }
+    throw 'Metrics.ps1 -Obfuscate needs Get-ObfuscatedResourceId from ResourceInventory.ps1. Run ResourceInventory.ps1 (or Run-AllSubscriptions.ps1) -Obfuscate, which runs this script.'
 }
 
 if ($Task -eq 'Processing')
@@ -680,23 +600,76 @@ if ($Task -eq 'Processing')
                     {
                         if (![string]::IsNullOrEmpty($OriginalId))
                         {
-                            $FbPrefix = if ($OriginalId -match '\b(dev|test|qa|tst|development|non-prod|uat|nonprod)\b') { 'nonprod_' } else { 'prod_' }
-
-                            if (-not $script:MetricsFallbackSubCache) { $script:MetricsFallbackSubCache = @{} }
-                            if (-not $script:MetricsFallbackRgCache) { $script:MetricsFallbackRgCache = @{} }
-                            if (-not $script:MetricsFallbackNameCache) { $script:MetricsFallbackNameCache = @{} }
-
-                            $ObfuscatedId = Build-ObfuscatedResourceUri -RawUri $OriginalId -Prefix $FbPrefix -SubscriptionDictionary $ResourceSubDictionary -ResourceGroupDictionary $ResourceGroupDictionary -NameDictionary $ResourceNameDictionary -SubCache $script:MetricsFallbackSubCache -RgCache $script:MetricsFallbackRgCache -NameCache $script:MetricsFallbackNameCache
-
+                            # The masked path the inventory and consumption rows
+                            # get (Get-ObfuscatedResourceId), from the run's own
+                            # subscription, resource group and name tokens and their
+                            # prefix rule, and the row's fields are that path's
+                            # segments (Get-ObfuscatedResourceId records them).
+                            $ObfuscatedId = Get-ObfuscatedResourceId -ResourceId $OriginalId
                             $ResourceIdDictionary[$OriginalId] = $ObfuscatedId
-                            if (-not $ResourceNameDictionary.ContainsKey($OriginalId)) { $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
-                            if (-not $ResourceSubDictionary.ContainsKey($OriginalId)) { $ResourceSubDictionary[$OriginalId] = $FbPrefix + 'sub_' + [guid]::NewGuid().ToString() }
-                            if (-not $ResourceGroupDictionary.ContainsKey($OriginalId)) { $ResourceGroupDictionary[$OriginalId] = $FbPrefix + 'rg_' + [guid]::NewGuid().ToString() }
+                            $FbPrefix = Get-ObfuscationPrefix $OriginalId
+                            if (-not $ResourceNameDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceNameDictionary[$OriginalId])) { $ResourceNameDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
+                            if (-not $ResourceSubDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceSubDictionary[$OriginalId])) { $ResourceSubDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
+                            if (-not $ResourceGroupDictionary.ContainsKey($OriginalId) -or [string]::IsNullOrEmpty($ResourceGroupDictionary[$OriginalId])) { $ResourceGroupDictionary[$OriginalId] = $FbPrefix + [guid]::NewGuid().ToString() }
 
                             $metric.ID = $ObfuscatedId
                             $metric.Name = $ResourceNameDictionary[$OriginalId]
                             $metric.Subscription = $ResourceSubDictionary[$OriginalId]
                             $metric.ResourceGroup = $ResourceGroupDictionary[$OriginalId]
+                        }
+                        else
+                        {
+                            # A row with no id has nothing to look up by id: mask
+                            # its fields so no real name is left in the file.
+                            # The group, the subscription (when one subscription
+                            # has that display name; with two, the row does not
+                            # say which, so neither one's token is given) and the
+                            # name (when the run holds one resource of that name,
+                            # group and subscription) take the tokens the
+                            # inventory rows carry, so the row matches them by
+                            # name and group.
+                            # Any other field gets one token per real value, kept
+                            # in the run's free-text dictionary so the dictionary
+                            # file can reveal it.
+                            $Replaced = @{}
+                            $RealRgValue = [string]$metric.ResourceGroup
+                            if (-not [string]::IsNullOrEmpty($RealRgValue) -and $null -ne $Global:ObfuscationResourceGroupTokens -and $Global:ObfuscationResourceGroupTokens.ContainsKey($RealRgValue))
+                            {
+                                $metric.ResourceGroup = $Global:ObfuscationResourceGroupTokens[$RealRgValue]
+                                $Replaced['ResourceGroup'] = $true
+                            }
+                            $RealSubValue = [string]$metric.Subscription
+                            $SubIdsOfName = @(@($Global:Subscriptions) | Where-Object { $null -ne $_ -and [string]$_.name -eq $RealSubValue -and -not [string]::IsNullOrEmpty([string]$_.id) } | ForEach-Object { [string]$_.id } | Select-Object -Unique)
+                            if (-not [string]::IsNullOrEmpty($RealSubValue) -and $SubIdsOfName.Count -eq 1 -and $null -ne $Global:ObfuscationSubscriptionTokens -and $Global:ObfuscationSubscriptionTokens.ContainsKey($SubIdsOfName[0]))
+                            {
+                                $metric.Subscription = $Global:ObfuscationSubscriptionTokens[$SubIdsOfName[0]]
+                                $Replaced['Subscription'] = $true
+                            }
+                            # (Rows with no id are rare; this scans the names.)
+                            $RealNameValue = [string]$metric.Name
+                            if (-not [string]::IsNullOrEmpty($RealNameValue) -and -not [string]::IsNullOrEmpty($RealRgValue) -and $SubIdsOfName.Count -eq 1 -and $null -ne $ResourceNameDictionary)
+                            {
+                                $NameHits = [System.Collections.Generic.List[string]]::new()
+                                foreach ($NameKey in @($ResourceNameDictionary.Keys))
+                                {
+                                    $KeyParts = ([string]$NameKey).Split('/')
+                                    if ($KeyParts.Count -lt 9 -or $KeyParts[1] -ine 'subscriptions' -or $KeyParts[2] -ine $SubIdsOfName[0] -or $KeyParts[3] -ine 'resourcegroups' -or $KeyParts[4] -ine $RealRgValue) { continue }
+                                    if ($KeyParts[-1] -ieq $RealNameValue -and -not [string]::IsNullOrEmpty($ResourceNameDictionary[$NameKey])) { $NameHits.Add([string]$ResourceNameDictionary[$NameKey]) }
+                                }
+                                if (@($NameHits | Select-Object -Unique).Count -eq 1)
+                                {
+                                    $metric.Name = $NameHits[0]
+                                    $Replaced['Name'] = $true
+                                }
+                            }
+                            foreach ($Field in 'Name', 'Subscription', 'ResourceGroup')
+                            {
+                                $RealValue = [string]$metric.$Field
+                                if ($Replaced.ContainsKey($Field) -or [string]::IsNullOrEmpty($RealValue)) { continue }
+                                if ($null -eq $Global:FreeTextDictionary) { $Global:FreeTextDictionary = New-Object 'System.Collections.Generic.Dictionary[string,string]' }
+                                if (-not $Global:FreeTextDictionary.ContainsKey($RealValue)) { $Global:FreeTextDictionary[$RealValue] = (Get-ObfuscationPrefix $RealValue) + [guid]::NewGuid().ToString() }
+                                $metric.$Field = $Global:FreeTextDictionary[$RealValue]
+                            }
                         }
                     }
                 }

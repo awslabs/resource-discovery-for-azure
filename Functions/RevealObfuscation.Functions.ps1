@@ -55,6 +55,13 @@ function Get-JsonEscaped
 #   None -> raw (CSV field values are re-quoted by Export-Csv instead)
 # Tokens not in $Replacements are returned unchanged, so unselected
 # dimensions stay masked. Increments $script:fileHits per substituted token.
+#
+# Inside a resource id a token stands for a path segment, so it is looked up
+# in $PathReplacements first: a subscription token after '/subscriptions/'
+# becomes the subscription id there, while elsewhere it is the display name.
+# When the resource id dimension is revealed, a whole masked id found in
+# $IdPathMap (masked id -> real id) is replaced as one value first; this also
+# restores ids whose segment tokens a dictionary does not hold one by one.
 function Convert-RevealString
 {
     param([string]$Text, [string]$EscapeMode = 'None')
@@ -71,21 +78,37 @@ function Convert-RevealString
     {
         return $Text
     }
-    return [regex]::Replace($Text, $TokenPattern, {
-            param($m)
-            $Tok = $m.Value
-            if ($Replacements.ContainsKey($Tok))
-            {
-                $script:FileHits++
-                $Val = $Replacements[$Tok]
-                switch ($EscapeMode)
+    $Escape = {
+        param([string]$Val)
+        switch ($EscapeMode)
+        {
+            'Json' { return (Get-JsonEscaped $Val) }
+            'Html' { return [System.Net.WebUtility]::HtmlEncode($Val) }
+            default { return $Val }
+        }
+    }
+    if ($null -ne $IdPathMap -and $IdPathMap.Count -gt 0)
+    {
+        $Text = [regex]::Replace($Text, '(?i)/subscriptions/(?:prod|nonprod)_[^"''\s,<>|\\]+', {
+                param($m)
+                if ($IdPathMap.ContainsKey($m.Value))
                 {
-                    'Json' { return (Get-JsonEscaped $Val) }
-                    'Html' { return [System.Net.WebUtility]::HtmlEncode($Val) }
-                    default { return $Val }
+                    $script:FileHits++
+                    return (& $Escape $IdPathMap[$m.Value])
                 }
-            }
-            return $Tok
+                return $m.Value
+            })
+    }
+    return [regex]::Replace($Text, ('(?<pre>(?i:/subscriptions/)|/)?(?<tok>' + $TokenPattern + ')'), {
+            param($m)
+            $Tok = $m.Groups['tok'].Value
+            $Pre = $m.Groups['pre'].Value
+            $Val = $null
+            if ($m.Groups['pre'].Success -and $null -ne $PathReplacements -and $PathReplacements.ContainsKey($Tok)) { $Val = $PathReplacements[$Tok] }
+            elseif ($Replacements.ContainsKey($Tok)) { $Val = $Replacements[$Tok] }
+            if ($null -eq $Val) { return $m.Value }
+            $script:FileHits++
+            return $Pre + (& $Escape $Val)
         })
 }
 
@@ -233,6 +256,13 @@ function Invoke-RdaReveal
         foreach ($token in $NameMap.Keys)
         {
             $Name = ($NameMap[$token] -split '/')[-1]
+            # A collector row with no id is filed under a stand-in path whose
+            # last segment is <name>~<hash> (a '/' in the name is written '_'):
+            # its name is the part before '~', and a row with no name has none.
+            if ($NameMap[$token] -match '(?i)/providers/rda\.noid/' -and $Name -match '^(.+)~[0-9a-f]{8}(-\d+)?$')
+            {
+                $Name = if ($Matches[1] -eq '~noname') { '' } else { $Matches[1] }
+            }
             if (-not [string]::IsNullOrEmpty($Name)) { $Replacements[$token] = $Name }
         }
     }
@@ -258,12 +288,51 @@ function Invoke-RdaReveal
         }
     }
 
+    # Inside a resource id each token stands for its path segment: the
+    # subscription id (not the display name), the resource group, or the
+    # resource name. Revealing the resource id reveals all three there.
+    $PathReplacements = @{}
+    if ($Fields -contains 'Subscription' -or $Fields -contains 'ResourceId')
+    {
+        foreach ($token in $SubMap.Keys)
+        {
+            $Guid = Get-SubGuidFromResourceId $SubMap[$token]
+            if (-not [string]::IsNullOrEmpty($Guid)) { $PathReplacements[$token] = $Guid }
+        }
+    }
+    if ($Fields -contains 'ResourceGroup' -or $Fields -contains 'ResourceId')
+    {
+        foreach ($token in $RgMap.Keys)
+        {
+            $RgName = Get-RgNameFromResourceId $RgMap[$token]
+            if (-not [string]::IsNullOrEmpty($RgName)) { $PathReplacements[$token] = $RgName }
+        }
+    }
+    if ($Fields -contains 'ResourceName' -or $Fields -contains 'ResourceId')
+    {
+        foreach ($token in $NameMap.Keys)
+        {
+            $Name = ($NameMap[$token] -split '/')[-1]
+            if (-not [string]::IsNullOrEmpty($Name)) { $PathReplacements[$token] = $Name }
+        }
+    }
+
+    # Whole masked ids (ResourceIdMap keys that are paths) -> real ids.
+    $IdPathMap = @{}
+    if ($Fields -contains 'ResourceId')
+    {
+        foreach ($token in $IdMap.Keys)
+        {
+            if ($token.StartsWith('/') -and -not [string]::IsNullOrEmpty($IdMap[$token])) { $IdPathMap[$token] = $IdMap[$token] }
+        }
+    }
+
     if ($Skipped.ContainsKey('SubscriptionName'))
     {
         Write-Warning "One or more subscriptions had no friendly name in the dictionary (older -Obfuscate run); revealed the subscription GUID instead. Re-run the inventory with a current version to capture SubscriptionNameMap."
     }
 
-    if ($Replacements.Count -eq 0)
+    if ($Replacements.Count -eq 0 -and $PathReplacements.Count -eq 0)
     {
         throw "Nothing to reveal: the selected field(s) [$($Fields -join ', ')] produced no token mappings from this dictionary."
     }
@@ -275,7 +344,12 @@ function Invoke-RdaReveal
     # (prod_aks_<guid>, etc.) - the regex matches both; the callback only
     # substitutes tokens present in $Replacements, so non-selected dimensions
     # are left masked.
-    $TokenPattern = '(?:prod|nonprod)_(?:[a-z0-9]+_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    # One or more hint words are allowed (prod_aks_<guid>, prod_rg_mc_<guid>).
+    $TokenPattern = '(?:prod|nonprod)_(?:[a-z0-9]+_)*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+    # The report's privacy banner says the report holds no real identifiers.
+    # After a reveal it does, so the banner says what was restored instead.
+    $RevealedBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Revealed report.</b> Real values were restored from the obfuscation dictionary for: {0}. Treat as confidential and share only with the intended recipient.</div></div>' -f [System.Net.WebUtility]::HtmlEncode(($Fields -join ', '))
 
     $TmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("Reveal_" + [guid]::NewGuid().ToString())
     New-Item -ItemType Directory -Path $TmpRoot -Force | Out-Null
@@ -345,8 +419,14 @@ function Invoke-RdaReveal
                     default { 'None' }
                 }
                 $NewContent = Convert-RevealString -Text $Content -EscapeMode $EscapeMode
+                $BannerReplaced = $false
+                if ($EscapeMode -eq 'Html' -and $NewContent -match '<div class="privacy-banner obfuscated">')
+                {
+                    $NewContent = [regex]::Replace($NewContent, '<div class="privacy-banner obfuscated">.*?</div></div>', { param($m) $RevealedBanner }, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+                    $BannerReplaced = $true
+                }
 
-                if ($script:FileHits -gt 0)
+                if ($script:FileHits -gt 0 -or $BannerReplaced)
                 {
                     Set-Content -Path $file.FullName -Value $NewContent -Encoding utf8 -NoNewline
                 }

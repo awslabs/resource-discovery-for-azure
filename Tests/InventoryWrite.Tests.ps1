@@ -646,6 +646,20 @@ Describe 'Write-InventoryJson' {
         Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'nothing is written for a refused input'
     }
 
+    # A string's PSObject properties are Length, an array's Count and so on: not collectors.
+    It 'refuses a <Kind> input that is not a [pscustomobject] and writes nothing' -ForEach @(
+        @{ Kind = 'string'; Make = { '{"Version":"1.2.3"}' } }
+        @{ Kind = 'array'; Make = { , @([pscustomobject]@{ Version = '1.2.3' }) } }
+        @{ Kind = 'number'; Make = { 42 } }
+    ) {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+
+        { Write-InventoryJson -InputObject (& $Make) -Path $Path 3>$null } | Should -Throw '*not a `[pscustomobject`]*'
+
+        Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'nothing is written for a refused input'
+    }
+
     It 'refuses a dictionary without touching an existing file at the path' {
         $Dir = New-WriterCaseDir
         $Path = Join-Path $Dir 'Inventory_test.json'

@@ -18,9 +18,10 @@
 # moved to $Path only once it is complete, so a failed write never leaves a cut-off file: on any
 # failure the temporary file is closed, its removal is tried (a warning says when it cannot be
 # removed), and the error is re-thrown.
-# A dictionary (hashtable, [ordered]) is refused before anything is written: its PSObject
-# properties are Keys, Count, IsReadOnly and so on, not its entries, so it would be written as
-# the wrong shape.
+# Anything but a [pscustomobject] is refused before anything is written. Its PSObject
+# properties are not collectors: a dictionary (hashtable, [ordered]) has Keys, Count,
+# IsReadOnly and so on, a string has Length, an array has Count, so each would be written
+# as the wrong shape.
 function Write-InventoryJson
 {
     param(
@@ -41,8 +42,9 @@ function Write-InventoryJson
         # The temporary file sits beside the final one under a short ASCII name
         # of its own, 'rda-write-<32 hex>.tmp' (a new GUID for every write): it
         # never ends in .json, it is 46 characters long (so it fits as a file
-        # name wherever a longer final name does), and no two writes share it. A file a killed write left stays in that run's
-        # folder with the other files the run had written.
+        # name wherever a longer final name does), and no two writes share it.
+        # A file a killed write left stays in that run's folder with the other
+        # files the run had written.
         $TempPath = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($FullPath), ('rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')))
         # Inside the try: a throw outside any try is skipped when the caller runs with
         # $ErrorActionPreference = 'SilentlyContinue', as ResourceInventory.ps1 does.
@@ -50,6 +52,10 @@ function Write-InventoryJson
         if ($InputObject -is [System.Collections.IDictionary])
         {
             throw ("Write-InventoryJson: -InputObject is a dictionary ({0}). Pass a [pscustomobject] with one property per collector, for example [pscustomobject]`$Table." -f $InputObject.GetType().FullName)
+        }
+        if ($InputObject.PSObject.BaseObject -isnot [System.Management.Automation.PSCustomObject])
+        {
+            throw ("Write-InventoryJson: -InputObject is a {0}, not a [pscustomobject]. Pass a [pscustomobject] with one property per collector." -f $InputObject.GetType().FullName)
         }
 
         # The file is this call's from the moment it exists, so a failure in

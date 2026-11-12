@@ -65,6 +65,13 @@ param(
     # -SkipConsumption was used; the check is silently skipped in that case.
     $ConsumptionFile,
 
+    # Collector failures for this run: objects with a Module property naming
+    # the resource type whose collector threw. A failed type serialises as an
+    # empty array and its section is dropped from the report, which reads the
+    # same as a subscription that has none of that type, so the report names
+    # these types in a banner. Optional; omitted on standalone invocations.
+    $CollectorFailures = @(),
+
     # Minimum running-VM-vs-billed shortfall (count) required before the VM
     # billing-coverage banner is shown. Default 0 means any shortfall is
     # surfaced; raise it to suppress small billing-lag noise.
@@ -126,6 +133,8 @@ foreach ($prop in $Inventory.PSObject.Properties)
 }
 $ServiceSummary = $ServiceSummary | Sort-Object -Property Count -Descending
 $TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
+# Measure-Object gives no sum for no input: an inventory with no records has 0.
+if ($null -eq $TotalResources) { $TotalResources = 0 }
 
 # Detect obfuscation so the header can carry a privacy-posture banner. Sample
 # resource Names and Subscription values across the first few populated
@@ -637,6 +646,7 @@ footer {
     color: #856404;
 }
 .coverage-banner b { font-weight: 600; }
+.incomplete-note { font-weight: 600; color: #7d2019; }
 .coverage-icon { font-size: 16px; }
 @media print {
     body { background: white; font-size: 11px; }
@@ -786,6 +796,21 @@ else
     $PrivacyBanner = '<div class="privacy-banner identifiable"><span class="privacy-icon">&#9888;</span><div><b>Identifiable report.</b> Contains real subscription, resource group, and resource names. Treat as confidential and avoid sharing outside intended recipients. Re-run with <code>-Obfuscate</code> to produce a sharable report.</div></div>'
 }
 
+# Collector-failure banner. A resource type whose collector threw is absent
+# from the tables, which reads the same as a subscription that has none of that
+# type; this banner is the only place the report tells the two apart. The guard
+# counts every non-null record, so a record without a Module name still shows
+# the banner (as '(unnamed collector)') instead of hiding it.
+$CollectorBanner = ''
+$CollectorNames = @()
+$CollectorFailureList = @(@($CollectorFailures) | Where-Object { $null -ne $_ })
+if ($CollectorFailureList.Count -gt 0)
+{
+    $CollectorNames = @($CollectorFailureList | ForEach-Object { if ([string]::IsNullOrWhiteSpace([string]$_.Module)) { '(unnamed collector)' } else { [string]$_.Module } } | Sort-Object -Unique)
+    $CollectorNameList = (($CollectorNames | ForEach-Object { '<code>' + (ConvertTo-HtmlSafe $_) + '</code>' }) -join ', ')
+    $CollectorBanner = ('<div class="coverage-banner"><span class="coverage-icon">&#9888;</span><div><b>Incomplete collection:</b> {0} resource type(s) could not be collected and are MISSING from this report - not empty because there are none, but because the collector errored: {1}. See the Diagnostics log in this bundle for the underlying error, then re-run.</div></div>' -f $CollectorNames.Count, $CollectorNameList)
+}
+
 # VM billing-coverage banner. Rendered only when the inventory shows materially
 # more running VMs than the consumption data billed for (see the $VmBilling
 # detection above). Frames the inventory as authoritative and points at
@@ -833,11 +858,13 @@ $ReportBlock
 $RenderBlock
 $PlatBlock
 <div><b>Total Resources:</b> $TotalResources</div>
-<div><b>Service Types:</b> $($ServiceSummary.Count)</div>
+<div><b>Service Types:</b> $($ServiceSummary.Count)$(if ($CollectorBanner) { ' <span class="incomplete-note">(collection incomplete, see below)</span>' })</div>
 </div>
 </header>
 
 $PrivacyBanner
+
+$CollectorBanner
 
 $CoverageBanner
 
@@ -880,4 +907,9 @@ if ($ObfuscationStatus -eq 'obfuscated')
 else
 {
     Write-Host "  Privacy posture: identifiable (contains real names; treat as confidential)" -ForegroundColor Yellow
+}
+# Last, so the summary block cannot end on a clean line over an incomplete report.
+if ($CollectorBanner)
+{
+    Write-Host ("  Collection INCOMPLETE: {0} resource type(s) missing because the collector errored: {1}" -f $CollectorNames.Count, ($CollectorNames -join ', ')) -ForegroundColor Yellow
 }

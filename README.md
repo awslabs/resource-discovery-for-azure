@@ -586,6 +586,18 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 
 Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
 
+### Exit Codes (ResourceInventory.ps1, direct run)
+
+A direct `ResourceInventory.ps1` run (without `-RunAllSubs`) also sets an exit code:
+
+| Code | Meaning |
+|---|---|
+| `0` | Completed; no collector failed. A run that stopped before writing its zip, for example after 5 collectors failed in a row, can also end with `0`, so check that the zip named on the `Reporting Data File:` line exists. |
+| `1` | A pre-flight check stopped the run before collection (for example `-Service` matched no collector, or the `-ObfuscationDictionary` file is missing or not valid JSON). |
+| `4` | Completed and the report and zip were written, but one or more `Services/*/*.ps1` collectors failed. Those resource types are missing (not empty) from the report; its "Incomplete collection" banner names them. |
+
+Under `-RunAllSubs`, which is how `Run-AllSubscriptions.ps1` calls it, the script does not exit `4` when a collector failed; the wrapper reports the failure with its own code `4` above.
+
 ### Important Notes
 
 - The script does not upgrade existing PowerShell modules

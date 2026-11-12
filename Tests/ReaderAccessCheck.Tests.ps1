@@ -1188,7 +1188,7 @@ $Global:PlatformOS = 'PowerShell Unix'
 $Global:PSDefaultParameterValues = @{ 'Test-SubscriptionRoleAccessAll:ThrottleLimit' = 1; 'Invoke-ConsumptionDataCheck:ThrottleLimit' = 1 }
 $TestSub = '12345678-1234-1234-1234-123456789012'
 # Subscription N (from 1): ...1234567890<11+N>, so subscription 1 is $TestSub.
-$Global:TestSubs = @(1..$SubCount | ForEach-Object { [pscustomobject]@{ id = ('12345678-1234-1234-1234-1234567890{0:d2}' -f (11 + $_)); name = $(if ($SubCount -eq 1) { 'Placeholder subscription' } else { 'Placeholder subscription {0}' -f $_ }); tenantId = $TestSub } })
+$Global:TestSubs = @($(if ($SubCount -gt 0) { 1..$SubCount }) | ForEach-Object { [pscustomobject]@{ id = ('12345678-1234-1234-1234-1234567890{0:d2}' -f (11 + $_)); name = $(if ($SubCount -eq 1) { 'Placeholder subscription' } else { 'Placeholder subscription {0}' -f $_ }); tenantId = $TestSub } })
 $Global:UnreadableIds = @(($Unreadable -split ',') | Where-Object { $_ } | ForEach-Object { $Global:TestSubs[[int]$_ - 1].id })
 function global:az
 {
@@ -1482,6 +1482,14 @@ exit $LASTEXITCODE
         $Run.InventoryReached | Should -BeFalse
         $Run.Calls | Should -Not -Contain 'usage'
         $Run.Output | Should -Match ([regex]::Escape('No subscription is readable. Stopping before any work. Grant the identity Reader on these subscriptions, then re-run.'))
+    }
+
+    It 'stops with exit 1 before inventory when the identity sees no subscription at all' {
+        $Run = Invoke-DirectRun -NoSubscriptionId -SubCount 0 -SkipConsumption
+        $Run.ExitCode | Should -Be 1
+        $Run.InventoryReached | Should -BeFalse
+        $Run.RoleCalls.Count | Should -Be 0
+        $Run.Output | Should -Match ([regex]::Escape('No subscription is visible to the signed-in identity. Stopping before any work.'))
     }
 
     It 'stops with exit 1 for an unreadable -SubscriptionID even when other subscriptions are readable' {

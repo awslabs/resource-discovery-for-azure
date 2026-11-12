@@ -723,7 +723,8 @@ Function RunInventorySetup()
     #    skipped: listed with the reason right after the check and again at
     #    the end of the run, left out of the consumption check, and its
     #    resources are left out of the inventory. When none is readable (for
-    #    example the one -SubscriptionID names) the run stops with exit 1.
+    #    example the one -SubscriptionID names) the run stops with exit 1, and
+    #    so does a run over every visible subscription that sees none.
     # 2. Consumption: unless -SkipConsumption, every in-scope subscription must
     #    return usage values (Invoke-ConsumptionDataCheck) for the run's
     #    window. With -ResourceGroup only that resource group's usage rows
@@ -744,6 +745,14 @@ Function RunInventorySetup()
         else
         {
             @($Global:Subscriptions)
+        }
+
+        if (@($ConsumptionCheckScope).Count -eq 0 -and [string]::IsNullOrEmpty($ResourceGroup))
+        {
+            # No subscription in scope: Resource Graph would return no rows and the run would
+            # end with an empty report, so stop as for no readable subscription.
+            Write-Host '  No subscription is visible to the signed-in identity. Stopping before any work. Sign in with an identity that has Reader on a subscription of this tenant, then re-run.' -ForegroundColor Red
+            exit 1
         }
 
         if (@($ConsumptionCheckScope).Count -gt 0 -and ([string]::IsNullOrEmpty($ResourceGroup) -or ![string]::IsNullOrEmpty($SubscriptionID)))

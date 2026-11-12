@@ -25,10 +25,29 @@
 # match the gap bundle's tokens exactly, so the recovered rows can be spliced in
 # with no remapping. This function performs that splice + re-package.
 #
-# Definitions only - dot-source this file, then call Merge-RecoveryData. It has
-# no dependency on ResourceInventory.ps1's globals; it only reads/writes files
-# and re-invokes Extension/Summary.ps1 to regenerate the HTML report.
+# Dot-source this file, then call Merge-RecoveryData. On load it runs one step:
+# it checks that Functions/InventoryJson.Functions.ps1 is next to it (throws if
+# not, and the throw stops the caller under any $ErrorActionPreference) and
+# dot-sources it, which defines Write-InventoryJson. So it works when
+# dot-sourced on its own. The rest is definitions. Merge-RecoveryData has no
+# dependency on ResourceInventory.ps1's globals; it only reads/writes files and
+# re-invokes Extension/Summary.ps1 to regenerate the HTML report.
 # =============================================================================
+
+# InventoryJson.Functions.ps1 defines only Write-InventoryJson, so loading it
+# sets no variable and leaves the caller's other functions as they were.
+if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1') -PathType Leaf))
+{
+    # A plain throw here, even one re-thrown from a catch, is skipped when the caller
+    # runs with $ErrorActionPreference = 'SilentlyContinue' or 'Ignore'. Thrown from a
+    # child scope set to Stop, it stops the caller under any preference. The child
+    # scope ends here, so the caller's own preference is left as it was.
+    & {
+        $ErrorActionPreference = 'Stop'
+        throw ("RecoveryMerge.Functions.ps1: required file not found: {0}. Keep the Functions folder together." -f (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1'))
+    }
+}
+. (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1')
 
 function Merge-RecoveryData
 {
@@ -102,9 +121,12 @@ function Merge-RecoveryData
     }
 
     # -- Verify an ObfuscationDictionary actually BELONGS to a given inventory.
-    #    An obfuscated inventory stores per-resource tokens (prod_/nonprod_<guid>)
-    #    in its ID/Name/cross-ref fields; those exact tokens are the KEYS of the
-    #    dictionary's maps (ResourceIdMap/ResourceNameMap/... are token -> real).
+    #    An obfuscated inventory holds per-resource tokens (prod_/nonprod_<guid>)
+    #    in its Name, Subscription and ResourceGroup fields and inside its
+    #    ARM-shaped ID paths; those single tokens are KEYS of the dictionary's
+    #    name, subscription and resource-group maps (token -> real). The
+    #    ResourceIdMap's keys are whole masked paths, so they never match a
+    #    single token and add nothing to the count (see the scan below).
     #    So the dictionary that goes with an inventory must contain (almost) all of
     #    that inventory's tokens as keys. If someone points at the WRONG dictionary
     #    (a different run/subscription), the inventory's tokens are absent and
@@ -128,10 +150,15 @@ function Merge-RecoveryData
         }
 
         # Collect the DISTINCT obfuscation tokens present in the inventory text.
-        # The pattern matches only flat per-resource tokens (prod_/nonprod_<guid>),
-        # which are what the inventory ID/Name fields carry and what the dictionary
-        # maps key on. Consumption-style tokens (prod_sub_/prod_rg_...) live in the
-        # CSV, not the inventory JSON, so they never enter this scan.
+        # The pattern matches single prod_/nonprod_<guid> tokens. Inventory IDs are not
+        # flat tokens: they are ARM-shaped paths
+        # (/subscriptions/<token>/resourcegroups/<token>/providers/<type>/<token>),
+        # so the pattern finds the subscription, resource-group and name tokens inside
+        # each path, and the Name/Subscription/ResourceGroup fields carry the same
+        # tokens. Those single tokens are keys of the name, subscription and
+        # resource-group maps, so they are what this check counts. Consumption-style
+        # tokens (prod_sub_/prod_rg_...) live in the CSV, not the inventory JSON, so
+        # they never enter this scan.
         $InventoryText = Get-Content -Path $InventoryPath -Raw
         $InventoryTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($TokenMatch in [regex]::Matches($InventoryText, '(?i)\b(?:prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'))
@@ -332,20 +359,31 @@ function Merge-RecoveryData
     $OutZipFile = Join-Path $OutputPath ("{0}.zip" -f $BundleBase)
     $OutDictionaryFile = Join-Path $OutputPath ("ObfuscationDictionary_{0}.json" -f $BundleBase)
 
-    # -- Write the merged inventory (depth 100 + compressed, matching the
-    #    original serialization in ResourceInventory.ps1) ----------------------
-    $GapInventory | ConvertTo-Json -Depth 100 -Compress | Out-File -FilePath $OutInventoryFile
+    # -- Write the merged inventory with Write-InventoryJson, as
+    #    ResourceInventory.ps1 does: one collector at a time, so the whole
+    #    document is never one string, and the same bytes as
+    #    'ConvertTo-Json -Depth 100 -Compress | Out-File'. A failed write stops
+    #    the merge and leaves no new, empty or partial inventory; an inventory
+    #    already at $OutInventoryFile is left unchanged. -------------------------
+    Write-InventoryJson -InputObject $GapInventory -Path $OutInventoryFile
 
     # -- Consumption source. By default carry the gap bundle's CSV forward: an
     #    inventory gap does not affect the whole-subscription consumption file.
     #    With -RecoverConsumption, whole-file REPLACE it with the recovery
     #    bundle's CSV instead (used when the gap run's consumption is missing or
     #    incomplete - e.g. truncated by a transient "copying content to a stream"
-    #    error). Consumption ResourceUris are obfuscated with a per-run scheme
-    #    that is independent of the inventory dictionary (it preserves the ARM
-    #    path structure for categorisation but mints its own sub/rg/name tokens),
-    #    so a replaced consumption file is internally consistent and categorises
-    #    correctly even though its tokens differ from the gap run's. If the chosen
+    #    error). Consumption ResourceUris keep the ARM path structure for
+    #    categorisation. A ResourceUri that matches an inventory id exactly
+    #    takes that resource's whole masked path from the run's ResourceIdMap;
+    #    for any other ResourceUri, each subscription, resource group and name
+    #    part is looked up in the run's shared dictionaries by the full
+    #    ResourceUri, then in the consumption file's own cache by the real
+    #    value, and only on a miss gets a token minted for that run's
+    #    consumption file. So a replaced
+    #    consumption file categorises correctly, but its tokens can differ
+    #    from the gap run's, and a resource that is not in the inventory can
+    #    carry subscription and resource group tokens different from the
+    #    inventory's for the same real values. If the chosen
     #    source has none, write a canonical empty file so the bundle is
     #    structurally complete. --------------------------------------------------
     $ConsumptionSource = 'gap'

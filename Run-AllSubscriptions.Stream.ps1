@@ -205,9 +205,9 @@ $Completed = @($CompletedIds)
 $FailedSubs = @()
 # Subs this stream skipped on -Resume as completed (its own file of this run
 # lists them). None today: the parent's pre-filter gives a stream only subs not
-# done, and this file is new each run. If one were skipped here, the parent's
-# merge would still count it as given and not done (one more failed run, no
-# carried report), the safe side.
+# done, and this file is new each run. A sub skipped here would count as done
+# only through that same file of this run with its report record (the parent's
+# merge rule), and its report would be carried.
 $SkippedSubs = @()
 # Subs this stream collected without a zip being written; reported in the
 # summary so the parent takes them off the unified completed list.

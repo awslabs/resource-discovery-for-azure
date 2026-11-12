@@ -310,8 +310,6 @@ Describe 'A subscription on the not-readable record that a later check can read'
 
 Describe 'Two -Resume runs in a row after a not-readable subscription was skipped' -Skip:$IsWindows {
     BeforeAll {
-        # Two -Resume runs; each must exit 0 without an access stop, name
-        # nothing under "Not Collected" and leave no resume state.
         # The sub the interrupted run was collecting counts that run as a failed
         # run (write-ahead count), so while it is out of this run's set every
         # -Resume names it under Not In This Run, keeps the state and ends with
@@ -330,6 +328,8 @@ Describe 'Two -Resume runs in a row after a not-readable subscription was skippe
             }
         }
 
+        # Two -Resume runs; each must exit 0 without an access stop, name
+        # nothing under "Not Collected" and leave no resume state.
         function script:Assert-TwoCleanResumes
         {
             foreach ($Run in 1..2)

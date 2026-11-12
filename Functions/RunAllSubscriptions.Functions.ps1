@@ -26,8 +26,9 @@ function Exit-Wrapper
 {
     param([int]$Code = 0)
     # After collection, a run that stops still puts aside a resume state it
-    # could not save (Set-NotSavedResumeStateAside; armed in the wrapper).
-    if ($Code -ne 0 -and $script:RdaNotSavedOnExit -and $script:ResumeStateSaveFailed)
+    # could not save (Set-NotSavedResumeStateAside; armed in the wrapper). Read
+    # without failing when not set yet (an early exit, under strict mode).
+    if ($Code -ne 0 -and (Get-Variable -Name RdaNotSavedOnExit -Scope Script -ValueOnly -ErrorAction SilentlyContinue) -and (Get-Variable -Name ResumeStateSaveFailed -Scope Script -ValueOnly -ErrorAction SilentlyContinue))
     {
         $script:RdaNotSavedOnExit = $false
         $null = Set-NotSavedResumeStateAside -ResumeStateFile $script:RdaNotSavedStateFile
@@ -850,7 +851,7 @@ function Remove-FailedAttempt
 # than iterating 0..($StreamCount-1). $StreamCount reflects THIS run's
 # -ParallelStreams value; if an earlier interrupted run used a LARGER value,
 # its higher-numbered per-stream files would otherwise never be read (losing
-# their Completed/FailedAttempts data) nor cleaned up (leaving them as
+# their failures and write-ahead counts) nor cleaned up (leaving them as
 # orphans). -Force is required because these filenames are dot-prefixed and
 # Get-ChildItem hides dot-files by default on Unix. Pulled out to its own
 # function purely so it can be exercised by a Pester test against a temp

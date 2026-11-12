@@ -1264,9 +1264,10 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         @{ Case = 'cannot be put aside'; MoveFails = $true; NoFile = $false }
         @{ Case = 'no state file: a mark is made'; MoveFails = $false; NoFile = $true }
     ) {
-        # Run 1 (BeforeEach) completed sub-a. This run fails sub-a, and its save of
-        # that does not reach the disk, so the file still lists sub-a as completed:
-        # a -Resume would skip it and carry its old report.
+        # Run 1 (BeforeEach) completed sub-a. This run's write-ahead save of sub-a
+        # reaches the disk (its completion is out, its count is up); sub-a then
+        # fails and that save does not reach the disk, so the file does not hold
+        # this run's last result: the end of the run puts it aside.
         $Global:RdaCarryTestFailIds = @('sub-a')
         $S = script:Read-State -Path $script:State
         $script:ResumeStateSaveFailed = $false
@@ -1327,6 +1328,18 @@ Exit-Wrapper -Code 2
 "@ | Set-Content -LiteralPath $Probe -Encoding utf8
         $Out = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $Probe 2>&1 | ForEach-Object { [string]$_ })
         $LASTEXITCODE | Should -Be 2
+        # Before the arm (an early exit) under strict mode, Exit-Wrapper reads
+        # the unset switches without an error.
+        $Early = Join-Path $script:Root 'probe-early.ps1'
+        @"
+Set-StrictMode -Version Latest
+. '$Functions'
+`$WrapperTranscriptStarted = `$false
+Exit-Wrapper -Code 1
+"@ | Set-Content -LiteralPath $Early -Encoding utf8
+        $EarlyOut = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $Early 2>&1 | ForEach-Object { [string]$_ })
+        $LASTEXITCODE | Should -Be 1
+        @($EarlyOut | Where-Object { $_ -like '*cannot be retrieved*' -or $_ -like '*has not been set*' }) | Should -BeNullOrEmpty
         $global:LASTEXITCODE = 0
         Test-Path -LiteralPath $script:State | Should -BeFalse
         @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t.json.not-saved-*' -Force).Count | Should -Be 1

@@ -796,9 +796,11 @@ $LeftStreamFiles = @()
 # Cloud Shell timeout), the failures live ONLY in the per-stream files while the
 # unified file is stale. Without this, -ResumeFailedOnly reads the unified file,
 # sees no failures, and wrongly reports "Nothing to retry" - silently dropping
-# the retry set. Read the per-stream files here so BOTH -Resume (skip-completed)
-# and -ResumeFailedOnly (retry list) see the full picture, write what they hold
-# into the unified file, and then remove them: a run that does not reach the
+# the retry set. Read the per-stream files here so BOTH -Resume and
+# -ResumeFailedOnly see every failure (and every write-ahead count) they hold,
+# write those into the unified file, and then remove them; their completions
+# are never taken (fail-safe rule: that run never proved them saved, so those
+# subscriptions are collected again): a run that does not reach the
 # streams merge (sequential, one subscription, or nothing left) would otherwise
 # leave them, and every later -Resume would fold the same old records in again.
 # A run without -Resume or -ResumeFailedOnly collects every subscription and

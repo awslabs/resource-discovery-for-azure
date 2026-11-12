@@ -39,6 +39,10 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
             $OS = $Data.virtualMachineProfile.storageProfile.osDisk.osType
+            # The image version, as VirtualMachines.ps1 reads exactVersion; a scale
+            # set model usually carries only the requested version (e.g. 'latest').
+            $ImageReference = $Data.virtualMachineProfile.storageProfile.imageReference
+            $ImageVersion = if (-not [string]::IsNullOrEmpty($ImageReference.exactVersion)) { $ImageReference.exactVersion } elseif (-not [string]::IsNullOrEmpty($ImageReference.version)) { $ImageReference.version } else { $null }
             $Scaling = ($AutoScale | Where-Object { $_.Properties.targetResourceUri -eq $1.id })
 
             if ([string]::IsNullOrEmpty($Scaling)) { $AutoSc = $false }else { $AutoSc = $true }
@@ -47,15 +51,16 @@ if ($Task -eq 'Processing')
             if ([string]::IsNullOrEmpty($RelatedAKSId)) { $RelatedId = ($SFC | Where-Object { $_.Properties.clusterEndpoint -in $1.properties.virtualMachineProfile.extensionProfile.extensions.properties.settings.clusterEndpoint }).id }else { $RelatedId = $RelatedAKSId }
             $Related = if ([string]::IsNullOrEmpty($RelatedId)) { $RelatedId } elseif ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($RelatedId)) { $ResourceIdDictionary[$RelatedId] } else { 'obfuscated' } } else { $RelatedId.split('/')[8] }
 
-            $Timecreated = $Data.timeCreated
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            # A missing timeCreated, or one that does not convert to a date, is
+            # 'Unknown' rather than an exception that fails every scale set.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]::Parse($Data.timeCreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal') | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
-            $Cpus = $Vmsizemap[$1.sku.name].CPU;
-            $Ram = $Vmsizemap[$1.sku.name].RAM;
-
-            $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
-            $Ram = if ($null -ne $Ram) { $Ram } else { '0' }
+            # A missing size, or one the SKU list does not know, leaves vCPUs and RAM
+            # empty rather than 0.
+            $SkuName = $1.sku.name
+            $Cpus = if ($null -ne $SkuName) { $Vmsizemap[$SkuName].CPU } else { $null }
+            $Ram = if ($null -ne $SkuName) { $Vmsizemap[$SkuName].RAM } else { $null }
 
             $Obj = @{
                 'ID'                            = $1.id;
@@ -73,7 +78,7 @@ if ($Task -eq 'Processing')
                 'RAM'                           = $Ram;
                 'VMOS'                          = $OS;
                 'OSImage'                       = $Data.virtualMachineProfile.storageProfile.imageReference.offer;
-                'ImageVersion'                  = $Data.virtualMachineProfile.storageProfile.imageReference.sku;
+                'ImageVersion'                  = $ImageVersion;
                 'DiskSizeGB'                    = $Data.virtualMachineProfile.storageProfile.osDisk.diskSizeGB;
                 'StorageAccountType'            = $Data.virtualMachineProfile.storageProfile.osDisk.managedDisk.storageAccountType;
                 'AcceleratedNetworkingEnabled'  = $Data.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.properties.enableAcceleratedNetworking;

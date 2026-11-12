@@ -218,8 +218,9 @@ Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
     # interpolate raw $_.Exception.Message text and local paths (e.g. collector
     # failures, reconnect failures, HTML-gen failures) that carry real Azure
     # identifiers the obfuscation layer never touches. Shipping this file would
-    # leak them. Do NOT add $Global:ErrorLogFile to the Compress-Archive Path
-    # array without first scrubbing/obfuscating its contents. It is kept on disk
+    # leak them. Do NOT add $Global:ErrorLogFile to the report zip's Path array
+    # (Compress-RdaReportArchive in ResourceInventory.ps1) without first
+    # scrubbing/obfuscating its contents. It is kept on disk
     # for local troubleshooting only, at the same trust level as the transcript.
     if ($Severity -eq 'Error' -and -not [string]::IsNullOrEmpty($Global:ErrorLogFile))
     {

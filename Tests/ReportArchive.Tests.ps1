@@ -316,6 +316,80 @@ Describe 'Compress-RdaReportArchive failure handling' {
         [System.IO.File]::ReadAllBytes($Destination) | Should -Be @(1, 2, 3, 4)
         Get-FolderListing $Root | Should -Be $Before
     }
+
+    # A folder it cannot list must stop the zip, as Compress-Archive does: a zip made
+    # without that folder's files would be named as the run's report. Unix file modes
+    # only; root can read any folder.
+    It 'fails on a folder input it cannot read and leaves no zip and no temporary file' -Skip:($IsWindows -or [Environment]::UserName -eq 'root') {
+        $Root = Join-Path $TestDrive 'unreadable-dir'
+        New-Item -ItemType Directory -Path $Root | Out-Null
+        Write-FixtureFile (Join-Path $Root 'a.json') (Get-JsonText -Records 20 -Seed 11)
+        $Closed = Join-Path $Root 'closed.json'
+        New-Item -ItemType Directory -Path $Closed | Out-Null
+        Write-FixtureFile (Join-Path $Closed 'inner.json') '{}'
+        $Destination = Join-Path $Root 'report.zip'
+        [System.IO.File]::SetUnixFileMode($Closed, [System.IO.UnixFileMode]::None)
+        try
+        {
+            $Before = Get-FolderListing $Root
+            $Caught = & {
+                $ErrorActionPreference = 'SilentlyContinue'
+                try
+                {
+                    Compress-RdaReportArchive -Path (Join-Path $Root 'a.json'), $Closed -CompressionLevel Fastest -DestinationPath $Destination -ErrorAction Stop 2>$null
+                    'not caught'
+                }
+                catch
+                {
+                    $_.Exception.Message
+                }
+            }
+            $Caught | Should -Not -Be 'not caught'
+            $Caught | Should -BeLike '*closed.json*'
+            Test-Path -LiteralPath $Destination | Should -BeFalse
+            Get-FolderListing $Root | Should -Be $Before
+        }
+        finally
+        {
+            [System.IO.File]::SetUnixFileMode($Closed, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+        }
+    }
+
+    It 'warns with the temporary file''s path when it cannot remove it after a failure' {
+        $Root = Join-Path $TestDrive 'cleanup-fails'
+        New-Item -ItemType Directory -Path $Root | Out-Null
+        Write-FixtureFile (Join-Path $Root 'a.json') (Get-JsonText -Records 200 -Seed 12)
+        $Locked = Join-Path $Root 'z.json'
+        Write-FixtureFile $Locked '{}'
+        $Destination = Join-Path $Root 'report.zip'
+        # The removal does nothing, as when the file is locked or the folder is read-only.
+        Mock Remove-Item { }
+
+        $Hold = [System.IO.File]::Open($Locked, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try
+        {
+            $Warnings = $null
+            $Caught = try
+            {
+                Compress-RdaReportArchive -Path (Join-Path $Root 'a.json'), $Locked -CompressionLevel Fastest -DestinationPath $Destination -WarningVariable Warnings -WarningAction SilentlyContinue
+                'not caught'
+            }
+            catch
+            {
+                $_.Exception.Message
+            }
+        }
+        finally
+        {
+            $Hold.Dispose()
+        }
+        $Caught | Should -BeLike '*z.json*'
+        $Left = @(Get-ChildItem -LiteralPath $Root -Force -Filter '.rda-*.partial')
+        $Left.Count | Should -Be 1 -Because 'the stand-in removal left the temporary file'
+        @($Warnings | Where-Object { $null -ne $_ }).Count | Should -Be 1
+        [string]$Warnings[0] | Should -BeLike ('*{0}*delete it by hand*' -f $Left[0].FullName)
+        Test-Path -LiteralPath $Destination | Should -BeFalse
+    }
 }
 
 Describe 'Compress-RdaReportArchive with a long destination file name' {

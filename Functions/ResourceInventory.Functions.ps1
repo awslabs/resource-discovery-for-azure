@@ -520,7 +520,9 @@ function Compress-RdaReportArchive
     {
         $ParentPath = ([System.IO.DirectoryInfo]::new($SourceDir)).Parent.FullName
         $Prefix = if ($ParentPath.Length -eq 3) { $ParentPath } else { $ParentPath + [System.IO.Path]::DirectorySeparatorChar }
-        foreach ($Child in @(Get-ChildItem -LiteralPath $SourceDir -Recurse -ErrorAction Continue))
+        # -ErrorAction Stop: a folder it cannot list stops the zip, as in Compress-Archive,
+        # so a zip is never made without that folder's files.
+        foreach ($Child in @(Get-ChildItem -LiteralPath $SourceDir -Recurse -ErrorAction Stop))
         {
             $IsDirectory = $Child -is [System.IO.DirectoryInfo]
             if ($IsDirectory -and $Child.GetFiles().Count -ne 0) { continue }
@@ -584,6 +586,10 @@ function Compress-RdaReportArchive
             if ($null -eq $Disposable) { continue }
             try { $Disposable.Dispose() } catch { Write-Verbose ('Closing the partial archive failed: {0}' -f $_.Exception.Message) }
         }
-        if (Test-Path -LiteralPath $TempPath) { Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $TempPath)
+        {
+            Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $TempPath) { Write-Warning ("Compress-RdaReportArchive: could not remove the temporary file '{0}'; delete it by hand." -f $TempPath) }
+        }
     }
 }

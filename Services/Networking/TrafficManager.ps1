@@ -18,6 +18,7 @@ if ($Task -eq 'Processing')
                 'Subscription'                     = $Sub1.Name;
                 'ResourceGroup'                    = $1.RESOURCEGROUP;
                 'Name'                             = $1.NAME;
+                'Location'                         = $1.LOCATION;
                 'Status'                           = $Data.profilestatus;
                 'RoutingMethod'                    = $Data.trafficroutingmethod;
                 'MonitorStatus'                    = $Data.monitorconfig.profilemonitorstatus;

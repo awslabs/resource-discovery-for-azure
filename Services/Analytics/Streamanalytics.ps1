@@ -15,13 +15,14 @@ if ($Task -eq 'Processing')
             # These timestamps are optional on the Azure resource: a Stream Analytics
             # job that has never produced output (Created/Stopped, never started) returns
             # null for lastOutputEventTime / outputStartTime, and createdDate can be absent
-            # too. Get-Date on a null value throws "Cannot bind parameter 'Date' ... Cannot
-            # convert null to type System.DateTime", which previously killed the whole
-            # Stream Analytics collector for the subscription. Guard each one and emit $null
-            # when the source value is missing.
-            $CreateDate = if ([string]::IsNullOrEmpty($Data.createdDate)) { $null } else { (get-date $Data.createdDate).ToString("yyyy-MM-dd HH:mm:ss") }
-            $LastOutput = if ([string]::IsNullOrEmpty($Data.lastOutputEventTime)) { $null } else { (get-date $Data.lastOutputEventTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
-            $OutputStart = if ([string]::IsNullOrEmpty($Data.outputStartTime)) { $null } else { (get-date $Data.outputStartTime).ToString("yyyy-MM-dd HH:mm:ss:ffff") }
+            # too. Converting a null value to a date throws, which previously killed the
+            # whole Stream Analytics collector for the subscription. Guard each one and emit
+            # $null when the source value is missing. A value that is present but does
+            # not convert to a date is 'Unknown' rather than an exception.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $CreateDate = if ([string]::IsNullOrEmpty($Data.createdDate)) { $null } else { try { [datetime]::Parse($Data.createdDate, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal').ToString("yyyy-MM-dd HH:mm:ss") } catch { 'Unknown' } }
+            $LastOutput = if ([string]::IsNullOrEmpty($Data.lastOutputEventTime)) { $null } else { try { [datetime]::Parse($Data.lastOutputEventTime, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal').ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { 'Unknown' } }
+            $OutputStart = if ([string]::IsNullOrEmpty($Data.outputStartTime)) { $null } else { try { [datetime]::Parse($Data.outputStartTime, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal').ToString("yyyy-MM-dd HH:mm:ss:ffff") } catch { 'Unknown' } }
 
             $Obj = @{
                 'ID'                               = $1.id;

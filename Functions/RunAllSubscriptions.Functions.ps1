@@ -25,12 +25,55 @@
 function Exit-Wrapper
 {
     param([int]$Code = 0)
+    # After collection, a run that stops still puts aside a resume state it
+    # could not save (Set-NotSavedResumeStateAside; armed in the wrapper). Read
+    # without failing when not set yet (an early exit, under strict mode).
+    if ($Code -ne 0 -and (Get-Variable -Name RdaNotSavedOnExit -Scope Script -ValueOnly -ErrorAction SilentlyContinue) -and (Get-Variable -Name ResumeStateSaveFailed -Scope Script -ValueOnly -ErrorAction SilentlyContinue))
+    {
+        $script:RdaNotSavedOnExit = $false
+        $null = Set-NotSavedResumeStateAside -ResumeStateFile $script:RdaNotSavedStateFile
+    }
     if ($WrapperTranscriptStarted)
     {
         try { Stop-Transcript | Out-Null }
         catch { Write-Verbose ("Stop-Transcript on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
     }
     exit $Code
+}
+
+# Fail-safe rule for a resume state this run could not save (see the end of
+# Run-AllSubscriptions.ps1): puts the file aside as <file>.not-saved-<time> (a
+# rename, which works on a full disk), or with no file makes an empty one of
+# that name as a mark, and prints the FAILED (resume state not saved) banner.
+# Returns the path put aside or made, or '' when neither worked.
+function Set-NotSavedResumeStateAside
+{
+    param([Parameter(Mandatory = $true)][string]$ResumeStateFile)
+    $StateSetAside = ''
+    $Made = $false
+    $NotSaved = '{0}.not-saved-{1}' -f $ResumeStateFile, (Get-Date -Format 'yyyyMMddHHmmssfff')
+    try
+    {
+        $Made = -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
+        if (-not $Made) { Move-Item -LiteralPath $ResumeStateFile -Destination $NotSaved -ErrorAction Stop }
+        else { $null = New-Item -ItemType File -Path ([WildcardPattern]::Escape($NotSaved)) -ErrorAction Stop }
+        $StateSetAside = $NotSaved
+    }
+    catch { Write-Verbose ("Could not put aside {0}: {1}" -f $ResumeStateFile, $_.Exception.Message) }
+    Write-Host ""
+    Write-Host "============== FAILED (resume state not saved) ==============" -ForegroundColor Red
+    if ($StateSetAside)
+    {
+        Write-Host ("The resume state file {0} could not be written with this run's results (see the WARNING above), so {1}. No -Resume run skips a subscription on it: the next -Resume or plain run skips no subscription as done, and -ResumeFailedOnly refuses to run until a run saves the resume state again." -f $ResumeStateFile, $(if ($Made) { 'an empty file {0} is made as a mark' -f $StateSetAside } else { 'it is put aside as {0}' -f $StateSetAside })) -ForegroundColor Red
+        Write-Host ("Fix the cause (for example, free up disk space), then run again without -ResumeFailedOnly. A clean run removes {0}." -f $StateSetAside) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host ("The resume state file {0} could not be written at least once this run (see the WARNING above), so it may still list a subscription this run failed as completed: a -Resume or -ResumeFailedOnly run would skip it and carry its old report." -f $ResumeStateFile) -ForegroundColor Red
+        Write-Host "Fix the cause (for example, free up disk space), then run again without -Resume or -ResumeFailedOnly: it collects every subscription." -ForegroundColor Red
+    }
+    Write-Host "=============================================================" -ForegroundColor Red
+    return $StateSetAside
 }
 
 # Auto-tune parallelism to the current host. Detects logical CPU count and total
@@ -470,10 +513,10 @@ function Get-CompletedSubscriptionIds
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant)
         {
             Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $State.TenantID) -ForegroundColor Yellow
@@ -499,10 +542,10 @@ function Get-FailedAttempts
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.FailedAttempts) { return @() }
         return @($State.FailedAttempts)
@@ -513,23 +556,110 @@ function Get-FailedAttempts
     }
 }
 
+# Read the CompletedReports list out of the same resume-state file, the same way
+# as Get-FailedAttempts: an empty array if the file is absent, malformed, for a
+# different tenant, or written by an older version without the key. Entries are
+# returned as stored; Get-ResumeCarriedReports validates each one before use.
+function Get-CompletedReports
+{
+    param([string]$Path, [string]$Tenant)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    try
+    {
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        if ($State.TenantID -ne $Tenant) { return @() }
+        if ($null -eq $State.CompletedReports) { return @() }
+        return @($State.CompletedReports)
+    }
+    catch
+    {
+        return @()
+    }
+}
+
+# Read the NotReadableSubscriptionIds list (the subscriptions the up-front access
+# check skipped as not readable) out of the same resume-state file, the same way
+# as Get-FailedAttempts: an empty array if the file is absent, malformed, for a
+# different tenant, or written by a version without the key.
+function Get-NotReadableSubscriptionIds
+{
+    param([string]$Path, [string]$Tenant)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    try
+    {
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        if ($State.TenantID -ne $Tenant) { return @() }
+        if ($null -eq $State.NotReadableSubscriptionIds) { return @() }
+        return @($State.NotReadableSubscriptionIds)
+    }
+    catch
+    {
+        return @()
+    }
+}
+
+# True when the resume-state file for this tenant has no CompletedReports key at
+# all: it was written by a version that did not record report zips, so a -Resume
+# run has no report to carry for any subscription it lists as completed. A key
+# holding an empty list does not count. A file that is absent, malformed or for a
+# different tenant reads as false, as it reads as no state in Get-CompletedReports.
+function Test-ResumeStateWithoutReports
+{
+    param([string]$Path, [string]$Tenant)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try
+    {
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        if ($State.TenantID -ne $Tenant) { return $false }
+        return ($null -eq $State.PSObject.Properties['CompletedReports'])
+    }
+    catch
+    {
+        return $false
+    }
+}
+
 function Save-CompletedSubscriptionIds
 {
-    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @())
+    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @(), $Reports = @(), $NotReadable = @())
 
+    # One report record per completed id (the last one given wins), none for an
+    # id that is not completed. See New-CompletedReportRecord for the shape.
+    $LatestReports = Get-LatestCompletedReports -Reports $Reports
+    # Only the access check passes -NotReadable; every other save keeps the list
+    # this run gave for the same file (so a later save puts it right when the
+    # access check's own save did not reach the disk), else the list the file
+    # already holds.
+    $Given = Get-Variable -Name RdaNotReadableForState -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($PSBoundParameters.ContainsKey('NotReadable')) { $script:RdaNotReadableForState = @{ Path = $Path; Ids = @($NotReadable) } }
+    elseif ($null -ne $Given -and $Given.Path -eq $Path) { $NotReadable = @($Given.Ids) }
+    else { $NotReadable = Get-NotReadableSubscriptionIds -Path $Path -Tenant $Tenant }
     $State = [pscustomobject]@{
         TenantID                  = $Tenant
         CompletedSubscriptionIds  = @($Ids)
+        # The report zip each completed subscription wrote, so a -Resume run that
+        # skips the subscription can still put its report in the consolidated zip.
+        CompletedReports          = @(foreach ($Id in @($Ids)) { if (-not [string]::IsNullOrWhiteSpace($Id) -and $LatestReports.ContainsKey($Id)) { $LatestReports[$Id] } })
         # FailedAttempts is the canonical "what to retry" list. The wrapper
-        # appends/refreshes entries on every catch and removes them on the
-        # next successful attempt for the same sub, so the file is always
-        # an accurate snapshot of "subs that failed at least once and have
-        # not yet succeeded since".
+        # counts one more failed run of a sub before it collects it (the
+        # write-ahead count), sets the reason when it fails, and removes the
+        # entry once a good result of it is saved, so the file is always an
+        # accurate snapshot of "subs whose latest run has not been proven a
+        # success".
         FailedAttempts            = @($FailedAttempts)
+        # The subscriptions the up-front access check skipped as not readable,
+        # so a -ResumeFailedOnly run does not name them as never collected.
+        NotReadableSubscriptionIds = @(@($NotReadable) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
         LastUpdated               = (Get-Date).ToString('o')
     }
     try
     {
+        # Every error stops here: a write error of Set-Content (a full disk)
+        # does not stop by default, and must not reach the move below.
+        $ErrorActionPreference = 'Stop'
         # Atomic write: serialize to a sibling temp file, then swap it into place
         # with File.Move(overwrite). A move within the same volume is a rename,
         # which is atomic - so a crash / SIGKILL / disk-full DURING the write can
@@ -540,14 +670,86 @@ function Save-CompletedSubscriptionIds
         # a large tenant / Cloud Shell run that gets killed). The temp file shares
         # the target directory so the move stays on the same volume.
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8
+        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
+        # Each save writes the whole state this run holds, so one that reaches
+        # the disk makes the file right again after an earlier one failed.
+        $script:ResumeStateSaveFailed = $false
     }
     catch
     {
         Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
         Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
+        # The file on disk can now be older than this run's state (it can still
+        # list a subscription this run failed as completed); the wrapper says so
+        # at the end of the run.
+        $script:ResumeStateSaveFailed = $true
     }
+}
+
+# Whether the resume state file at $Path holds exactly the state given: the
+# completed ids, each retry-list entry with its count of failed runs and its
+# reason, and the report zip of each completed id. Save-CompletedSubscriptionIds
+# reports a failed write only as a warning, so this is read back before the
+# per-stream files that gave those records are removed.
+function Test-ResumeStateSaved
+{
+    param([string]$Path, [string]$Tenant, [string[]]$Ids = @(), $FailedAttempts = @(), $Reports = @())
+    $WantIds = @(@($Ids) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    $WantFailed = @(@($FailedAttempts) | Where-Object { $null -ne $_ })
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return ($WantIds.Count -eq 0 -and $WantFailed.Count -eq 0) }
+    $SavedIds = @(Get-CompletedSubscriptionIds -Path $Path -Tenant $Tenant | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    if (($SavedIds -join "`n") -ne ($WantIds -join "`n")) { return $false }
+    # Each retry entry whole, as JSON (so no field runs into the next): its id,
+    # count, time (as UTC round-trip text: the file reads it back as a date),
+    # reason and name, compared exactly. Merge-FailedAttempts picks the newest
+    # entry by its time, so an entry that differs only there is not saved.
+    $FailedKey = {
+        param($Entry)
+        $Field = { param($Name) if ($Entry.PSObject.Properties[$Name]) { $Entry.$Name } else { $null } }
+        $When = & $Field 'LastFailedAt'
+        if ($When -is [datetime]) { $When = $When.ToUniversalTime().ToString('o') }
+        elseif ($null -ne $When)
+        {
+            $Parsed = [datetime]::MinValue
+            if ([datetime]::TryParse([string]$When, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$Parsed)) { $When = $Parsed.ToUniversalTime().ToString('o') }
+            else { $When = [string]$When }
+        }
+        [ordered]@{ Id = [string](& $Field 'Id'); Attempts = [string](& $Field 'Attempts'); LastFailedAt = $When; Reason = [string](& $Field 'Reason'); Name = [string](& $Field 'Name') } | ConvertTo-Json -Compress
+    }
+    $SavedFailed = @(Get-FailedAttempts -Path $Path -Tenant $Tenant | Where-Object { $null -ne $_ } | ForEach-Object { & $FailedKey $_ } | Sort-Object -CaseSensitive)
+    if (($SavedFailed -join "`n") -cne (@($WantFailed | ForEach-Object { & $FailedKey $_ } | Sort-Object -CaseSensitive) -join "`n")) { return $false }
+    $WantReports = Get-LatestCompletedReports -Reports $Reports
+    $SavedReports = Get-LatestCompletedReports -Reports @(Get-CompletedReports -Path $Path -Tenant $Tenant)
+    foreach ($Id in $WantIds)
+    {
+        if (-not $WantReports.ContainsKey($Id)) { continue }
+        if (-not $SavedReports.ContainsKey($Id) -or [string]$SavedReports[$Id].Zip -ne [string]$WantReports[$Id].Zip) { return $false }
+    }
+    return $true
+}
+
+# A per-stream resume state file that could not be read is renamed aside (to
+# <name>.unreadable-<time>), so no stream of a later run writes over it and no
+# later run folds it in again, and it is named in a warning with what to do.
+# Returns the path it is now at: the old path when it cannot be renamed, which
+# the warning then says.
+function Move-UnreadableStreamFile
+{
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$Reason, [switch]$Interrupted)
+    $Aside = '{0}.unreadable-{1}' -f $Path, (Get-Date -Format 'yyyyMMddHHmmssfff')
+    $Of = if ($Interrupted) { ' of an interrupted run' } else { '' }
+    # One full stop after the reason, whether or not it ends with one.
+    $Reason = ([string]$Reason).TrimEnd('.', ' ') + '.'
+    try { Move-Item -LiteralPath $Path -Destination $Aside -ErrorAction Stop }
+    catch
+    {
+        # Left under its own name: the caller stops, or keeps the state.
+        Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} It could not be renamed aside either: {3}" -f $Path, $Of, $Reason, $_.Exception.Message) -ForegroundColor Yellow
+        return $Path
+    }
+    Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {3}: fix it and rename it back to {0} for the next -Resume to fold it in, or delete it." -f $Path, $Of, $Reason, $Aside) -ForegroundColor Yellow
+    return $Aside
 }
 
 # Update an in-memory FailedAttempts list to record (or refresh) one sub's
@@ -572,7 +774,7 @@ function Add-FailedAttempt
     if ($null -ne $ExistingEntry)
     {
         $List = @($List | Where-Object { $_.Id -ne $Id })
-        $Attempts = if ($ExistingEntry.Attempts) { [int]$ExistingEntry.Attempts + 1 } else { 2 }
+        $Attempts = (Get-FailedAttemptCount -Entry $ExistingEntry) + 1
     }
     else
     {
@@ -586,6 +788,48 @@ function Add-FailedAttempt
         Attempts     = $Attempts
     }
     return $List
+}
+
+# Write-ahead count (see the wrapper): a sub's failed-run count is raised before
+# it is collected, so a failure only sets the reason and time. -AtLeast raises
+# the count to at least that many runs; a sub with no entry gets one.
+function Set-FailedAttemptReason
+{
+    param([object]$Existing, [string]$Id, [string]$Name, [string]$Reason, [int]$AtLeast = 1)
+    $List = @($Existing | Where-Object { $_ })
+    $Entry = $List | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    $Count = if ($null -ne $Entry) { Get-FailedAttemptCount -Entry $Entry } else { 0 }
+    if ($Count -lt $AtLeast) { $Count = $AtLeast }
+    if ([string]::IsNullOrEmpty($Name) -and $null -ne $Entry) { $Name = [string]$Entry.Name }
+    $List = @($List | Where-Object { $_.Id -ne $Id })
+    $List += [pscustomobject]@{
+        Id           = $Id
+        Name         = $Name
+        LastFailedAt = (Get-Date).ToString('o')
+        Reason       = $Reason
+        Attempts     = $Count
+    }
+    return $List
+}
+
+# The write-ahead step of the fail-safe rule for one sub, before it is collected
+# in this process: its earlier completion and report record leave the saved
+# state, and one more failed run is added, then the state is saved and read
+# back. Returns the new lists and Saved = $false when the file on disk does not
+# hold them (the caller then does not collect the sub).
+function Save-WriteAheadAttempt
+{
+    param([string]$Path, [string]$Tenant, [string]$Id, [string]$Name, [object]$CompletedIds, [object]$FailedAttempts, [object]$Reports)
+    $Ids = @(@($CompletedIds) | Where-Object { $_ -and [string]$_ -ne $Id })
+    $Recs = @(@($Reports) | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Id })
+    $Fails = Add-FailedAttempt -Existing $FailedAttempts -Id $Id -Name $Name -Reason 'its collection started and no result was saved'
+    Save-CompletedSubscriptionIds -Path $Path -Tenant $Tenant -Ids $Ids -FailedAttempts $Fails -Reports $Recs
+    return [pscustomobject]@{
+        Saved          = [bool](Test-ResumeStateSaved -Path $Path -Tenant $Tenant -Ids $Ids -FailedAttempts $Fails -Reports $Recs)
+        CompletedIds   = $Ids
+        FailedAttempts = $Fails
+        Reports        = $Recs
+    }
 }
 
 # Remove a sub's FailedAttempts entry once it has succeeded on a retry, so
@@ -607,7 +851,7 @@ function Remove-FailedAttempt
 # than iterating 0..($StreamCount-1). $StreamCount reflects THIS run's
 # -ParallelStreams value; if an earlier interrupted run used a LARGER value,
 # its higher-numbered per-stream files would otherwise never be read (losing
-# their Completed/FailedAttempts data) nor cleaned up (leaving them as
+# their failures and write-ahead counts) nor cleaned up (leaving them as
 # orphans). -Force is required because these filenames are dot-prefixed and
 # Get-ChildItem hides dot-files by default on Unix. Pulled out to its own
 # function purely so it can be exercised by a Pester test against a temp
@@ -618,7 +862,7 @@ function Get-StreamResumeStateFiles
         [Parameter(Mandatory = $true)][string]$InventoryRoot,
         [Parameter(Mandatory = $true)][string]$Tenant
     )
-    return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+    return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
 }
 
 # Reconcile FailedAttempts entries gathered from multiple streams (plus any
@@ -660,6 +904,319 @@ function Merge-FailedAttempts
         $Reconciled += $Best
     }
     return $Reconciled
+}
+
+# For the start-up folds of recovered state (a kept per-stream file, a state put
+# aside as not saved): the entries are counts of failed runs that only grow, so
+# per sub the one with the most failed runs wins, and the time only breaks a tie
+# (a clock moved back cannot undo a counted run). An entry for a completed id is
+# dropped, as Merge-FailedAttempts does.
+function Merge-RecoveredFailedAttempts
+{
+    param([object]$ExistingFailedAttempts, [object]$RecoveredFailedAttempts, [object]$CompletedIds)
+    $Done = @(@($CompletedIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $Result = @()
+    foreach ($g in @(@(@($ExistingFailedAttempts) + @($RecoveredFailedAttempts)) | Where-Object { $_ } | Group-Object -Property Id))
+    {
+        if ($Done -contains [string]$g.Name) { continue }
+        $Result += $g.Group | Sort-Object -Property @{ Expression = { Get-FailedAttemptCount -Entry $_ } ; Descending = $true }, @{ Expression = { try { [datetime]$_.LastFailedAt } catch { [datetime]::MinValue } } ; Descending = $true } | Select-Object -First 1
+    }
+    return $Result
+}
+
+# The eligible subscriptions that no run has completed and that are not on the
+# retry list: after an interrupted run, the ones it never reached.
+# -ResumeFailedOnly retries only the retry list, so it does not collect these;
+# -Resume does. A subscription the up-front access check skipped as not readable
+# (-NotReadableIds) is left out: the run that skipped it already listed it, and
+# a later run checks it again.
+function Get-NotCollectedSubscriptions
+{
+    param([object]$Eligible, [object]$CompletedIds, [object]$RetryIds, [object]$NotReadableIds)
+    $Done = @(@($CompletedIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $Retry = @(@($RetryIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $NotReadable = @(@($NotReadableIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    return @(@($Eligible) | Where-Object { $null -ne $_ -and $Done -notcontains [string]$_.Id -and $Retry -notcontains [string]$_.Id -and $NotReadable -notcontains [string]$_.Id })
+}
+
+# Name the subscriptions Get-NotCollectedSubscriptions returned on a
+# -ResumeFailedOnly run, which keeps the resume state for them. Prints nothing
+# for an empty list.
+function Write-NotCollectedSummary
+{
+    param([object]$NotCollected, [string]$ResumeStateFile)
+    $List = @(@($NotCollected) | Where-Object { $null -ne $_ })
+    if ($List.Count -eq 0) { return }
+    Write-Host ("Not Collected:           {0} ({1}) - no run has completed these and -ResumeFailedOnly retries only the retry list" -f $List.Count, (@($List | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
+    Write-Host ("Resume State:            {0} (kept)" -f $ResumeStateFile) -ForegroundColor Yellow
+    Write-Host "Re-run with -Resume to collect them; it skips the subscriptions already completed." -ForegroundColor Yellow
+}
+
+# The number of failed runs a retry-list entry records (its Attempts): one more
+# for each run that failed the subscription, removed when it completes. An entry
+# without a whole number of at least 1 there (written by hand, or damaged) counts
+# as one failed run, so it is retried as before instead of stopping the run.
+function Get-FailedAttemptCount
+{
+    param([object]$Entry)
+    $Count = 0
+    # Read only when it is there, so an entry without it counts as one under
+    # Set-StrictMode too.
+    if ($null -ne $Entry -and $Entry.PSObject.Properties['Attempts'] -and [int]::TryParse([string]$Entry.Attempts, [ref]$Count) -and $Count -ge 1) { return $Count }
+    return 1
+}
+
+# The retry-list entries of the subscriptions that failed $RetryLimit runs in a
+# row. -Resume and -ResumeFailedOnly do not collect these; a run without either
+# still does, and only such a run takes them off the retry list.
+function Get-RetryLimitedAttempts
+{
+    param([object]$FailedAttempts)
+    $RetryLimit = 3
+    return @(@($FailedAttempts) | Where-Object { $null -ne $_ -and (Get-FailedAttemptCount -Entry $_) -ge $RetryLimit })
+}
+
+# Name the retry-list entries Get-RetryLimitedAttempts returned at the end of a
+# run, with their count and last reason, as incomplete. Prints nothing for an
+# empty list.
+function Write-RetryLimitSummary
+{
+    param([object]$RetryLimited, [string]$TenantID, [string[]]$ExcludedIds = @(), [string[]]$NotListedIds = @(), [string[]]$NotReadableIds = @())
+    $List = @(@($RetryLimited) | Where-Object { $null -ne $_ })
+    if ($List.Count -eq 0) { return }
+    Write-Host ("Retry Limit Reached:     {0} ({1}) - incomplete; -Resume and -ResumeFailedOnly do not collect these" -f $List.Count, (@($List | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
+    foreach ($Entry in $List)
+    {
+        Write-Host ("  - {0} ({1}): failed {2} runs in a row; last reason: {3}" -f $Entry.Name, $Entry.Id, (Get-FailedAttemptCount -Entry $Entry), $Entry.Reason) -ForegroundColor Yellow
+    }
+    # A subscription that can never be collected would keep every run at exit
+    # 2, so the way to start over is named for all of them.
+    Write-Host ("  To start over with an empty retry list instead, delete the resume state files .resume-state-{0}.json and .resume-state-{0}-stream-*.json in the inventory folder: the next run collects every subscription." -f $TenantID) -ForegroundColor Yellow
+    # A subscription missing from a listing that came back with warnings or
+    # errors is kept until a complete listing: no run can tell whether it is
+    # gone (then the run drops it) or only hidden (then a run without -Resume
+    # collects it), so the advice is to fix the listing first.
+    $NotListed = @($List | Where-Object { @($NotListedIds) -contains [string]$_.Id })
+    if ($NotListed.Count -gt 0)
+    {
+        Write-Host ("  {0} not in the subscription list, which came back with warnings or errors (printed at the start of the run). Fix those until 'Get-AzSubscription -TenantId {1}' lists the tenant without them, then run again: the run drops a subscription that is gone from the retry list, and collects one that is listed again, for example:" -f ((@($NotListed | ForEach-Object { $_.Name }) -join ', ') + $(if ($NotListed.Count -eq 1) { ' is' } else { ' are' })), $TenantID) -ForegroundColor Yellow
+        Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow
+    }
+    $List = @($List | Where-Object { @($NotListedIds) -notcontains [string]$_.Id })
+    if ($List.Count -eq 0) { return }
+    # A subscription this run's access check skipped stays out of every run until
+    # the identity can read it, so the advice names that first.
+    $NotReadable = @($List | Where-Object { @($NotReadableIds) -contains [string]$_.Id })
+    if ($NotReadable.Count -gt 0)
+    {
+        # The check skips a subscription it found no role on, and one whose
+        # probe stayed inconclusive; its own lines say which and what to do.
+        Write-Host ("  {0} skipped by the access check at the start of this run (the reason and the fix are printed there). Once the check can read {1}, start a run without -Resume or -ResumeFailedOnly, for example:" -f ((@($NotReadable | ForEach-Object { $_.Name }) -join ', ') + $(if ($NotReadable.Count -eq 1) { ' was' } else { ' were' })), $(if ($NotReadable.Count -eq 1) { 'it' } else { 'them' })) -ForegroundColor Yellow
+        Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow
+    }
+    $List = @($List | Where-Object { @($NotReadableIds) -notcontains [string]$_.Id })
+    if ($List.Count -eq 0) { return }
+    # A subscription that is not Enabled is left out of every run without
+    # -IncludeDisabled, so the advice for it adds that switch.
+    $NotEnabled = @($List | Where-Object { @($ExcludedIds) -contains [string]$_.Id })
+    if ($NotEnabled.Count -gt 0)
+    {
+        Write-Host ("  To try them again, start a run without -Resume or -ResumeFailedOnly; {0} not Enabled, so add -IncludeDisabled, for example:" -f ((@($NotEnabled | ForEach-Object { $_.Name }) -join ', ') + $(if ($NotEnabled.Count -eq 1) { ' is' } else { ' are' }))) -ForegroundColor Yellow
+        Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0} -IncludeDisabled" -f $TenantID) -ForegroundColor Yellow
+        return
+    }
+    Write-Host "  To try them again, start a run without -Resume or -ResumeFailedOnly (it collects every subscription), for example:" -ForegroundColor Yellow
+    Write-Host ("    ./Run-AllSubscriptions.ps1 -TenantID {0}" -f $TenantID) -ForegroundColor Yellow
+}
+
+# The resume-state record for one completed subscription's report zip:
+# { Id, Name, Zip, Obfuscated }, where Zip is the path relative to the inventory
+# root (so the state still resolves if the root is mounted elsewhere later) and
+# Obfuscated is the -Obfuscate setting the report was written with. Returns $null
+# when there is no zip on disk at $ZipPath or it is not under the inventory root;
+# such a subscription is then reported by a later -Resume run instead of carried.
+function New-CompletedReportRecord
+{
+    param(
+        [string]$InventoryRoot,
+        [string]$Id,
+        [string]$Name,
+        [string]$ZipPath,
+        [bool]$Obfuscated
+    )
+    if ([string]::IsNullOrWhiteSpace($InventoryRoot) -or [string]::IsNullOrWhiteSpace($Id) -or [string]::IsNullOrWhiteSpace($ZipPath)) { return $null }
+    if (-not (Test-Path -LiteralPath $ZipPath -PathType Leaf)) { return $null }
+    try
+    {
+        $Rel = [System.IO.Path]::GetRelativePath([System.IO.Path]::GetFullPath($InventoryRoot), [System.IO.Path]::GetFullPath($ZipPath))
+    }
+    catch
+    {
+        return $null
+    }
+    if ([System.IO.Path]::IsPathRooted($Rel) -or (@($Rel -split '[\\/]') -contains '..')) { return $null }
+    return [pscustomobject]@{
+        Id         = $Id
+        Name       = $Name
+        Zip        = $Rel
+        Obfuscated = $Obfuscated
+    }
+}
+
+# Index report records by subscription id, the last record for an id winning.
+# Entries that are not objects with a non-empty string Id (a hand-edited or
+# corrupted state file) are ignored, so they read as "no record" for that id.
+function Get-LatestCompletedReports
+{
+    param([object]$Reports)
+    $ById = @{}
+    foreach ($Report in @($Reports))
+    {
+        if ($null -eq $Report -or $Report -is [string] -or $Report -is [ValueType]) { continue }
+        $IdProp = $Report.PSObject.Properties['Id']
+        if ($null -eq $IdProp -or $IdProp.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($IdProp.Value)) { continue }
+        $ById[$IdProp.Value] = $Report
+    }
+    return $ById
+}
+
+# Decide, for each subscription a -Resume run skipped because an earlier run
+# completed it, whether that earlier run's report zip can go into this run's
+# consolidated zip. A record is carried only when its path is a relative path
+# inside the inventory root, names a .zip that is not a de-obfuscated
+# (*_revealed*) copy, exists, opens as a zip with at least one entry, and was
+# written with the same -Obfuscate setting as this run, so one bundle never mixes
+# obfuscated and real identifiers. Everything else is returned under Missing with
+# the reason. Cost: one file-exists check and one zip-directory read per skipped
+# subscription; no Azure calls. Returns { Carried = @({ Id, Name, Zip, Folder }),
+# Missing = @({ Id, Name, Reason }) }, where Zip is the full path.
+function Get-ResumeCarriedReports
+{
+    param(
+        [object]$SkippedSubscriptions = @(),
+        [object]$Reports = @(),
+        [string]$InventoryRoot,
+        [bool]$Obfuscated = $false
+    )
+    $ById = Get-LatestCompletedReports -Reports $Reports
+    $Carried = @()
+    $Missing = @()
+    $SeenIds = @{}
+    foreach ($Sub in @($SkippedSubscriptions))
+    {
+        if ($null -eq $Sub -or [string]::IsNullOrWhiteSpace([string]$Sub.Id)) { continue }
+        $Id = [string]$Sub.Id
+        if ($SeenIds.ContainsKey($Id)) { continue }
+        $SeenIds[$Id] = $true
+
+        $Record = if ($ById.ContainsKey($Id)) { $ById[$Id] } else { $null }
+        $Reason = $null
+        $FullPath = $null
+        if ($null -eq $Record)
+        {
+            $Reason = 'the resume state records no report zip for it (state written by an older version of this tool)'
+        }
+        else
+        {
+            $Zip = $Record.PSObject.Properties['Zip']
+            $Obf = $Record.PSObject.Properties['Obfuscated']
+            if ($null -eq $Zip -or $Zip.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Zip.Value))
+            {
+                $Reason = 'its report path in the resume state is missing or not text'
+            }
+            elseif ($null -eq $Obf -or $Obf.Value -isnot [bool])
+            {
+                $Reason = 'its -Obfuscate setting in the resume state is missing or not true/false'
+            }
+            else
+            {
+                $Rel = $Zip.Value
+                try
+                {
+                    $Unsafe = [System.IO.Path]::IsPathRooted($Rel) -or (@($Rel -split '[\\/]') -contains '..')
+                    if (-not $Unsafe) { $FullPath = [System.IO.Path]::GetFullPath((Join-Path $InventoryRoot $Rel)) }
+                }
+                catch
+                {
+                    $Unsafe = $true
+                }
+                if ($Unsafe)
+                {
+                    $Reason = 'its report path in the resume state is not a path inside the inventory root'
+                }
+                elseif ([System.IO.Path]::GetExtension($FullPath) -ne '.zip' -or [System.IO.Path]::GetFileName($FullPath) -like '*_revealed*')
+                {
+                    $Reason = ('its report path in the resume state is not a report zip: {0}' -f $Rel)
+                }
+                elseif (-not (Test-Path -LiteralPath $FullPath -PathType Leaf))
+                {
+                    $Reason = ('its report zip is no longer on disk: {0}' -f $Rel)
+                }
+                else
+                {
+                    $EntryCount = -1
+                    try
+                    {
+                        Add-Type -AssemblyName System.IO.Compression.FileSystem
+                        $Archive = [System.IO.Compression.ZipFile]::OpenRead($FullPath)
+                        try { $EntryCount = $Archive.Entries.Count }
+                        finally { $Archive.Dispose() }
+                    }
+                    catch
+                    {
+                        Write-Verbose ("Could not open {0} as a zip: {1}" -f $FullPath, $_.Exception.Message)
+                    }
+                    if ($EntryCount -lt 0)
+                    {
+                        $Reason = ('its report zip cannot be opened as a zip: {0}' -f $Rel)
+                    }
+                    elseif ($EntryCount -eq 0)
+                    {
+                        $Reason = ('its report zip is empty: {0}' -f $Rel)
+                    }
+                    elseif ($Obf.Value -ne $Obfuscated)
+                    {
+                        $WasText = if ($Obf.Value) { 'with' } else { 'without' }
+                        $NowText = if ($Obfuscated) { 'with' } else { 'without' }
+                        $Reason = ('its report was written {0} -Obfuscate and this run is {1} it, and one bundle never mixes the two: {2}' -f $WasText, $NowText, $Rel)
+                    }
+                }
+            }
+        }
+
+        if ($null -eq $Reason)
+        {
+            $Carried += [pscustomobject]@{
+                Id     = $Id
+                Name   = [string]$Sub.Name
+                Zip    = $FullPath
+                Folder = Split-Path -Path (Split-Path -Path $FullPath -Parent) -Leaf
+            }
+        }
+        else
+        {
+            $Missing += [pscustomobject]@{ Id = $Id; Name = [string]$Sub.Name; Reason = $Reason }
+        }
+    }
+    return [pscustomobject]@{ Carried = $Carried; Missing = $Missing }
+}
+
+# This run's per-subscription zips plus the zips carried from an earlier run
+# (Get-ResumeCarriedReports), each file once, this run's first. Used by both the
+# output verification and the consolidation so they always count the same set.
+function Join-CarriedReportZips
+{
+    param([object]$Zips = @(), [object]$CarriedReports = @())
+    $Seen = @{}
+    $Result = @()
+    $CarriedItems = @(foreach ($C in @($CarriedReports)) { if ($null -ne $C -and -not [string]::IsNullOrWhiteSpace([string]$C.Zip)) { Get-Item -LiteralPath $C.Zip -ErrorAction SilentlyContinue } })
+    foreach ($Item in @(@($Zips) + $CarriedItems))
+    {
+        if ($null -eq $Item -or $Seen.ContainsKey($Item.FullName)) { continue }
+        $Seen[$Item.FullName] = $true
+        $Result += $Item
+    }
+    return $Result
 }
 
 function Get-AzCliSignedInTenant
@@ -751,8 +1308,18 @@ function Get-WrapperExitCode
 {
     param(
         [bool]$AuthSkipped,
-        [bool]$CollectorsFailed
+        [bool]$CollectorsFailed,
+        # A -Resume run skipped a subscription whose earlier report zip could not
+        # be carried into the consolidated zip, so that report is missing from it.
+        # Same meaning as the verification gap (2) and takes precedence over 3-5:
+        # a missing report is worse than an incomplete one.
+        [bool]$ReportsMissing = $false,
+        # A subscription failed this run (it is listed under Subscriptions
+        # Failed), so its report is missing from the consolidated zip: the same
+        # meaning as a missing report, so 2, and the run is never reported as clean.
+        [bool]$SubscriptionsFailed = $false
     )
+    if ($ReportsMissing -or $SubscriptionsFailed) { return 2 }
     if ($AuthSkipped -and $CollectorsFailed) { return 5 }
     if ($AuthSkipped) { return 3 }
     if ($CollectorsFailed) { return 4 }
@@ -769,40 +1336,53 @@ function Write-Stream
 
 function Read-StreamState
 {
-    param([string]$Path)
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @() } }
+    # $RunId: a file another run's worker wrote (another RunId) reads as empty.
+    param([string]$Path, [string]$RunId = '')
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @(); Reports = @() } }
     try
     {
-        $Obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $Obj = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not [string]::IsNullOrEmpty($RunId) -and [string]$Obj.RunId -ne $RunId) { return @{ Completed = @(); Failed = @(); Reports = @() } }
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
             # no FailedAttempts key, so default to @().
             Failed    = if ($null -eq $Obj.FailedAttempts) { @() } else { @($Obj.FailedAttempts) }
+            # Same for Reports (see New-CompletedReportRecord).
+            Reports   = if ($null -eq $Obj.Reports) { @() } else { @($Obj.Reports) }
         }
     }
     catch
     {
         Write-Stream ("WARNING: could not read stream state at {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
-        return @{ Completed = @(); Failed = @() }
+        return @{ Completed = @(); Failed = @(); Reports = @() }
     }
 }
 
 function Write-StreamState
 {
-    param([string]$Path, [string[]]$Completed, $FailedAttempts = @())
+    param([string]$Path, [string[]]$Completed, $FailedAttempts = @(), $Reports = @())
     try
     {
         @{
+            # The run this file belongs to, so the parent merges only its own run's files.
+            RunId          = $RunId
             Tenant         = $TenantID
             StreamId       = $StreamId
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
-        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+            Reports        = @($Reports)
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$Path.tmp" -Encoding utf8 -ErrorAction Stop
+        # Swapped into place in one rename, as Save-CompletedSubscriptionIds
+        # does: a stream stopped during the write (Ctrl+C, a killed process)
+        # leaves the file it had, never one cut short, which the next run could
+        # not read and would put aside with the failures it holds.
+        [System.IO.File]::Move("$Path.tmp", $Path, $true)
     }
     catch
     {
         Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
+        Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -923,6 +1503,9 @@ function Get-RunSummaryLogContent
         $CollectorFailures = @(),
         $MetricsFailedSubs = @(),
         $ConsumptionFailedSubs = @(),
+        # Retry-list entries past the retry limit ({ Name; Id; Attempts; Reason }),
+        # from Get-RetryLimitedAttempts.
+        $RetryLimited = @(),
         [int]$ConsumptionRecordCount = 0,
         # Host size and resolved parallelism (run-environment metadata, not
         # identifiers). Emitted in both modes. Defaults mean "not supplied" and
@@ -955,6 +1538,7 @@ function Get-RunSummaryLogContent
     $Collector = @(@($CollectorFailures) | Where-Object { $null -ne $_ })
     $Metrics = @(@($MetricsFailedSubs) | Where-Object { $null -ne $_ })
     $Consumption = @(@($ConsumptionFailedSubs) | Where-Object { $null -ne $_ })
+    $Limited = @(@($RetryLimited) | Where-Object { $null -ne $_ })
 
     $Lines = [System.Collections.Generic.List[string]]::new()
     $Lines.Add('Resource Discovery for Azure - run summary')
@@ -1061,6 +1645,7 @@ function Get-RunSummaryLogContent
     $Lines.Add(('  Skipped   : {0} (already completed / resume)' -f $Skipped))
     $Lines.Add(('  Processed : {0}' -f $Processed))
     $Lines.Add(('  Failed    : {0}' -f $Failed.Count))
+    $Lines.Add(('  Retry limit reached : {0} (incomplete; -Resume and -ResumeFailedOnly do not collect these)' -f $Limited.Count))
     $Lines.Add(('  0 resources - no access   : {0}' -f $NoAccess.Count))
     $Lines.Add(('  0 resources - empty       : {0}' -f $Empty.Count))
     $Lines.Add(('  0 resources - undetermined: {0}' -f $Undetermined.Count))
@@ -1084,6 +1669,12 @@ function Get-RunSummaryLogContent
             $Lines.Add('')
             $Lines.Add('Failed subscriptions (detail):')
             foreach ($FailedSub in $Failed) { $Lines.Add(('  - {0} ({1})' -f [string]$FailedSub.Name, [string]$FailedSub.Id)) }
+        }
+        if ($Limited.Count -gt 0)
+        {
+            $Lines.Add('')
+            $Lines.Add('Retry limit reached (detail; to try them again, start a run without -Resume or -ResumeFailedOnly):')
+            foreach ($LimitedSub in $Limited) { $Lines.Add(('  - {0} ({1}): failed {2} runs in a row; last reason: {3}' -f [string]$LimitedSub.Name, [string]$LimitedSub.Id, (Get-FailedAttemptCount -Entry $LimitedSub), [string]$LimitedSub.Reason)) }
         }
         if ($NoAccess.Count -gt 0)
         {

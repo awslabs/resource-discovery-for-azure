@@ -75,26 +75,33 @@ BeforeAll {
             {
                 throw 'StartTime and EndTime must be DateTime values.'
             }
+            # Each request's metric names, one line per request, when the test asks for them.
+            if ($env:RDA_METRICS_CALL_LOG) { [System.IO.File]::AppendAllText($env:RDA_METRICS_CALL_LOG, ((@($MetricName) -join ';') + [Environment]::NewLine)) }
             $LookbackDays = [int][math]::Round(($EndTime - $StartTime).TotalDays)
-            $Seed = 17
-            foreach ($Char in ('{0}|{1}|{2}|{3}|{4}' -f $ResourceId, $MetricName, $AggregationType, $TimeGrain, $LookbackDays).ToCharArray())
+            # One result per requested metric name, as Azure Monitor answers a request
+            # that names several metrics; each result's data depends on its own name only.
+            foreach ($Name in @($MetricName))
             {
-                $Seed = ($Seed * 31 + [int]$Char) % 1000003
-            }
-
-            # 0 to 4 points; some points carry no values, as Azure Monitor returns for gaps.
-            $Points = [System.Collections.Generic.List[object]]::new()
-            for ($Index = 0; $Index -lt ($Seed % 5); $Index++)
-            {
-                if ((($Seed + $Index) % 4) -eq 0)
+                $Seed = 17
+                foreach ($Char in ('{0}|{1}|{2}|{3}|{4}' -f $ResourceId, $Name, $AggregationType, $TimeGrain, $LookbackDays).ToCharArray())
                 {
-                    $Points.Add([PSCustomObject]@{ Average = $null; Maximum = $null; Minimum = $null; Total = $null; Count = $null })
-                    continue
+                    $Seed = ($Seed * 31 + [int]$Char) % 1000003
                 }
-                $Value = [double](($Seed + 37 * $Index) % 100)
-                $Points.Add([PSCustomObject]@{ Average = $Value; Maximum = $Value + 2; Minimum = $Value / 2; Total = $Value * 60; Count = [double]($Value % 13) })
+
+                # 0 to 4 points; some points carry no values, as Azure Monitor returns for gaps.
+                $Points = [System.Collections.Generic.List[object]]::new()
+                for ($Index = 0; $Index -lt ($Seed % 5); $Index++)
+                {
+                    if ((($Seed + $Index) % 4) -eq 0)
+                    {
+                        $Points.Add([PSCustomObject]@{ Average = $null; Maximum = $null; Minimum = $null; Total = $null; Count = $null })
+                        continue
+                    }
+                    $Value = [double](($Seed + 37 * $Index) % 100)
+                    $Points.Add([PSCustomObject]@{ Average = $Value; Maximum = $Value + 2; Minimum = $Value / 2; Total = $Value * 60; Count = [double]($Value % 13) })
+                }
+                [PSCustomObject]@{ Name = [PSCustomObject]@{ Value = $Name }; Data = $Points.ToArray() }
             }
-            return [PSCustomObject]@{ Data = $Points.ToArray() }
         }
     }
 
@@ -251,8 +258,21 @@ Describe 'Metrics.ps1 metric request definitions' {
     BeforeAll {
         $script:RdaMetricsTestHook.StopAfterDefinitions = $false
         $script:OutputDirectory = Join-Path $TestDrive 'fixture-output'
-        Invoke-MetricsScript -Resources (New-MetricsFixture) -OutputDirectory $script:OutputDirectory
+        $script:CallLog = Join-Path $TestDrive 'metric-calls.txt'
+        $env:RDA_METRICS_CALL_LOG = $script:CallLog
+        try { Invoke-MetricsScript -Resources (New-MetricsFixture) -OutputDirectory $script:OutputDirectory }
+        finally { Remove-Item Env:RDA_METRICS_CALL_LOG -ErrorAction SilentlyContinue }
         $script:Definitions = @($script:RdaMetricsTestHook.Definitions)
+    }
+
+    It 'sends one request per group of definitions that share a resource, window, time grain and aggregation' {
+        # The stand-in answers every name of a grouped request, so no metric is asked for on its own.
+        $Groups = @($script:Definitions | ForEach-Object {
+                '{0}|{1}|{2}|{3}|{4}' -f $_.Id, ([datetime]$_.StartTime).Ticks, ([datetime]$_.EndTime).Ticks, ([timespan]::Parse([string]$_.Interval, [cultureinfo]::InvariantCulture)).Ticks, $_.Aggregation
+            } | Sort-Object -Unique)
+        $Calls = @(Get-Content -LiteralPath $script:CallLog)
+        $Calls.Count | Should -Be $Groups.Count
+        @($Calls | ForEach-Object { $_ -split ';' }).Count | Should -Be $script:Definitions.Count
     }
 
     It 'builds one definition per metric for every resource type it covers' {

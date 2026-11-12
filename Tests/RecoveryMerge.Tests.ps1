@@ -532,4 +532,40 @@ Describe 'Merge-RecoveryData dictionary merge and packaging' {
         (Get-Content -Path $GapInvPath -Raw) | Should -Be $GapBefore -Because 'the merge writes to OutputPath only, never back into the gap bundle'
         (Get-Content -Path $RecInvPath -Raw) | Should -Be $RecBefore -Because 'the recovery bundle is read-only input'
     }
+
+    It 'zips only this bundle''s files when -OutputPath already holds another report''s merge' {
+        $First = New-Case
+        $Second = New-Case
+        $Control = New-Case
+        $OtherBase = 'OtherReport_20260103_000000'
+        $SharedOutput = Join-Path $script:TmpRoot ('shared_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $GapDict = [ordered]@{ GeneratedAt = '2026-01-01 00:00:00'; ResourceIdMap = [ordered]@{ 'prod_tokA' = '/id/a' } }
+
+        # A plain report merged first, then an obfuscated report merged into the same folder.
+        New-Bundle -Dir $First.Gap -Base $OtherBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'web-prod-01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["plain"]}' }
+        New-Bundle -Dir $First.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app-prod-01')) })
+        New-Bundle -Dir $Second.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["obf"]}' } -Dictionary $GapDict
+        New-Bundle -Dir $Second.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; AppServices = @((New-Record 'app01')) }) -Dictionary $GapDict
+
+        $null = Merge-RecoveryData -GapBundlePath $First.Gap -RecoveryBundlePath $First.Recovery -OutputPath $SharedOutput -WarningAction SilentlyContinue
+        $Result = Merge-RecoveryData -GapBundlePath $Second.Gap -RecoveryBundlePath $Second.Recovery -OutputPath $SharedOutput -WarningAction SilentlyContinue
+        $Fresh = Merge-RecoveryData -GapBundlePath $Second.Gap -RecoveryBundlePath $Second.Recovery -OutputPath $Control.Output -WarningAction SilentlyContinue
+
+        $Entries = Get-ZipEntryNames -ZipPath $Result.OutputZip
+        ($Entries | Where-Object { $_ -like "*$OtherBase*" }) | Should -BeNullOrEmpty -Because 'the earlier merge''s inventory and metrics in the same folder belong to another report'
+        ($Entries | Sort-Object) | Should -Be (Get-ZipEntryNames -ZipPath $Fresh.OutputZip | Sort-Object) -Because 'a reused folder zips the same files as a new one'
+    }
+
+    It 'zips only the recovered metrics when a merge is repeated with -RecoverMetrics into the same folder' {
+        $C = New-Case
+        New-Bundle -Dir $C.Gap -Base $script:GapBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["gap-0"]}'; '__1' = '{"Metrics":["gap-1"]}'; '__2' = '{"Metrics":["gap-2"]}' }
+        New-Bundle -Dir $C.Recovery -Base $script:RecBase -Inventory ([ordered]@{ Version = '3.2.3'; VirtualMachines = @((New-Record 'vm01')) }) -MetricsFiles @{ '__0' = '{"Metrics":["rec-0"]}' }
+
+        $null = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -WarningAction SilentlyContinue
+        $Result = Merge-RecoveryData -GapBundlePath $C.Gap -RecoveryBundlePath $C.Recovery -OutputPath $C.Output -RecoverMetrics -WarningAction SilentlyContinue
+
+        $Result.MetricsSource | Should -Be 'recovery'
+        $MetricsEntries = @(Get-ZipEntryNames -ZipPath $Result.OutputZip | Where-Object { $_ -like 'Metrics_*.json' })
+        $MetricsEntries | Should -Be @(('Metrics_{0}__0.json' -f $script:GapBase)) -Because 'the first merge''s gap batches __1 and __2 are not part of the recovered metrics'
+    }
 }

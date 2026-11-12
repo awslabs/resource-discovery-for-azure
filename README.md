@@ -418,10 +418,12 @@ Resources with names matching dev/test/qa patterns (including short prefixes lik
 
 ### Manual Compression (If Needed)
 
-If automatic compression fails:
+If automatic compression fails, zip the run's shareable files from its report folder (`InventoryReports/<ReportName><timestamp>`, or your `-OutputDirectory`). Replace `<timestamp>` with the part of the file names after the report name, for example `Inventory_<ReportName>_<timestamp>.json`. The command leaves out the files that stay on your machine (`ObfuscationDictionary_*`, `Transcript_Log_*`, `DebugLog_*`, `ErrorLog_*`, `Full_*`) and the files of other runs in the same folder:
 ```powershell
-cd InventoryReports
-Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-Date -Format 'yyyy-MM-dd').zip"
+cd InventoryReports/<ReportName><timestamp>
+Get-ChildItem -File -Path ./* -Include *.html, Consumption_*.csv, Inventory_*.json, Metrics_*.json, Diagnostics_*.log |
+    Where-Object Name -like '*_<timestamp>*' |
+    Compress-Archive -DestinationPath "CompanyName_ResourcesReport_$(Get-Date -Format 'yyyy-MM-dd').zip"
 ```
 ## Parameters Reference
 

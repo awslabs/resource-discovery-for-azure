@@ -439,6 +439,13 @@ if ($Task -eq 'Processing')
 
     $MetricDiagnostics = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
 
+    # Running state for the phase summary. Each batch's call records are folded in
+    # here and then dropped, so retained memory does not grow with the call count.
+    $DiagTotal = 0
+    $DiagOutcomeCounts = @{ Success = 0; Timeout = 0; Throttled = 0; Error = 0 }
+    $DiagNonSuccess = [System.Collections.Generic.List[object]]::new()
+    $DiagSlowest = @()
+
     $PhaseStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     Write-MetricsDiag ("Starting metrics collection: {0} metric definition(s), ThrottleLimit={1}, per-call timeout={2}s, max retries={3}, lookback={4} day(s)." -f $MetricCount, $ConcurrencyLimit, $MetricTimeoutSeconds, $MetricMaxRetries, [math]::Abs($MetricsLookbackPeriodDays))
 
@@ -686,7 +693,20 @@ if ($Task -eq 'Processing')
             $Defs.Clear()
 
             $BatchStopwatch.Stop()
-            Write-Verbose ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $RangeIdx, [math]::Round($BatchStopwatch.Elapsed.TotalSeconds, 1), $MetricDiagnostics.Count)
+
+            # Fold on the main thread, after every worker of the batch has finished.
+            $BatchDiag = @($MetricDiagnostics)
+            $MetricDiagnostics.Clear()
+            foreach ($rec in $BatchDiag)
+            {
+                $DiagTotal++
+                $DiagOutcomeCounts[$rec.Outcome]++
+                if ($rec.Outcome -ne 'Success') { $DiagNonSuccess.Add($rec) }
+            }
+            $DiagSlowest = @($DiagSlowest + $BatchDiag | Sort-Object ElapsedSec -Descending | Select-Object -First 5)
+            $BatchDiag = $null
+
+            Write-Verbose ("[Metrics] Batch {0} complete in {1}s. Cumulative diagnostics: {2} call record(s) so far." -f $RangeIdx, [math]::Round($BatchStopwatch.Elapsed.TotalSeconds, 1), $DiagTotal)
 
             if ($Obfuscate)
             {
@@ -738,27 +758,26 @@ if ($Task -eq 'Processing')
     Write-RdaProgress -Activity 'Metrics collection' -Completed
 
     $PhaseStopwatch.Stop()
-    $DiagRecords = @($MetricDiagnostics)
-    $OkCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Success' }).Count
-    $TimeoutCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Timeout' }).Count
-    $ThrottledCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Throttled' }).Count
-    $ErrorCount = @($DiagRecords | Where-Object { $_.Outcome -eq 'Error' }).Count
+    $OkCount = $DiagOutcomeCounts['Success']
+    $TimeoutCount = $DiagOutcomeCounts['Timeout']
+    $ThrottledCount = $DiagOutcomeCounts['Throttled']
+    $ErrorCount = $DiagOutcomeCounts['Error']
 
     Write-MetricsDiag ("===== Metrics phase summary =====")
-    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | Elapsed: {5}s" -f $DiagRecords.Count, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1))
+    Write-MetricsDiag ("Total calls: {0} | Success: {1} | Timeout: {2} | Throttled: {3} | Error: {4} | Elapsed: {5}s" -f $DiagTotal, $OkCount, $TimeoutCount, $ThrottledCount, $ErrorCount, [math]::Round($PhaseStopwatch.Elapsed.TotalSeconds, 1))
 
     if (($TimeoutCount + $ThrottledCount + $ErrorCount) -gt 0)
     {
         Write-MetricsDiag ("Non-success calls (where it got stuck):")
-        foreach ($rec in ($DiagRecords | Where-Object { $_.Outcome -ne 'Success' } | Sort-Object ElapsedSec -Descending))
+        foreach ($rec in ($DiagNonSuccess | Sort-Object ElapsedSec -Descending))
         {
             Write-MetricsDiag ("  {0} idx={1} {2}/{3}/{4} interval={5} attempts={6} {7}s {8}" -f $rec.Outcome, $rec.MetricIndex, $rec.Service, $rec.Name, $rec.Metric, $rec.Interval, $rec.Attempts, $rec.ElapsedSec, $rec.Error)
         }
     }
 
-    if ($DiagRecords.Count -gt 0)
+    if ($DiagTotal -gt 0)
     {
-        $Slowest = $DiagRecords | Sort-Object ElapsedSec -Descending | Select-Object -First 5
+        $Slowest = $DiagSlowest
         Write-MetricsDiag ("Slowest 5 calls:")
         foreach ($rec in $Slowest)
         {

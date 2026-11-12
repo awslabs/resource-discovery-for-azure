@@ -37,7 +37,7 @@ BeforeAll {
         "param(`$InventoryRoot, `$TenantID, `$ResumeStateFile, `$SeedCompleted = @(), `$Slices = @())`n" +
         "`$CompletedIds = @(`$SeedCompleted); `$FailedAttempts = @(); `$UnreadableStreamFiles = @(); `$StreamStateNotMoved = @(); `$LeftStreamFiles = @()`n" +
         $MergeText + "`n" +
-        "[pscustomobject]@{ CompletedIds = @(`$CompletedIds); FailedAttempts = @(`$FailedAttempts); Unreadable = @(`$UnreadableStreamFiles); NotMoved = @(`$StreamStateNotMoved); Left = @(`$LeftStreamFiles) }")
+        "[pscustomobject]@{ CompletedIds = @(`$CompletedIds); FailedAttempts = @(`$FailedAttempts); Unreadable = @(`$UnreadableStreamFiles); NotMoved = @(`$StreamStateNotMoved); Left = @(`$LeftStreamFiles); RunEndUnreadable = `$RunEndUnreadable }")
 
     # The end-of-run stop and exit rule for a file the merge could not move aside.
     $Stop = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$StreamStateNotMoved.Count -gt 0' })
@@ -199,7 +199,8 @@ Describe 'The end-of-run clean-up of the resume state after the merge' {
         $null = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{ "Completed": ['
         $Slices = @(, @([pscustomobject]@{ Id = 'sub-a'; Name = 'A' })) + @(, @([pscustomobject]@{ Id = 'sub-b'; Name = 'B' }))
         $R = & $script:MergeBlock $script:Dir 't' $script:State @('sub-a', 'sub-x') $Slices
-        & $script:CleanupBlock $script:State $true $R.Unreadable
+        $R.RunEndUnreadable | Should -BeTrue -Because 'the merge sets the flag the clean-up reads'
+        & $script:CleanupBlock $script:State $R.RunEndUnreadable $R.Unreadable
         Test-Path -LiteralPath $script:State | Should -BeTrue -Because 'the next -Resume must still skip sub-x and collect sub-a and sub-b'
         @(Get-CompletedSubscriptionIds -Path $script:State -Tenant 't') | Should -Be @('sub-x')
         @($script:Lines | Where-Object { $_ -eq 'Resume state cleared (clean run).' }) | Should -BeNullOrEmpty

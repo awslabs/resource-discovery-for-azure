@@ -25,12 +25,54 @@
 function Exit-Wrapper
 {
     param([int]$Code = 0)
+    # After collection, a run that stops still puts aside a resume state it
+    # could not save (Set-NotSavedResumeStateAside; armed in the wrapper).
+    if ($Code -ne 0 -and $script:RdaNotSavedOnExit -and $script:ResumeStateSaveFailed)
+    {
+        $script:RdaNotSavedOnExit = $false
+        $null = Set-NotSavedResumeStateAside -ResumeStateFile $script:RdaNotSavedStateFile
+    }
     if ($WrapperTranscriptStarted)
     {
         try { Stop-Transcript | Out-Null }
         catch { Write-Verbose ("Stop-Transcript on Exit-Wrapper failed: {0}" -f $_.Exception.Message) }
     }
     exit $Code
+}
+
+# Fail-safe rule for a resume state this run could not save (see the end of
+# Run-AllSubscriptions.ps1): puts the file aside as <file>.not-saved-<time> (a
+# rename, which works on a full disk), or with no file makes an empty one of
+# that name as a mark, and prints the FAILED (resume state not saved) banner.
+# Returns the path put aside or made, or '' when neither worked.
+function Set-NotSavedResumeStateAside
+{
+    param([Parameter(Mandatory = $true)][string]$ResumeStateFile)
+    $StateSetAside = ''
+    $Made = $false
+    $NotSaved = '{0}.not-saved-{1}' -f $ResumeStateFile, (Get-Date -Format 'yyyyMMddHHmmssfff')
+    try
+    {
+        $Made = -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
+        if (-not $Made) { Move-Item -LiteralPath $ResumeStateFile -Destination $NotSaved -ErrorAction Stop }
+        else { $null = New-Item -ItemType File -Path ([WildcardPattern]::Escape($NotSaved)) -ErrorAction Stop }
+        $StateSetAside = $NotSaved
+    }
+    catch { Write-Verbose ("Could not put aside {0}: {1}" -f $ResumeStateFile, $_.Exception.Message) }
+    Write-Host ""
+    Write-Host "============== FAILED (resume state not saved) ==============" -ForegroundColor Red
+    if ($StateSetAside)
+    {
+        Write-Host ("The resume state file {0} could not be written with this run's results (see the WARNING above), so {1}. No -Resume run skips a subscription on it: the next -Resume or plain run skips no subscription as done, and -ResumeFailedOnly refuses to run until a run saves the resume state again." -f $ResumeStateFile, $(if ($Made) { 'an empty file {0} is made as a mark' -f $StateSetAside } else { 'it is put aside as {0}' -f $StateSetAside })) -ForegroundColor Red
+        Write-Host ("Fix the cause (for example, free up disk space), then run again without -ResumeFailedOnly. A clean run removes {0}." -f $StateSetAside) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host ("The resume state file {0} could not be written at least once this run (see the WARNING above), so it may still list a subscription this run failed as completed: a -Resume or -ResumeFailedOnly run would skip it and carry its old report." -f $ResumeStateFile) -ForegroundColor Red
+        Write-Host "Fix the cause (for example, free up disk space), then run again without -Resume or -ResumeFailedOnly: it collects every subscription." -ForegroundColor Red
+    }
+    Write-Host "=============================================================" -ForegroundColor Red
+    return $StateSetAside
 }
 
 # Auto-tune parallelism to the current host. Detects logical CPU count and total

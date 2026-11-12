@@ -769,8 +769,8 @@ $UnreadableStreamFiles = @()
 # A resume state an earlier run put aside because it could not be saved (see
 # FAILED (resume state not saved) at the end). With no resume state file since,
 # -ResumeFailedOnly cannot tell what is owed, so it does not run; -Resume and a
-# plain run collect every subscription (failures of kept per-stream files are
-# still folded in). A clean run, or one whose resume state was saved, removes
+# plain run skip no subscription as done (the failures of the put-aside state
+# and of kept per-stream files are still read in). A clean run, or one whose resume state was saved, removes
 # these files at its end.
 $StatePutAside = @(Get-ChildItem -LiteralPath $InventoryRoot -Filter ((Split-Path -Path $ResumeStateFile -Leaf) + '.not-saved-*') -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $StatePutAsideOnly = $StatePutAside.Count -gt 0 -and -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
@@ -897,7 +897,7 @@ if ($Resume -or $ResumeFailedOnly)
         {
             # Left under their names, a stream of this run would write over the
             # only copy of what they hold, so the run stops before any stream.
-            Write-Host ("ERROR: The resume state file {0} could not be written with every record of the per-stream files of the interrupted run, so they are kept: {1}. Free disk space or fix the folder, then run again. Nothing was collected (exit 1)." -f $ResumeStateFile, (@($FoldedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Red
+            Write-Host ("ERROR: The resume state file {0} could not be written with every record of the per-stream files of an earlier parallel run, so they are kept: {1}. Free disk space or fix the folder, then run again. Nothing was collected (exit 1)." -f $ResumeStateFile, (@($FoldedStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Red
             Exit-Wrapper -Code 1
         }
     }
@@ -2322,6 +2322,10 @@ if (-not ($Resume -or $ResumeFailedOnly))
     }
 }
 Write-Host "All subscriptions processed!" -ForegroundColor Green
+# From here on a step that stops the run (Exit-Wrapper with a non-zero code)
+# still puts aside a resume state this run could not save (fail-safe rule).
+$script:RdaNotSavedStateFile = $ResumeStateFile
+$script:RdaNotSavedOnExit = $true
 
 # A -Resume run skips the subscriptions an earlier run completed, but their
 # reports still belong in this run's consolidated zip. Each one's recorded zip is
@@ -3031,35 +3035,14 @@ if (@($UncarriedSkipped).Count -gt 0)
 # <file>.not-saved-<time> (a rename, which works on a full disk); with no file to
 # put aside, an empty one of that name is made, as a mark. While such a mark is
 # there and no resume state file is, -ResumeFailedOnly refuses to run (it cannot
-# tell what is owed) and -Resume collects every subscription. Only when neither
+# tell what is owed) and no -Resume skips a subscription as done. Only when neither
 # works does the note ask to run without -Resume or -ResumeFailedOnly. The run
 # ends with exit 2 (see the exit code below).
 $StateSetAside = ''
-if ($ResumeStateSaveFailed -and -not $RunClean)
-{
-    $NotSaved = '{0}.not-saved-{1}' -f $ResumeStateFile, (Get-Date -Format 'yyyyMMddHHmmssfff')
-    try
-    {
-        $Made = -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
-        if (-not $Made) { Move-Item -LiteralPath $ResumeStateFile -Destination $NotSaved -ErrorAction Stop }
-        else { $null = New-Item -ItemType File -Path ([WildcardPattern]::Escape($NotSaved)) -ErrorAction Stop }
-        $StateSetAside = $NotSaved
-    }
-    catch { Write-Verbose ("Could not put aside {0}: {1}" -f $ResumeStateFile, $_.Exception.Message) }
-    Write-Host ""
-    Write-Host "============== FAILED (resume state not saved) ==============" -ForegroundColor Red
-    if ($StateSetAside)
-    {
-        Write-Host ("The resume state file {0} could not be written with this run's results (see the WARNING above), so {1}. No -Resume run skips a subscription on it: the next -Resume or plain run collects every subscription, and -ResumeFailedOnly refuses to run until a run saves the resume state again." -f $ResumeStateFile, $(if ($Made) { 'an empty file {0} is made as a mark' -f $StateSetAside } else { 'it is put aside as {0}' -f $StateSetAside })) -ForegroundColor Red
-        Write-Host ("Fix the cause (for example, free up disk space), then run again without -ResumeFailedOnly. A clean run removes {0}." -f $StateSetAside) -ForegroundColor Red
-    }
-    else
-    {
-        Write-Host ("The resume state file {0} could not be written at least once this run (see the WARNING above), so it may still list a subscription this run failed as completed: a -Resume or -ResumeFailedOnly run would skip it and carry its old report." -f $ResumeStateFile) -ForegroundColor Red
-        Write-Host "Fix the cause (for example, free up disk space), then run again without -Resume or -ResumeFailedOnly: it collects every subscription." -ForegroundColor Red
-    }
-    Write-Host "=============================================================" -ForegroundColor Red
-}
+# Done here at the end, or by Exit-Wrapper when a later step stops the run (see
+# $RdaNotSavedOnExit below "All subscriptions processed!").
+$script:RdaNotSavedOnExit = $false
+if ($ResumeStateSaveFailed -and -not $RunClean) { $StateSetAside = Set-NotSavedResumeStateAside -ResumeStateFile $ResumeStateFile }
 
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.

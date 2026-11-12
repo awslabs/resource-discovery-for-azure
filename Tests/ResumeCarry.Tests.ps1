@@ -1210,6 +1210,36 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         }
     }
 
+    It 'a step after collection that stops the run still puts aside a resume state the run could not save' {
+        # The wrapper arms it right after "All subscriptions processed!", before the
+        # output verification and the bundle, and disarms it where the end does it.
+        $Src = Get-Content -LiteralPath $script:WrapperPath -Raw
+        $Done = $Src.IndexOf('Write-Host "All subscriptions processed!" -ForegroundColor Green')
+        $Arm = $Src.IndexOf('$script:RdaNotSavedOnExit = $true')
+        $Verify = $Src.IndexOf('ERROR: Per-subscription output verification failed.')
+        $Done | Should -BeGreaterThan 0
+        $Arm | Should -BeGreaterThan $Done
+        $Arm | Should -BeLessThan $Verify
+        # Exit-Wrapper, run in its own process (it ends the process).
+        $Functions = Join-Path $script:RepoRoot 'Functions/RunAllSubscriptions.Functions.ps1'
+        $Probe = Join-Path $script:Root 'probe.ps1'
+        @"
+. '$Functions'
+Set-Content -LiteralPath '$($script:State)' -Value '{}'
+`$script:ResumeStateSaveFailed = `$true
+`$script:RdaNotSavedStateFile = '$($script:State)'
+`$script:RdaNotSavedOnExit = `$true
+`$WrapperTranscriptStarted = `$false
+Exit-Wrapper -Code 2
+"@ | Set-Content -LiteralPath $Probe -Encoding utf8
+        $Out = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $Probe 2>&1 | ForEach-Object { [string]$_ })
+        $LASTEXITCODE | Should -Be 2
+        $global:LASTEXITCODE = 0
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t.json.not-saved-*' -Force).Count | Should -Be 1
+        @($Out | Where-Object { $_ -like '*FAILED (resume state not saved)*' }).Count | Should -Be 1
+    }
+
     It 'a save of the resume state that reaches the disk after one that failed clears the flag, and the banner is quiet without a state file' {
         $script:ResumeStateSaveFailed = $true
         Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @() -Reports @()

@@ -1900,7 +1900,6 @@ else
 # Compress-RdaReportArchive stops on any error and writes to a temp file that it moves
 # into place only when done; -ErrorAction Stop keeps a stand-in for it to the same rule.
 $ZipWritten = $true
-$ZipExistedBefore = Test-Path -LiteralPath $Global:ZipOutputFile
 try
 {
     if ($ReportInputsReady) { Compress-RdaReportArchive @CompressionOutput -ErrorAction Stop } else { $ZipWritten = $false }
@@ -1918,20 +1917,9 @@ catch
     {
         Write-Log -Message ("Add only those files: the obfuscation dictionary, the transcript and the logs hold real names and stay local.") -Severity 'Error'
     }
-    # Compress-RdaReportArchive removes its own unfinished temp file; this is a backstop so a
-    # cut-off zip is never left to be shared. One that was there before this step is not this
-    # step's to remove.
-    if (-not $ZipExistedBefore -and (Test-Path -LiteralPath $Global:ZipOutputFile))
-    {
-        try
-        {
-            Remove-Item -LiteralPath $Global:ZipOutputFile -Force -ErrorAction Stop
-        }
-        catch
-        {
-            Write-Log -Message ("Could not remove the unfinished zip {0}: {1}. Delete it by hand and do not share it." -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
-        }
-    }
+    # No removal here: Compress-RdaReportArchive moves its zip to the final name only as its
+    # last step, so after a failure a file at that name is never this call's; it is left
+    # alone and, like one that was there before, not named as this run's report.
 }
 
 if (-not $ReportInputsReady)

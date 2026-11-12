@@ -763,13 +763,16 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Add only those files' -Because 'that warning is for -Obfuscate runs'
     }
 
-    It 'removes a zip the failed zip step left cut off and does not report it' {
+    It 'leaves a zip the failed zip step did not finish alone and does not report it' {
         $Stub = 'function Compress-RdaReportArchive { [CmdletBinding()] param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw ''stand-in: stopped part-way'' }'
         $R = @(Invoke-InventoryRun -Name 'zip-cut-direct' -Runs @($Stub) -Direct)
 
         $Output = [string]$R[0].Output
-        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a cut-off zip must not be left to be shared'
+        # Compress-RdaReportArchive puts its zip at the final name only as its last step, so a
+        # file there after a failure is never this call's: it is not removed and not named.
+        $R[0].Files | Should -Contain 'ResourcesReport_test.zip' -Because 'the zip step removes nothing it did not write'
         $Output | Should -Not -Match 'Reporting Data File' -Because "Output:`n$Output"
+        $Output | Should -Not -Match 'safe to share'
         $Output | Should -Match 'No report was written'
     }
 
@@ -797,7 +800,7 @@ function CreateResourceJobs
         $R[0].Files | Should -Contain 'ResourcesReport_test.zip' -Because 'a zip that was there before is not removed'
     }
 
-    It 'says so when the unfinished zip cannot be removed' {
+    It 'does not try to remove a file at the zip path after a failed zip step' {
         $Stub = @'
 function Compress-RdaReportArchive { [CmdletBinding()] param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw 'stand-in: stopped part-way' }
 function Remove-Item
@@ -811,7 +814,9 @@ function Remove-Item
         $R = @(Invoke-InventoryRun -Name 'zip-locked-direct' -Runs @($Stub) -Direct)
 
         $Output = [string]$R[0].Output
-        $Output | Should -Match 'Could not remove the unfinished zip .*ResourcesReport_test\.zip: stand-in: file is locked' -Because "Output:`n$Output"
+        $Output | Should -Not -Match 'stand-in: file is locked' -Because "the step never removes the file at the zip path. Output:`n$Output"
+        $Output | Should -Not -Match 'Could not remove the unfinished zip'
+        $R[0].Files | Should -Contain 'ResourcesReport_test.zip'
         $Output | Should -Not -Match 'Reporting Data File'
         $Output | Should -Match 'No report was written'
     }
@@ -849,7 +854,9 @@ function Remove-Item
         $Output | Should -Match 'Error Compressing Output File: .*stand-in: cannot read' -Because "the error is not hidden. Output:`n$Output"
         $Output | Should -Not -Match 'Reporting Data File'
         $Output | Should -Match 'No report was written'
-        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a zip made without one of its files is removed'
+        # A file at the zip path after a failed step is not this call's: left alone, never named.
+        ($R[0].Files -contains 'ResourcesReport_test.zip') | Should -Be $Write -Because 'the zip step removes nothing it did not write'
+        $Output | Should -Not -Match 'safe to share'
     }
 
     It 'says the zip is safe to share under -Obfuscate only when the zip was written (<Case>)' -ForEach @(

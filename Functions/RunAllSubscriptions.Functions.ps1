@@ -739,9 +739,9 @@ function Remove-ResumeStateFiles
 # disagree while a role change takes effect (Disagree). Each one is put on the
 # retry list as a failed run (Add-FailedAttempt, so the run count goes up) and
 # taken off the completed list, so the resume state is kept and -Resume and
-# -ResumeFailedOnly check it again; the retry limit ends the retries of one
-# that keeps failing. A subscription skipped for a missing role is not added:
-# it needs Reader first. Pure; the caller persists. Returns
+# -ResumeFailedOnly check it again, as for any failed subscription: it stays on
+# the list, with its run count and reason, until a later check passes. A
+# subscription skipped for a missing role is not added: it needs Reader first. Pure; the caller persists. Returns
 # { FailedAttempts; CompletedIds; Added }.
 function Add-RoleCheckRetryAttempts
 {

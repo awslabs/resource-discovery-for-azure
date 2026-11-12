@@ -877,7 +877,7 @@ if ($ScopeForProbe.Count -gt 0)
     # A subscription skipped because the check could not finish, or because the
     # two answers disagree while a role change takes effect, stays on the retry
     # list as a failed run, also when the run stops here, so the state is kept
-    # and the retry limit ends its retries (Add-RoleCheckRetryAttempts).
+    # and a later run checks it again (Add-RoleCheckRetryAttempts).
     $RoleCheckRetry = Add-RoleCheckRetryAttempts -FailedAttempts $FailedAttempts -CompletedIds $CompletedIds -Decision $AccessDecision
     if ($RoleCheckRetry.Added.Count -gt 0)
     {

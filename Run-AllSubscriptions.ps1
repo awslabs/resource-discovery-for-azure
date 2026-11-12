@@ -1995,11 +1995,10 @@ else
                     # The subs this stream attempted and failed this run, for the
                     # merge of per-stream state below. A stream that did not start
                     # lists its whole slice as failed but attempted none of it, so
-                    # its subs are not taken off the completed list here (none is
-                    # on it: a plain run took them off before collecting, and
-                    # -Resume gives a stream only subs not done); each still counts
-                    # one more failed run (below), so the retry limit ends a stream
-                    # that never starts.
+                    # its subs are not in $StreamFailedIds; like every sub given to
+                    # a stream and not proven done, each loses any earlier
+                    # completion and counts one more failed run at the merge
+                    # below, so the retry limit ends a stream that never starts.
                     if ($StreamSummary.Status -ne 'failed-to-start')
                     {
                         $StreamFailedIds += @($StreamSummary.Failed | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
@@ -2178,6 +2177,11 @@ else
             # could not save it, or left no usable summary) is not done: it
             # counts as one more failed run, so it stays on the retry list and
             # the retry limit ends it if this keeps happening. Named below.
+            # A stream with no usable summary proves nothing done: what its file
+            # lists as completed may lack the failures only its summary held.
+            $NoSummaryIds = @($StreamNoSummary | ForEach-Object { @($_.SubIds) } | Where-Object { $_ } | ForEach-Object { [string]$_ })
+            $AllCompletedFromStreams = @($AllCompletedFromStreams | Where-Object { $_ -and $NoSummaryIds -notcontains [string]$_ })
+            $AllReportsFromStreams = @($AllReportsFromStreams | Where-Object { $null -ne $_ -and $NoSummaryIds -notcontains [string]$_.Id })
             $SavedDoneIds = @($AllCompletedFromStreams | Where-Object { $_ } | ForEach-Object { [string]$_ })
             foreach ($S in $StreamNoSummary) { $StreamUnproven += @($S.SubIds | ForEach-Object { [pscustomobject]@{ Id = [string]$_; StreamId = $S.StreamId; Reason = 'its stream ended without a usable summary, so it is collected again' } }) }
             $UnsavedDone = @($StreamUnproven | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace($_.Id) -and $SavedDoneIds -notcontains [string]$_.Id -and $GoneIds -notcontains [string]$_.Id } | Sort-Object -Property Id -Unique)

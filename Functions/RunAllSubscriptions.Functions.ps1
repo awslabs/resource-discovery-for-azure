@@ -643,10 +643,11 @@ function Save-CompletedSubscriptionIds
         # skips the subscription can still put its report in the consolidated zip.
         CompletedReports          = @(foreach ($Id in @($Ids)) { if (-not [string]::IsNullOrWhiteSpace($Id) -and $LatestReports.ContainsKey($Id)) { $LatestReports[$Id] } })
         # FailedAttempts is the canonical "what to retry" list. The wrapper
-        # appends/refreshes entries on every catch and removes them on the
-        # next successful attempt for the same sub, so the file is always
-        # an accurate snapshot of "subs that failed at least once and have
-        # not yet succeeded since".
+        # counts one more failed run of a sub before it collects it (the
+        # write-ahead count), sets the reason when it fails, and removes the
+        # entry once a good result of it is saved, so the file is always an
+        # accurate snapshot of "subs whose latest run has not been proven a
+        # success".
         FailedAttempts            = @($FailedAttempts)
         # The subscriptions the up-front access check skipped as not readable,
         # so a -ResumeFailedOnly run does not name them as never collected.

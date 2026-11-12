@@ -253,6 +253,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
     # is collected; only a good result takes it away, and a failure only sets
     # the reason. If the file does not hold it, the sub is not collected this
     # run (NotAttempted: the parent counts nothing for it and names it).
+    $Undo = @{ Failed = $FailedAttempts; Completed = $Completed; Reports = $Reports }
     $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $SubId -Name $SubName -Reason 'its collection started and no result was saved'
     $WantCount = Get-FailedAttemptCount -Entry @($FailedAttempts | Where-Object { $_.Id -eq $SubId })[0]
     $Completed = @($Completed | Where-Object { $_ -ne $SubId })
@@ -264,6 +265,11 @@ for ($i = 0; $i -lt $PairCount; $i++)
     {
         Write-Stream ("ERROR: could not save this stream's state before collecting {0}, so it is not collected this run" -f $SubName) 'Red'
         $NotAttemptedSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = "its stream could not save its state before collecting it, so it was not collected; free disk space or fix the folder, then run again" }
+        # Not collected, so nothing about it changes (a later save of this
+        # file must not carry its count or drop its completion).
+        $FailedAttempts = $Undo.Failed
+        $Completed = $Undo.Completed
+        $Reports = $Undo.Reports
         continue
     }
 
@@ -314,9 +320,11 @@ for ($i = 0; $i -lt $PairCount; $i++)
         }
         else
         {
+            # The good result and its report are saved; the write-ahead count
+            # stays in this file until the parent's merge proves the result
+            # saved and drops it, so a parent cut off before its merge still
+            # leaves the count (and the start-up fold then collects it again).
             $Completed += $SubId
-            # A good result takes away the write-ahead count (and any earlier one).
-            $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $SubId
             Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $Reports
         }
     }

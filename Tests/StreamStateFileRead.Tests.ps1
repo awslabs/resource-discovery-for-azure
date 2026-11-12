@@ -147,14 +147,18 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
         @($script:Lines | Where-Object { $_ -like 'WARNING: Could not remove the per-stream resume state file*this run keeps the resume state*' }).Count | Should -Be 1
     }
 
-    It 'takes this run''s subscriptions off the completed list when a file cannot be read, unless a file read lists them' {
+    It 'takes every subscription of this run off the completed list when a file cannot be read (<Label>)' -TestCases @(
+        @{ Label = 'an earlier run completed it'; Stale = $null }
+        @{ Label = 'a file an earlier run left lists it'; Stale = '{ "Completed": [ "sub-a" ], "FailedAttempts": [] }' }
+    ) {
         # sub-a and sub-x were completed by an earlier run; this run's streams ran sub-a and sub-b.
         $null = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{ "Completed": ['
         $null = script:New-StreamFile -Dir $script:Dir -N 1 -Text '{ "Completed": [ "sub-b" ], "FailedAttempts": [] }'
+        if ($Stale) { $null = script:New-StreamFile -Dir $script:Dir -N 5 -Text $Stale }
         $Slices = @(, @([pscustomobject]@{ Id = 'sub-a'; Name = 'A' })) + @(, @([pscustomobject]@{ Id = 'sub-b'; Name = 'B' }))
         $R = & $script:MergeBlock $script:Dir 't' $script:State @('sub-a', 'sub-x') $Slices
-        @($R.CompletedIds | Sort-Object) | Should -Be @('sub-b', 'sub-x') -Because 'the unreadable file may hold this run''s failure of sub-a, so a later -Resume collects it'
-        @(Get-CompletedSubscriptionIds -Path $script:State -Tenant 't' | Sort-Object) | Should -Be @('sub-b', 'sub-x')
+        @($R.CompletedIds | Sort-Object) | Should -Be @('sub-x') -Because 'the unreadable file may hold this run''s failure of either, so a later -Resume collects both'
+        @(Get-CompletedSubscriptionIds -Path $script:State -Tenant 't' | Sort-Object) | Should -Be @('sub-x')
     }
 
     It 'keeps the earlier completions when every file was read' {

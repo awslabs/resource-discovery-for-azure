@@ -1593,18 +1593,19 @@ else
                     $AllFailedFromStreams += @($Obj.FailedAttempts | Where-Object { $null -ne $_ })
                 }
             }
-            if ($RunEndUnreadable)
-            {
-                # A file that cannot be read may hold this run's failure of a
-                # subscription an earlier run completed. So of this run's
-                # subscriptions only those a file that was read lists as
-                # completed keep a completion; -Resume collects the others again.
-                $ThisRunIds = @($Slices | ForEach-Object { @($_) } | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
-                $CompletedIds = @($CompletedIds | Where-Object { $ThisRunIds -notcontains [string]$_ -or $AllCompletedFromStreams -contains $_ })
-            }
             if ($AllCompletedFromStreams.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
+            }
+            if ($RunEndUnreadable)
+            {
+                # Fail-safe: a file that cannot be read may hold this run's
+                # failure of a subscription that an earlier run, or a file an
+                # earlier run left, lists as completed. Which stream's records
+                # were lost is not known, so none of this run's subscriptions
+                # keeps a completion and -Resume collects them all again.
+                $ThisRunIds = @($Slices | ForEach-Object { @($_) } | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
+                $CompletedIds = @($CompletedIds | Where-Object { $ThisRunIds -notcontains [string]$_ })
             }
             # Reconcile failed attempts from all streams against the unified list.
             # See Merge-FailedAttempts for the recency/completion rules.

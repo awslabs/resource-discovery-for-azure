@@ -1,4 +1,4 @@
-# Recovery merge inventory write tests
+﻿# Recovery merge inventory write tests
 # =============================================================================
 # Offline tests for how Merge-RecoveryData (Functions/RecoveryMerge.Functions.ps1)
 # writes the merged Inventory_*.json.
@@ -48,7 +48,7 @@ BeforeAll {
         $Text
     }
 
-    function New-Record([string]$Name)
+    function Get-TestRecord([string]$Name)
     {
         [ordered]@{
             Name          = $Name
@@ -62,7 +62,7 @@ BeforeAll {
     # Gap bundle: nested objects, unicode, an empty list, a one-element list, a
     # date string, numbers, null and a Version marker. Recovery bundle: one
     # collector that the gap lacks, plus one that replaces a gap collector.
-    function New-WriteCase
+    function Initialize-WriteCase
     {
         param([string]$RecoveryVmName = 'vm-rec-01')
 
@@ -74,7 +74,7 @@ BeforeAll {
         }
         New-Item -ItemType Directory -Path $Case.Gap, $Case.Recovery -Force | Out-Null
 
-        $Vm = New-Record 'vm-gap-01'
+        $Vm = Get-TestRecord 'vm-gap-01'
         $Vm['Tags'] = @([ordered]@{ Name = 'owner'; Value = 'Zürich team' }, [ordered]@{ Name = 'cost'; Value = '東京-42 ✓' })
         $Vm['Disks'] = @([ordered]@{ Lun = 0; SizeGB = 128; Caching = 'ReadOnly' }, [ordered]@{ Lun = 1; SizeGB = 1024; Caching = $null })
         $Vm['Network'] = [ordered]@{ Nics = @([ordered]@{ Ip = '203.0.113.4'; Rules = @() }); Notes = "line1`nline2`t""quoted"" back\slash <tag> & ünïcödé" }
@@ -83,14 +83,14 @@ BeforeAll {
         $Gap = [ordered]@{
             VirtualMachines = @($Vm)
             Disks           = @()
-            AppServices     = @(New-Record 'app-gap-old')
-            KeyVaults       = @(New-Record 'kv-ä-01'; New-Record 'kv-02')
+            AppServices     = @(Get-TestRecord 'app-gap-old')
+            KeyVaults       = @(Get-TestRecord 'kv-ä-01'; Get-TestRecord 'kv-02')
             Version         = '1.2.3'
         }
         $Recovery = [ordered]@{
-            AppServices      = @(New-Record 'app-rec-01'; New-Record 'app-rec-02')
+            AppServices      = @(Get-TestRecord 'app-rec-01'; Get-TestRecord 'app-rec-02')
             StorageAccounts  = @([ordered]@{ Name = 'stäccount01'; Network = [ordered]@{ DefaultAction = 'Deny'; Rules = @() } })
-            RecoveredVMs     = @(New-Record $RecoveryVmName)
+            RecoveredVMs     = @(Get-TestRecord $RecoveryVmName)
             Version          = '1.2.3'
         }
         ($Gap | & $script:RealConvertToJson -Depth 100) | Out-File -FilePath (Join-Path $Case.Gap ('Inventory_{0}.json' -f $script:GapBase)) -Encoding utf8
@@ -100,7 +100,7 @@ BeforeAll {
 
     # The bytes the old '$GapInventory | ConvertTo-Json -Depth 100 -Compress | Out-File'
     # line wrote for this case: the same load and splice Merge-RecoveryData does.
-    function Get-ReferenceBytes($Case)
+    function Get-ReferenceByte($Case)
     {
         $GapInventory = Get-Content -Path (Join-Path $Case.Gap ('Inventory_{0}.json' -f $script:GapBase)) -Raw | ConvertFrom-Json
         $RecoveryInventory = Get-Content -Path (Join-Path $Case.Recovery ('Inventory_{0}.json' -f $script:RecBase)) -Raw | ConvertFrom-Json
@@ -129,7 +129,7 @@ AfterAll {
 Describe 'Merge-RecoveryData run from a fresh pwsh that loads only RecoveryMerge.Functions.ps1' {
 
     It 'has Write-InventoryJson in scope and writes the same bytes as the old pipeline' {
-        $Case = New-WriteCase
+        $Case = Initialize-WriteCase
         $Pwsh = (Get-Process -Id $PID).Path
         $Q = { param($s) "'" + ($s -replace "'", "''") + "'" }
         $ChildScript = @(
@@ -151,7 +151,7 @@ Describe 'Merge-RecoveryData run from a fresh pwsh that loads only RecoveryMerge
         $ChildOutput | Should -Contain ('OUTPUT=' + $OutPath)
         $New = [System.IO.File]::ReadAllBytes($OutPath)
         $New.Length | Should -BeGreaterThan 0
-        [Convert]::ToBase64String($New) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Case)))
+        [Convert]::ToBase64String($New) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceByte $Case)))
         @(Get-ChildItem -LiteralPath $Case.Output -Filter '*.tmp' -Force).Count | Should -Be 0
     }
 
@@ -231,8 +231,8 @@ Describe 'Merge-RecoveryData inventory write' {
     }
 
     It 'writes the merged inventory one collector at a time with the same bytes as before' {
-        $Case = New-WriteCase
-        $Reference = Get-ReferenceBytes $Case
+        $Case = Initialize-WriteCase
+        $Reference = Get-ReferenceByte $Case
 
         Mock -CommandName ConvertTo-Json -MockWith $script:PassThroughConvertToJson
         $Result = Merge-RecoveryData -GapBundlePath $Case.Gap -RecoveryBundlePath $Case.Recovery -OutputPath $Case.Output 3>$null
@@ -252,7 +252,7 @@ Describe 'Merge-RecoveryData inventory write' {
     }
 
     It 'leaves no inventory file (not even 0 bytes) and no temporary file when the write fails' {
-        $Case = New-WriteCase -RecoveryVmName 'fail-marker'
+        $Case = Initialize-WriteCase -RecoveryVmName 'fail-marker'
 
         Mock -CommandName ConvertTo-Json -MockWith $script:FailingConvertToJson
         { Merge-RecoveryData -GapBundlePath $Case.Gap -RecoveryBundlePath $Case.Recovery -OutputPath $Case.Output 3>$null } | Should -Throw '*simulated out of memory*'
@@ -262,7 +262,7 @@ Describe 'Merge-RecoveryData inventory write' {
     }
 
     It 'leaves an existing inventory in the output folder byte-for-byte unchanged when the write fails' {
-        $Case = New-WriteCase -RecoveryVmName 'fail-marker'
+        $Case = Initialize-WriteCase -RecoveryVmName 'fail-marker'
         New-Item -ItemType Directory -Path $Case.Output -Force | Out-Null
         $Existing = Get-OutputInventoryPath $Case
         # An inventory from an earlier good run, longer than a cut-off write would be.
@@ -281,7 +281,7 @@ Describe 'Merge-RecoveryData inventory write' {
     # next run. It guards that nothing the new write path leaves after a failure
     # stops the next run. The fix itself is proven by the two tests above.
     It 'regression check: the next run after a failed write succeeds, with nothing kept from the failed one' {
-        $Case = New-WriteCase -RecoveryVmName 'fail-marker'
+        $Case = Initialize-WriteCase -RecoveryVmName 'fail-marker'
 
         Mock -CommandName ConvertTo-Json -MockWith $script:FailingConvertToJson
         { Merge-RecoveryData -GapBundlePath $Case.Gap -RecoveryBundlePath $Case.Recovery -OutputPath $Case.Output 3>$null } | Should -Throw
@@ -289,7 +289,7 @@ Describe 'Merge-RecoveryData inventory write' {
         Mock -CommandName ConvertTo-Json -MockWith $script:PassThroughConvertToJson
         $Result = Merge-RecoveryData -GapBundlePath $Case.Gap -RecoveryBundlePath $Case.Recovery -OutputPath $Case.Output 3>$null
 
-        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Result.OutputInventory)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Case)))
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Result.OutputInventory)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceByte $Case)))
         Test-Path -LiteralPath $Result.OutputZip | Should -BeTrue
         @(Get-ChildItem -LiteralPath $Case.Output -Filter '*.tmp' -Force).Count | Should -Be 0
     }

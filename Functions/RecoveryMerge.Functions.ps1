@@ -121,9 +121,12 @@ function Merge-RecoveryData
     }
 
     # -- Verify an ObfuscationDictionary actually BELONGS to a given inventory.
-    #    An obfuscated inventory stores per-resource tokens (prod_/nonprod_<guid>)
-    #    in its ID/Name/cross-ref fields; those exact tokens are the KEYS of the
-    #    dictionary's maps (ResourceIdMap/ResourceNameMap/... are token -> real).
+    #    An obfuscated inventory holds per-resource tokens (prod_/nonprod_<guid>)
+    #    in its Name, Subscription and ResourceGroup fields and inside its
+    #    ARM-shaped ID paths; those single tokens are KEYS of the dictionary's
+    #    name, subscription and resource-group maps (token -> real). The
+    #    ResourceIdMap's keys are whole masked paths, so they never match a
+    #    single token and add nothing to the count (see the scan below).
     #    So the dictionary that goes with an inventory must contain (almost) all of
     #    that inventory's tokens as keys. If someone points at the WRONG dictionary
     #    (a different run/subscription), the inventory's tokens are absent and
@@ -372,8 +375,11 @@ function Merge-RecoveryData
     #    error). Consumption ResourceUris keep the ARM path structure for
     #    categorisation. A ResourceUri that matches an inventory id exactly
     #    takes that resource's whole masked path from the run's ResourceIdMap;
-    #    any other ResourceUri gets subscription, resource group and name
-    #    tokens minted for that run's consumption file. So a replaced
+    #    for any other ResourceUri, each subscription, resource group and name
+    #    part is looked up in the run's shared dictionaries by the full
+    #    ResourceUri, then in the consumption file's own cache by the real
+    #    value, and only on a miss gets a token minted for that run's
+    #    consumption file. So a replaced
     #    consumption file categorises correctly, but its tokens can differ
     #    from the gap run's, and a resource that is not in the inventory can
     #    carry subscription and resource group tokens different from the

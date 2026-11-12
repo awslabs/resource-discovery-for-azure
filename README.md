@@ -295,13 +295,13 @@ Pass `-ParallelStreams N` to process N subscriptions concurrently in separate `p
 
 Each stream is a separate background process. They don't share state with each other. Each has its own Azure session, its own progress tracking file, and its own output folder. The wrapper splits your subscription list across the streams in round-robin order so the workload stays balanced even when subscriptions vary in size.
 
-The default is `-ParallelStreams 1` (existing sequential behavior, fully preserved). Pick a higher value based on the environment you're running in. See the table in [Choosing where to run for large tenants](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) below.
+When `-ParallelStreams` is not given, the wrapper sizes it from the host's CPU and RAM (see the `Parallelism:` line it prints); `-ParallelStreams 1` is the sequential behavior, fully preserved. Pick a value based on the environment you're running in. See the table in [Choosing where to run for large tenants](#choosing-where-to-run-for-large-tenants-cloud-shell-vs-local) below.
 
 `-ParallelStreams` and `-ConcurrencyLimit` compose. `-ConcurrencyLimit` throttles the metrics-collection runspace pool *within* one subscription; `-ParallelStreams` is the count of subscriptions running concurrently. Useful combinations:
 
 | ParallelStreams | ConcurrencyLimit | Concurrent ARM calls (in flight at once) | Verdict |
 |---|---|---|---|
-| 1 | 6 | 6 | Existing default. |
+| 1 | 6 | 6 | Sequential (`-ParallelStreams 1`). |
 | 6 | 6 | 36 | Recommended for metric-heavy estates on a 16 GB / 8-core local machine. |
 | 8 | 6 | 48 | Watch for HTTP 429s in per-stream logs. |
 | 6 | 12 | 72 | Aggressive. Expect retry-backoff to eat the gain. |

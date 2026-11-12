@@ -381,10 +381,8 @@ for ($i = 0; $i -lt $PairCount; $i++)
         # The write-ahead step counted this failed run; only the reason is set.
         $FailedAttempts = Set-FailedAttemptReason -Existing $FailedAttempts `
             -Id $SubId -Name $SubName -Reason $ErrRecord.Exception.Message
-        # A sub an earlier run completed is not completed once it fails here:
-        # the file and the summary must not list it as both.
-        $Completed = @($Completed | Where-Object { $_ -ne $SubId })
-        $Reports = @($Reports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $SubId })
+        # The write-ahead step already took any earlier completion of it out,
+        # so the file and the summary do not list it as both.
         Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $Reports
     }
 }

@@ -430,6 +430,18 @@ Describe 'The bundle never takes a report that was there before the run started'
         $Result = $Out | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['OuterZipFile'] } | Select-Object -Last 1
         @(script:Get-InnerZipNames -OuterZip $Result.OuterZipFile) | Should -Be @('ResourcesReport_2new.zip')
     }
+
+    It 'MainSummary leaves out a report folder that was there before the run started, whatever its time' {
+        $Root = script:New-CaseRoot
+        $Old = script:New-TestReport -Root $Root -Stamp '1old' -SubName 'Sub Old'
+        script:Set-ReportAge -Zip $Old -When (Get-Date).AddHours(2)
+        $null = script:New-TestReport -Root $Root -Stamp '2new' -SubName 'Sub New'
+        $Html = Join-Path $Root 'MainSummary.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Root -HtmlFile $Html -SinceTime (Get-Date).AddMinutes(-5) -ExcludeFolders @(Split-Path -Path $Old -Parent) -TenantId 't' -Version 'test' -PlatOS 'test'
+        $Text = Get-Content -LiteralPath $Html -Raw
+        $Text | Should -Match 'Sub New'
+        $Text | Should -Not -Match 'Sub Old'
+    }
 }
 
 Describe 'Sequential path, end to end: interrupted run, then -Resume' {
@@ -1061,15 +1073,20 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $IsClean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$RunClean' })
         $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
         $Note = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeStateSaveFailed -and -not $RunClean' })
+        $Stays = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and $ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
         $IsClean.Count | Should -Be 1
         $Clean.Count | Should -Be 1
         $Note.Count | Should -Be 1
-        foreach ($Case in @(@{ Owed = 1; Shown = $true }, @{ Owed = 0; Shown = $false }))
+        $Stays.Count | Should -Be 1
+        foreach ($Case in @(@{ Owed = 1; Shown = $true }, @{ Owed = 0; Shown = $false }, @{ Owed = 0; Shown = $true; RemoveFails = $true }))
         {
             Set-Content -LiteralPath $script:State -Value '{}'
             $script:Said = @()
-            $End = [scriptblock]::Create("param(`$ResumeStateFile, `$RetryOwedCount)`n`$FailedSubscriptions = @(); `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @(); `$ResumeStateSaveFailed = `$true; `$StatePutAside = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Note[0].Extent.Text)
+            # A clean run that cannot remove the state it could not save handles it as not saved.
+            if ($Case.RemoveFails) { Mock Remove-Item -ParameterFilter { [string]$LiteralPath -eq $script:State } -MockWith { throw 'stand-in: locked' } }
+            $End = [scriptblock]::Create("param(`$ResumeStateFile, `$RetryOwedCount)`n`$FailedSubscriptions = @(); `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @(); `$ResumeStateSaveFailed = `$true; `$StatePutAside = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Stays[0].Extent.Text + "`n" + $Note[0].Extent.Text + "`n`$script:EndClean = `$RunClean")
             & $End $script:State $Case.Owed
+            $script:EndClean | Should -Be (-not $Case.Shown) -Because 'exit 2 follows from a run that is not clean'
             @($script:Said | Where-Object { $_ -like '*FAILED (resume state not saved)*' }).Count | Should -Be $(if ($Case.Shown) { 1 } else { 0 })
             Test-Path -LiteralPath $script:State | Should -BeFalse
             @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t.json.not-saved-*' -Force).Count | Should -Be $(if ($Case.Shown) { 1 } else { 0 })
@@ -1185,7 +1202,8 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         {
             $Aside = @(Get-ChildItem -LiteralPath $script:Root -Filter '.resume-state-t.json.not-saved-*' -Force)
             $Aside.Count | Should -Be 1
-            @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written with this run''s results*put aside as {1}. No -Resume run skips a subscription on it*-ResumeFailedOnly refuses to run until a run saves the resume state again.' -f $script:State, $Aside[0].FullName) }).Count | Should -Be 1
+            @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written with this run''s results*{1}*. No -Resume run skips a subscription on it*-ResumeFailedOnly refuses to run until a run saves the resume state again.' -f $script:State, $Aside[0].FullName) }).Count | Should -Be 1
+            @($Lines | Where-Object { $_ -like $(if ($NoFile) { '*an empty file * is made as a mark*' } else { '*it is put aside as *' }) }).Count | Should -Be 1
             # The next -Resume finds no state, so it skips nothing: sub-a is collected again.
             Test-Path -LiteralPath $script:State | Should -BeFalse
             @(Get-CompletedSubscriptionIds -Path $script:State -Tenant 't') | Should -BeNullOrEmpty

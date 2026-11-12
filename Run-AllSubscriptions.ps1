@@ -760,7 +760,6 @@ $NotReadableIds = @(Get-NotReadableSubscriptionIds -Path $ResumeStateFile -Tenan
 # state can rewrite the file.
 $StateWithoutReports = Test-ResumeStateWithoutReports -Path $ResumeStateFile -Tenant $TenantID
 
-# Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
 # Per-stream resume state files that could not be read, at the start or in the
 # end-of-run merge. Their records are not used, so the run is not clean while
 # one is there: it keeps the state and ends with exit 2, and it names each file
@@ -771,7 +770,8 @@ $UnreadableStreamFiles = @()
 # FAILED (resume state not saved) at the end). With no resume state file since,
 # -ResumeFailedOnly cannot tell what is owed, so it does not run; -Resume and a
 # plain run collect every subscription (failures of kept per-stream files are
-# still folded in). A clean run removes these files.
+# still folded in). A clean run, or one whose resume state was saved, removes
+# these files at its end.
 $StatePutAside = @(Get-ChildItem -LiteralPath $InventoryRoot -Filter ((Split-Path -Path $ResumeStateFile -Leaf) + '.not-saved-*') -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
 $StatePutAsideOnly = $StatePutAside.Count -gt 0 -and -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
 # Fail-safe rule, as for a kept per-stream file: only the failures of a put-aside
@@ -818,6 +818,7 @@ if ($Resume -or $ResumeFailedOnly)
         Write-Host ("WARNING: The per-stream resume state file {0}, put aside by an earlier run because it could not be read, is still there. Its records are not used, so this run keeps the resume state and ends with exit 2. Fix it and rename it back to {1} for the next -Resume to fold it in, or delete it (a run without -Resume or -ResumeFailedOnly removes it as stale once it has collected, unless the resume state still lists as completed a subscription that run did not collect)." -f $Aside.FullName, $AsideOf) -ForegroundColor Yellow
         $UnreadableStreamFiles += $Aside.FullName
     }
+    # Fold in any per-stream resume-state left behind by an INTERRUPTED parallel run.
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
     # Fail-safe rule (see the end-of-run merge): a per-stream file left here
     # belongs to a run that was cut off, or whose save could not be verified,
@@ -868,7 +869,7 @@ if ($Resume -or $ResumeFailedOnly)
         }
         # Heal the unified file immediately so even a re-interrupted run keeps
         # the recovered picture. Saved whenever a file was read, also one with no
-        # record: the state in memory is reconciled above (Merge-FailedAttempts),
+        # record: the state in memory is reconciled above (Merge-RecoveredFailedAttempts),
         # and the read-back below compares the file with it.
         if ($FoldedStreamFiles.Count -gt 0)
         {
@@ -2499,7 +2500,7 @@ if ($null -ne $OuterZipFile)
             $MainVer = ('{0}.{1}.{2}' -f $VerObj.MajorVersion, $VerObj.MinorVersion, $VerObj.BuildVersion)
         }
         catch { Write-Verbose ("MainSummary: could not read Version.json: {0}" -f $_.Exception.Message) }
-        New-RdaAllSubHtmlSummary -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime -IncludeFolders $CarriedFolderNames `
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $InventoryRoot -HtmlFile $MainSummaryFile -SinceTime $RunStartTime -IncludeFolders $CarriedFolderNames -ExcludeFolders @($PreRunReportDirs) `
             -FailedSubscriptions $FailedSubscriptions `
             -ConsumptionFailedSubs $Global:ConsumptionFailedSubs `
             -MetricsFailedSubs $Global:MetricsFailedSubs `
@@ -2560,6 +2561,9 @@ if ($RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
         Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
     }
 }
+# A state file that stays although this clean run could not save its results
+# is not shown to hold them: it is handled as not saved below (put aside, exit 2).
+if ($RunClean -and $ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)) { $RunClean = $false }
 
 # A state an earlier run put aside as not saved goes once it is out of date: a
 # clean run owes nothing, and a run whose resume state was saved holds its
@@ -3036,7 +3040,8 @@ if ($ResumeStateSaveFailed -and -not $RunClean)
     $NotSaved = '{0}.not-saved-{1}' -f $ResumeStateFile, (Get-Date -Format 'yyyyMMddHHmmssfff')
     try
     {
-        if (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf) { Move-Item -LiteralPath $ResumeStateFile -Destination $NotSaved -ErrorAction Stop }
+        $Made = -not (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
+        if (-not $Made) { Move-Item -LiteralPath $ResumeStateFile -Destination $NotSaved -ErrorAction Stop }
         else { $null = New-Item -ItemType File -Path ([WildcardPattern]::Escape($NotSaved)) -ErrorAction Stop }
         $StateSetAside = $NotSaved
     }
@@ -3045,7 +3050,7 @@ if ($ResumeStateSaveFailed -and -not $RunClean)
     Write-Host "============== FAILED (resume state not saved) ==============" -ForegroundColor Red
     if ($StateSetAside)
     {
-        Write-Host ("The resume state file {0} could not be written with this run's results (see the WARNING above), so it is put aside as {1}. No -Resume run skips a subscription on it: the next -Resume or plain run collects every subscription, and -ResumeFailedOnly refuses to run until a run saves the resume state again." -f $ResumeStateFile, $StateSetAside) -ForegroundColor Red
+        Write-Host ("The resume state file {0} could not be written with this run's results (see the WARNING above), so {1}. No -Resume run skips a subscription on it: the next -Resume or plain run collects every subscription, and -ResumeFailedOnly refuses to run until a run saves the resume state again." -f $ResumeStateFile, $(if ($Made) { 'an empty file {0} is made as a mark' -f $StateSetAside } else { 'it is put aside as {0}' -f $StateSetAside })) -ForegroundColor Red
         Write-Host ("Fix the cause (for example, free up disk space), then run again without -ResumeFailedOnly. A clean run removes {0}." -f $StateSetAside) -ForegroundColor Red
     }
     else

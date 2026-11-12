@@ -590,7 +590,9 @@ if ($Task -eq 'Processing')
                         }
                         'Count'
                         {
-                            $MetricQueryResults = $MetricQuery.Data.Count
+                            # .Data has a Count of its own, the number of data points, so read the
+                            # property of each point. A point without one reads as $null, not as 1.
+                            $MetricQueryResults = foreach ($DataPoint in $MetricQuery.Data) { $DataPoint.PSObject.Properties['Count'].Value }
                         }
                         'Total'
                         {

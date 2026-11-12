@@ -36,7 +36,10 @@ If ($Task -eq 'Processing')
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $vm.subscriptionId }
             $Data = $vm.PROPERTIES
-            $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            # A missing timeCreated, or one that does not convert to a date, is
+            # 'Unknown' rather than an exception that fails every virtual machine.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]::Parse($Data.timeCreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal') | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Lic = ''
 
@@ -61,11 +64,10 @@ If ($Task -eq 'Processing')
                 $OSDiskSize = $Data.storageProfile.osDisk.diskSizeGB
             }
 
+            # A size the size list for the region does not return (a retired size, for
+            # example) leaves CPU and Memory empty rather than 0.
             $Cpus = $Vmsizemap[$Data.hardwareProfile.vmSize].CPU;
             $Ram = $Vmsizemap[$Data.hardwareProfile.vmSize].RAM;
-
-            $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
-            $Ram = if ($null -ne $Ram) { $Ram } else { '0' }
 
             $PowerState = if ($null -ne $Data.extended.instanceView.powerState.displayStatus) { $Data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }
 

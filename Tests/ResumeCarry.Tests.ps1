@@ -102,6 +102,7 @@ $Global:ResourceCount = 1
     $SeqText = $SeqIf[0].Clauses[0].Item2.Extent.Text -replace '\$PSScriptRoot', '$FakeScriptRoot'
     $script:SequentialBlock = [scriptblock]::Create(
         "param(`$FakeScriptRoot, `$Subscriptions, `$Resume, `$CompletedIds, `$FailedAttempts, `$CompletedReports, `$InventoryRoot, `$ResumeStateFile, `$TenantID, `$Obfuscate)`n" +
+        "function Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" +
         "`$SkippedCount = 0; `$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$InventoryPassthrough = @{ ConcurrencyLimit = 6 }; if (`$Obfuscate) { `$InventoryPassthrough['Obfuscate'] = `$true }`n" +
         ". " + $SeqText + "`n" +
         "[pscustomobject]@{ SkippedSubscriptions = @(`$SkippedSubscriptions); SubResourceCounts = @(`$SubResourceCounts); CompletedIds = @(`$CompletedIds); CompletedReports = @(`$CompletedReports) }")
@@ -598,6 +599,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         if ($OneIf.Count -ne 1) { throw "Expected one 'if (`$StreamCount -le 1)' in the wrapper, found $($OneIf.Count)." }
         $script:FallbackBlock = [scriptblock]::Create(
             "param(`$FakeScriptRoot, `$Subscriptions, `$CompletedIds, `$FailedAttempts, `$CompletedReports, `$InventoryRoot, `$ResumeStateFile, `$TenantID)`n" +
+            "function Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" +
             "`$StreamCount = 1; `$Obfuscate = `$false; `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$InventoryPassthrough = @{ ConcurrencyLimit = 6 }`n" +
             # The parallel path builds the list it slices before this block; these runs are not -Resume runs, so it is every subscription.
             "`$PendingSubscriptions = @(`$Subscriptions)`n" +
@@ -690,30 +692,32 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         Remove-Variable -Name RdaCarryTestFailIds, RdaCarryTestNoZipIds, RdaCarryTestHome -Scope Global -ErrorAction SilentlyContinue
     }
 
-    It 'a run without -Resume takes the earlier completions of the subs it collects again out of the saved state before it collects (<Case>)' -ForEach @(
+    It 'before a sub is collected, one more failed run is saved and its earlier completion taken out; a run that cannot save that stops before collecting it (<Case>)' -ForEach @(
         @{ Case = 'saved'; SaveFails = $false }
         @{ Case = 'the save does not reach the disk'; SaveFails = $true }
     ) {
         (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a')
-        $Top = @([System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null).EndBlock.Statements)
-        $Redo = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '-not ($Resume -or $ResumeFailedOnly)' -and $_.Extent.Text.Contains('$Redo = ') })
-        $Redo.Count | Should -Be 1
-        $Split = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ParallelStreams -le 1' })
-        $Redo[0].Extent.StartOffset | Should -BeLessThan $Split[0].Extent.StartOffset
+        # The sequential and one-subscription paths call it before ResourceInventory.ps1.
+        $Src = Get-Content -LiteralPath $script:WrapperPath -Raw
+        ([regex]::Matches($Src, 'Save-WriteAheadAttempt -Path \$ResumeStateFile')).Count | Should -Be 2
         $S = script:Read-State -Path $script:State
-        if ($SaveFails) { Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' } -MockWith { throw 'stand-in: disk full' } }
-        $Block = [scriptblock]::Create("param(`$Subscriptions, `$CompletedIds, `$FailedAttempts, `$CompletedReports, `$ResumeStateFile, `$TenantID)`n`$Resume = `$false; `$ResumeFailedOnly = `$false`nfunction Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" + $Redo[0].Extent.Text)
         if ($SaveFails)
         {
-            { & $Block @($script:A, $script:B) $S.Completed @() $S.Reports $script:State 't' 6>$null } | Should -Throw 'Exit-Wrapper 1'
+            Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' } -MockWith { throw 'stand-in: disk full' }
+            $Before = @(Get-ChildItem -LiteralPath $script:Root -Directory -Filter 'ResourcesReport*').Count
+            { & $script:SeqBlock $script:FailRoot @($script:A) $false $S.Completed @() $S.Reports $script:Root $script:State 't' $false 6>$null } | Should -Throw 'Exit-Wrapper 2'
+            @(Get-ChildItem -LiteralPath $script:Root -Directory -Filter 'ResourcesReport*').Count | Should -Be $Before -Because 'sub-a was not collected'
             (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a') -Because 'nothing was collected, so the old state still holds'
         }
         else
         {
-            & $Block @($script:A, $script:B) $S.Completed @() $S.Reports $script:State 't' 6>$null
+            $W = Save-WriteAheadAttempt -Path $script:State -Tenant 't' -Id 'sub-a' -Name 'Sub A' -CompletedIds $S.Completed -FailedAttempts @() -Reports $S.Reports
+            $W.Saved | Should -BeTrue
             $After = script:Read-State -Path $script:State
             $After.Completed | Should -BeNullOrEmpty -Because 'a cut-off from here on leaves no older completion of sub-a for a -Resume to skip on'
             $After.Reports | Should -BeNullOrEmpty
+            $E = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object Id -eq 'sub-a')
+            [int]$E[0].Attempts | Should -Be 1 -Because 'a cut-off from here on still counts this run'
         }
     }
 
@@ -764,7 +768,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $After2.Failed | Should -Be @('sub-a')
     }
 
-    It 'a stream that did not start leaves the earlier completion and report of its subscriptions as they were' {
+    It 'a stream that did not start leaves its subs not done: an earlier completion goes and each counts this run once' {
         $S = script:Read-State -Path $script:State
         $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
         @{ RunId = 'run-1'; StreamId = '0'; Tenant = 't'; Status = 'failed-to-start'; Reason = 'stand-in'; Completed = @(); ResourceCounts = @()
@@ -773,8 +777,9 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1 })
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports 6>$null
 
-        @($Agg.CompletedIds) | Should -Be @('sub-a')
-        @($Agg.CompletedReports | ForEach-Object Id) | Should -Be @('sub-a')
+        @($Agg.CompletedIds) | Should -BeNullOrEmpty -Because 'this run gave sub-a to a stream and nothing proves it done'
+        @($Agg.CompletedReports) | Should -BeNullOrEmpty
+        [int](@(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object Id -eq 'sub-a')[0].Attempts) | Should -Be 1
         @($Agg.FailedSubscriptions).Count | Should -Be 1
     }
 
@@ -787,10 +792,10 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2 })
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
-        @($Agg.CompletedIds) | Should -Be @('sub-a') -Because 'the stream attempted nothing, so the earlier completion stays'
-        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
-        @($After | ForEach-Object Id) | Should -Be @('sub-b')
-        [int]$After[0].Attempts | Should -Be 3 -Because 'listed twice, it is still one failed run'
+        @($Agg.CompletedIds) | Should -BeNullOrEmpty
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ } | Sort-Object Id)
+        @($After | ForEach-Object Id) | Should -Be @('sub-a', 'sub-b')
+        [int]$After[1].Attempts | Should -Be 3 -Because 'listed twice, it is still one failed run'
         @(Get-RetryLimitedAttempts -FailedAttempts $After | ForEach-Object Id) | Should -Be @('sub-b')
     }
 
@@ -893,7 +898,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 3 -Because 'the file already counted this run''s failure'
     }
 
-    It 'parallel: a retried subscription a stream completed but could not save stays on the retry list one run more (fail-safe rule), and the next -Resume collects it once and owes nothing' {
+    It 'parallel: a retried subscription a stream completed but could not save keeps its write-ahead count, one it could not count is not collected, and the next -Resume collects both once and owes nothing' {
         # The unified state: sub-a completed (BeforeEach); sub-b and sub-c on the retry list.
         $C = [pscustomobject]@{ Id = 'sub-c'; Name = 'Sub C' }
         $S = script:Read-State -Path $script:State
@@ -901,10 +906,13 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
             [pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 },
             [pscustomobject]@{ Id = 'sub-c'; Name = 'Sub C'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 1 })
         Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids $S.Completed -FailedAttempts $Prior -Reports $S.Reports
-        # Run 2, -ResumeFailedOnly: the stream completes sub-b and fails sub-c again,
-        # and no save of its own state file reaches the disk.
+        # Run 2, -ResumeFailedOnly: the stream saves sub-b's write-ahead count and
+        # completes it, and from then on no save of its own state file reaches
+        # the disk: sub-b's result is not saved, and sub-c's write-ahead count
+        # cannot be saved, so sub-c is not collected.
         $Global:RdaCarryTestFailIds = @('sub-c')
-        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-t-stream-*.json.tmp' } -MockWith { throw 'stand-in: disk full' }
+        $Global:RdaStreamSaves = 0
+        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-t-stream-*.json.tmp' -and (++$Global:RdaStreamSaves) -gt 1 } -MockWith { throw 'stand-in: disk full' }
         $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
         $WorkerArgs = @{
             RunId = 'run-1'
@@ -913,17 +921,20 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
             SubscriptionIds = @('sub-b', 'sub-c'); SubscriptionNames = @('Sub B', 'Sub C'); PriorFailedAttempts = $Prior; ResumeFailedOnly = $true; ConcurrencyLimit = 6
         }
         & (Join-Path $script:RepoRoot 'Run-AllSubscriptions.Stream.ps1') @WorkerArgs 6>$null
-        Test-Path -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') | Should -BeFalse -Because 'the stream could not save its own state'
+        @((Get-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Raw | ConvertFrom-Json).Completed) | Should -BeNullOrEmpty -Because 'the stream could not save sub-b''s result'
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2 })
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
         $After2 = script:Read-State -Path $script:State
-        # Its result was not saved, so it is not done: one more failed run, named.
+        # sub-b's result was not saved, so it is not done: its write-ahead count
+        # stands. sub-c was not collected, so nothing is counted for it. Both named.
         @($After2.Failed | Sort-Object) | Should -Be @('sub-b', 'sub-c')
         @($After2.Completed) | Should -Be @('sub-a')
         @($After2.Reports | ForEach-Object Id) | Should -Be @('sub-a') -Because 'no report of sub-b is recorded, so none can be carried twice'
         [int](@(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 2
-        [int](@(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object Id -eq 'sub-c')[0].Attempts) | Should -Be 2
+        [int](@(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object Id -eq 'sub-c')[0].Attempts) | Should -Be 1
         @($Agg.FailedSubscriptions | Where-Object { $_ -like 'Sub B (stream-0: its stream could not save its result, so it is collected again)' }).Count | Should -Be 1
+        @($Agg.FailedSubscriptions | Where-Object { $_ -like 'Sub C (stream-0: its stream could not save its state before collecting it*' }).Count | Should -Be 1
+        Remove-Variable -Name RdaStreamSaves -Scope Global -ErrorAction SilentlyContinue
 
         # Run 3, -Resume: sub-a is skipped and carried; sub-b and sub-c are
         # collected. The sequential block stands in for the parallel -Resume
@@ -1207,9 +1218,12 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Global:RdaCarryTestFailIds = @('sub-a')
         $S = script:Read-State -Path $script:State
         $script:ResumeStateSaveFailed = $false
-        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' } -MockWith { throw 'stand-in: disk full' }
+        # The write-ahead save reaches the disk; the save of the failure does not.
+        $Global:RdaStateSaves = 0
+        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' -and (++$Global:RdaStateSaves) -gt 1 } -MockWith { throw 'stand-in: disk full' }
         $null = & $script:SeqBlock $script:FailRoot @($script:A) $false $S.Completed @(Get-FailedAttempts -Path $script:State -Tenant 't') $S.Reports $script:Root $script:State 't' $false 6>$null
-        (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a') -Because 'the save did not reach the disk'
+        Remove-Variable -Name RdaStateSaves -Scope Global -ErrorAction SilentlyContinue
+        (script:Read-State -Path $script:State).Completed | Should -BeNullOrEmpty -Because 'the write-ahead save took the earlier completion out'
         $script:ResumeStateSaveFailed | Should -BeTrue
         $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
         $Banner = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$ResumeStateSaveFailed*' })
@@ -1223,7 +1237,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         {
             @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written at least once this run*a -Resume or -ResumeFailedOnly run would skip it and carry its old report.' -f $script:State) }).Count | Should -Be 1
             @($Lines | Where-Object { $_ -like '*then run again without -Resume or -ResumeFailedOnly: it collects every subscription.' }).Count | Should -Be 1
-            (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a')
+            (script:Read-State -Path $script:State).Completed | Should -BeNullOrEmpty
         }
         else
         {

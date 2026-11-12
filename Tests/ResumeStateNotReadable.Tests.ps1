@@ -312,6 +312,24 @@ Describe 'Two -Resume runs in a row after a not-readable subscription was skippe
     BeforeAll {
         # Two -Resume runs; each must exit 0 without an access stop, name
         # nothing under "Not Collected" and leave no resume state.
+        # The sub the interrupted run was collecting counts that run as a failed
+        # run (write-ahead count), so while it is out of this run's set every
+        # -Resume names it under Not In This Run, keeps the state and ends with
+        # exit 2, with the way out; it never reads as a success.
+        function script:Assert-TwoOwedResumes
+        {
+            param($Sub)
+            foreach ($Run in 1..2)
+            {
+                $R = script:Invoke-Wrapper -Arguments '-Resume', '-AllowPartialAccess'
+                script:Get-AccessStopLines $R | Should -BeNullOrEmpty -Because ('-Resume run {0} does not stop at the access check' -f $Run)
+                $R.ExitCode | Should -Be 2 -Because ('-Resume run {0} still owes {1}' -f $Run, $Sub.Name)
+                @($R.Text | Where-Object { $_ -like ('Not In This Run:*1 ({0} ({1}))*' -f $Sub.Name, $Sub.Id) }).Count | Should -Be 1
+                Test-Path -LiteralPath $script:State | Should -BeTrue
+                [int](@(Get-Content -LiteralPath $script:State -Raw | ConvertFrom-Json).FailedAttempts | Where-Object Id -eq $Sub.Id)[0].Attempts | Should -Be 1 -Because 'only the interrupted run counted; it is not collected while out of the set'
+            }
+        }
+
         function script:Assert-TwoCleanResumes
         {
             foreach ($Run in 1..2)
@@ -357,7 +375,7 @@ Describe 'Two -Resume runs in a row after a not-readable subscription was skippe
         script:Assert-TwoCleanResumes
     }
 
-    It 'when the interrupted run left only not-readable subscriptions to collect, the second -Resume ends cleanly' {
+    It 'when the interrupted run''s sub is later out of the set, every -Resume names it as owed (exit 2), the rest being not readable' {
         # Run 1: Sub X is skipped, Sub A completes, the session ends in Sub C,
         # which is disabled afterwards. Every subscription still to collect is
         # not readable.
@@ -368,10 +386,10 @@ Describe 'Two -Resume runs in a row after a not-readable subscription was skippe
         $State1.NotReadable | Should -Be @($script:X.Id)
 
         script:Set-Scenario -Subs $script:A, $script:X, $script:C -Unreadable $script:X.Id -Disabled $script:C.Id
-        script:Assert-TwoCleanResumes
+        script:Assert-TwoOwedResumes -Sub $script:C
     }
 
-    It 'when the subscription left to collect cannot be read after the interruption, the second -Resume ends cleanly' {
+    It 'when the interrupted run''s sub cannot be read afterwards, every -Resume names it as owed (exit 2)' {
         # Run 1: every subscription is readable; Sub A completes, the session ends
         # in Sub X. Sub X cannot be read afterwards.
         script:Set-Scenario -Subs $script:A, $script:X -EndSession $script:X.Id
@@ -379,7 +397,7 @@ Describe 'Two -Resume runs in a row after a not-readable subscription was skippe
         (script:Read-State).Completed | Should -Be @($script:A.Id)
 
         script:Set-Scenario -Subs $script:A, $script:X -Unreadable $script:X.Id
-        script:Assert-TwoCleanResumes
+        script:Assert-TwoOwedResumes -Sub $script:X
     }
 }
 

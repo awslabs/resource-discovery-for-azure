@@ -788,6 +788,48 @@ function Add-FailedAttempt
     return $List
 }
 
+# Write-ahead count (see the wrapper): a sub's failed-run count is raised before
+# it is collected, so a failure only sets the reason and time. -AtLeast raises
+# the count to at least that many runs; a sub with no entry gets one.
+function Set-FailedAttemptReason
+{
+    param([object]$Existing, [string]$Id, [string]$Name, [string]$Reason, [int]$AtLeast = 1)
+    $List = @($Existing | Where-Object { $_ })
+    $Entry = $List | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    $Count = if ($null -ne $Entry) { Get-FailedAttemptCount -Entry $Entry } else { 0 }
+    if ($Count -lt $AtLeast) { $Count = $AtLeast }
+    if ([string]::IsNullOrEmpty($Name) -and $null -ne $Entry) { $Name = [string]$Entry.Name }
+    $List = @($List | Where-Object { $_.Id -ne $Id })
+    $List += [pscustomobject]@{
+        Id           = $Id
+        Name         = $Name
+        LastFailedAt = (Get-Date).ToString('o')
+        Reason       = $Reason
+        Attempts     = $Count
+    }
+    return $List
+}
+
+# The write-ahead step of the fail-safe rule for one sub, before it is collected
+# in this process: its earlier completion and report record leave the saved
+# state, and one more failed run is added, then the state is saved and read
+# back. Returns the new lists and Saved = $false when the file on disk does not
+# hold them (the caller then does not collect the sub).
+function Save-WriteAheadAttempt
+{
+    param([string]$Path, [string]$Tenant, [string]$Id, [string]$Name, [object]$CompletedIds, [object]$FailedAttempts, [object]$Reports)
+    $Ids = @(@($CompletedIds) | Where-Object { $_ -and [string]$_ -ne $Id })
+    $Recs = @(@($Reports) | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Id })
+    $Fails = Add-FailedAttempt -Existing $FailedAttempts -Id $Id -Name $Name -Reason 'its collection started and no result was saved'
+    Save-CompletedSubscriptionIds -Path $Path -Tenant $Tenant -Ids $Ids -FailedAttempts $Fails -Reports $Recs
+    return [pscustomobject]@{
+        Saved          = [bool](Test-ResumeStateSaved -Path $Path -Tenant $Tenant -Ids $Ids -FailedAttempts $Fails -Reports $Recs)
+        CompletedIds   = $Ids
+        FailedAttempts = $Fails
+        Reports        = $Recs
+    }
+}
+
 # Remove a sub's FailedAttempts entry once it has succeeded on a retry, so
 # the resume-state file does not grow into a graveyard of historical
 # failures. Caller persists.

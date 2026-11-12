@@ -1992,9 +1992,11 @@ else
                     # The subs this stream attempted and failed this run, for the
                     # merge of per-stream state below. A stream that did not start
                     # lists its whole slice as failed but attempted none of it, so
-                    # an earlier completion of its subs stays; each sub it leaves
-                    # not done still counts one more failed run (below), so the
-                    # retry limit ends a stream that never starts.
+                    # its subs are not taken off the completed list here (none is
+                    # on it: a plain run took them off before collecting, and
+                    # -Resume gives a stream only subs not done); each still counts
+                    # one more failed run (below), so the retry limit ends a stream
+                    # that never starts.
                     if ($StreamSummary.Status -ne 'failed-to-start')
                     {
                         $StreamFailedIds += @($StreamSummary.Failed | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })

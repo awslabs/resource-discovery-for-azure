@@ -534,6 +534,22 @@ Describe 'Retry limit on the parallel path' {
         @($R2.Calls | Sort-Object -Unique) | Should -Be @('sub-a', 'sub-b', 'sub-x')
     }
 
+    It 'a parallel run whose streams cannot save their state leaves its subs on the retry list, the next -Resume collects each once and runs clean, and the state is then cleared' {
+        $Global:RdaRlFailIds = @()
+        $Global:RdaRlBreakStreamSave = $true
+        Mock Set-Content -ParameterFilter { $Global:RdaRlBreakStreamSave -and [string]$LiteralPath -like '*.resume-state-t-stream-*.json.tmp' } -MockWith { throw 'stand-in: disk full' }
+        $R1 = script:Invoke-Run -Subs @($script:A, $script:B) -Streams 2
+        $Global:RdaRlBreakStreamSave = $false
+        @($R1.Calls | Sort-Object) | Should -Be @('sub-a', 'sub-b')
+        @(Get-CompletedSubscriptionIds -Path $script:State -Tenant 't') | Should -BeNullOrEmpty -Because 'no stream proved a result saved'
+        @(Get-FailedAttempts -Path $script:State -Tenant 't' | ForEach-Object Id | Sort-Object) | Should -Be @('sub-a', 'sub-b')
+        $R2 = script:Invoke-Run -Subs @($script:A, $script:B) -Streams 2 -Resume
+        @($R2.Calls | Sort-Object) | Should -Be @('sub-a', 'sub-b') -Because 'each is collected again, once'
+        @($R2.Result.FailedSubscriptions) | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:State | Should -BeFalse -Because 'the run is clean, so the clean-run rule clears the state and nothing is left to loop on'
+        Remove-Variable -Name RdaRlBreakStreamSave -Scope Global -ErrorAction SilentlyContinue
+    }
+
     It 'a parallel -Resume with nothing left says so, and does not call it one eligible subscription' {
         $Subs = @($script:A, $script:B)
         $Global:RdaRlFailIds = @()

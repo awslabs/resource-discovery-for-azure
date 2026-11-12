@@ -742,6 +742,9 @@ $StreamStateNotMoved = @()
 # reach the resume state on disk, or they could not be removed. They keep the
 # resume state, so the next -Resume folds them in again.
 $LeftStreamFiles = @()
+# Set when the end-of-run merge could not read a per-stream file: the state it
+# saved keeps none of this run's subscriptions as completed and must be kept.
+$RunEndUnreadable = $false
 if ($Resume -or $ResumeFailedOnly)
 {
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -1861,7 +1864,9 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $LeftStreamFiles.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+# A run whose end-of-run merge could not read a per-stream file keeps it too:
+# that file may hold a failure, so the run is not known to be fully successful.
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $LeftStreamFiles.Count -eq 0 -and -not $RunEndUnreadable -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
     {

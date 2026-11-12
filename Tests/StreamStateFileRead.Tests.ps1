@@ -53,6 +53,14 @@ BeforeAll {
             "'NO EXIT CHANGE'")
     }
 
+    # The end-of-run clean-up of the resume state.
+    $Cleanup = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0*' })
+    if ($Cleanup.Count -ne 1) { throw "Expected one end-of-run clean-up of the resume state, found $($Cleanup.Count)." }
+    $script:CleanupBlock = [scriptblock]::Create(
+        "param(`$ResumeStateFile, `$RunEndUnreadable, `$UnreadableStreamFiles = @())`n" +
+        "`$FailedSubscriptions = @(); `$FailedAttempts = @(); `$LeftStreamFiles = @(); `$FoldedStreamFiles = @()`n" +
+        $Cleanup[0].Extent.Text)
+
     function script:New-StreamFile
     {
         param([string]$Dir, [int]$N, [string]$Text)
@@ -174,6 +182,34 @@ Describe 'The end-of-run merge of the per-stream resume state files' {
         $R = & $script:MergeBlock $script:Dir 't' $script:State
         Test-Path -LiteralPath $Bad | Should -BeTrue
         @($R.NotMoved | ForEach-Object Name) | Should -Be @('.resume-state-t-stream-2.json')
+    }
+}
+
+Describe 'The end-of-run clean-up of the resume state after the merge' {
+    BeforeEach {
+        $script:Lines = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { $script:Lines.Add([string]$Object) }
+        $script:Dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:Dir -Force | Out-Null
+        $script:State = Join-Path $script:Dir '.resume-state-t.json'
+    }
+
+    It 'keeps the resume state the merge saved when it could not read a per-stream file' {
+        # sub-x was completed by an earlier run; this run's sub-a and sub-b lost their completions.
+        $null = script:New-StreamFile -Dir $script:Dir -N 0 -Text '{ "Completed": ['
+        $Slices = @(, @([pscustomobject]@{ Id = 'sub-a'; Name = 'A' })) + @(, @([pscustomobject]@{ Id = 'sub-b'; Name = 'B' }))
+        $R = & $script:MergeBlock $script:Dir 't' $script:State @('sub-a', 'sub-x') $Slices
+        & $script:CleanupBlock $script:State $true $R.Unreadable
+        Test-Path -LiteralPath $script:State | Should -BeTrue -Because 'the next -Resume must still skip sub-x and collect sub-a and sub-b'
+        @(Get-CompletedSubscriptionIds -Path $script:State -Tenant 't') | Should -Be @('sub-x')
+        @($script:Lines | Where-Object { $_ -eq 'Resume state cleared (clean run).' }) | Should -BeNullOrEmpty
+    }
+
+    It 'clears the resume state of a clean run' {
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @('sub-a')
+        & $script:CleanupBlock $script:State $false
+        Test-Path -LiteralPath $script:State | Should -BeFalse
+        @($script:Lines | Where-Object { $_ -eq 'Resume state cleared (clean run).' }).Count | Should -Be 1
     }
 }
 

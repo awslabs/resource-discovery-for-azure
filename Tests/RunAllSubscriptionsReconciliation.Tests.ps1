@@ -176,6 +176,380 @@ Describe 'Get-WrapperExitCode' {
         # anything that only checks the exit code.
         Get-WrapperExitCode -AuthSkipped $true -CollectorsFailed $true | Should -Be 5 -Because 'neither failure signal may be silently dropped when both occur in the same run'
     }
+
+    It 'Returns 2 when a subscription failed, whatever else happened (a failed run is never reported as clean)' -ForEach @(
+        @{ Auth = $false; Collectors = $false }
+        @{ Auth = $true; Collectors = $false }
+        @{ Auth = $false; Collectors = $true }
+        @{ Auth = $true; Collectors = $true }
+    ) {
+        Get-WrapperExitCode -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $true | Should -Be 2
+    }
+
+    It 'Get-WrapperExitCodeSummary says what exit <Code> means (auth <Auth>, collectors <Collectors>, failed <Failed>, zip <Zip>)' -ForEach @(
+        @{ Auth = $false; Collectors = $false; Failed = $false; Zip = $true; Code = 0; First = 'Exit code 0: clean run, no failures of any kind.'; Also = $null }
+        @{ Auth = $true; Collectors = $false; Failed = $false; Zip = $true; Code = 3; First = 'Exit code 3: Metrics and/or Consumption were skipped for a sign-in problem (see FAILED (auth)); the rest of the report was made.'; Also = $null }
+        @{ Auth = $false; Collectors = $true; Failed = $false; Zip = $true; Code = 4; First = 'Exit code 4: one or more collectors failed (see FAILED (collectors)); the rest of the report was made.'; Also = $null }
+        @{ Auth = $true; Collectors = $true; Failed = $false; Zip = $true; Code = 5; First = 'Exit code 5: Metrics and/or Consumption were skipped for a sign-in problem and one or more collectors failed (see FAILED (auth) and FAILED (collectors)); the rest of the report was made.'; Also = $null }
+        @{ Auth = $false; Collectors = $false; Failed = $true; Zip = $true; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); the consolidated zip holds the reports of the subscriptions that worked.'; Also = $null }
+        @{ Auth = $false; Collectors = $false; Failed = $true; Zip = $false; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.'; Also = $null }
+        @{ Auth = $true; Collectors = $false; Failed = $true; Zip = $true; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); the consolidated zip holds the reports of the subscriptions that worked.'; Also = 'Exit code 2 takes priority over exit code 3, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem.' }
+        @{ Auth = $false; Collectors = $true; Failed = $true; Zip = $true; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); the consolidated zip holds the reports of the subscriptions that worked.'; Also = 'Exit code 2 takes priority over exit code 4, which this run also has: one or more collectors failed.' }
+        @{ Auth = $true; Collectors = $true; Failed = $true; Zip = $false; Code = 2; First = 'Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.'; Also = 'Exit code 2 takes priority over exit code 5, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem and one or more collectors failed.' }
+    ) {
+        Get-WrapperExitCode -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $Failed | Should -Be $Code
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $Failed -ReportMade $Zip)
+        $Lines[0] | Should -BeExactly $First
+        if ($null -eq $Also) { $Lines.Count | Should -Be 1 } else { $Lines.Count | Should -Be 2; $Lines[1] | Should -BeExactly $Also }
+    }
+
+    It 'Get-WrapperExitCodeSummary names a stream summary that could not be read, not as failed subscriptions (zip <Zip>)' -ForEach @(
+        @{ Zip = $true; Tail = 'check the consolidated zip for their reports' }
+        @{ Zip = $false; Tail = 'no consolidated zip was made' }
+    ) {
+        $Streams = @([pscustomobject]@{ StreamId = 1; SubCount = 3 })
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $true -UnreadableStreams $Streams -ReportMade $Zip)
+        $Lines | Should -Be @(
+            ('Exit code 2: the summary of stream 1 could not be read; its 3 subscription(s) are not confirmed; {0}.' -f $Tail)
+            'Exit code 2 takes priority over exit code 4, which this run also has: one or more collectors failed.'
+        )
+        $Both = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $false -SubscriptionsFailed $true -UnreadableStreams $Streams -ReportMade $Zip)
+        $Both.Count | Should -Be 2
+        $Both[0] | Should -Match '^Exit code 2: one or more subscriptions failed \(see Subscriptions Failed\)'
+        $Both[1] | Should -Match '^Exit code 2: the summary of stream 1 could not be read'
+    }
+
+    It 'Get-WrapperExitCodeSummary says a stream summary that is missing is missing, not that it could not be read (zip <Zip>)' -ForEach @(
+        @{ Zip = $true; Tail = 'check the consolidated zip for their reports' }
+        @{ Zip = $false; Tail = 'no consolidated zip was made' }
+    ) {
+        $Streams = @(
+            [pscustomobject]@{ StreamId = 0; SubCount = 2; Reason = 'Missing' }
+            [pscustomobject]@{ StreamId = 1; SubCount = 3; Reason = 'Unreadable' }
+        )
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $false -UnreadableStreams $Streams -ReportMade $Zip)
+        $Lines | Should -Be @(
+            ('Exit code 2: the summary of stream 0 is missing; its 2 subscription(s) are not confirmed; {0}.' -f $Tail)
+            ('Exit code 2: the summary of stream 1 could not be read; its 3 subscription(s) are not confirmed; {0}.' -f $Tail)
+        )
+    }
+
+    It 'Get-WrapperExitCodeSummary describes the verification-gap stop (auth <Auth>, collectors <Collectors>, failed <Failed>)' -ForEach @(
+        @{ Auth = $false; Collectors = $false; Failed = $false; Also = @() }
+        @{ Auth = $true; Collectors = $false; Failed = $false; Also = @('Exit code 2 takes priority over exit code 3, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem.') }
+        @{ Auth = $true; Collectors = $true; Failed = $true; Also = @('Exit code 2: one or more subscriptions failed (see Subscriptions Failed); no consolidated zip was made.', 'Exit code 2 takes priority over exit code 5, which this run also has: Metrics and/or Consumption were skipped for a sign-in problem and one or more collectors failed.') }
+    ) {
+        $Lines = @(Get-WrapperExitCodeSummary -AuthSkipped $Auth -CollectorsFailed $Collectors -SubscriptionsFailed $Failed -VerificationGap $true -ReportMade $false)
+        $Lines | Should -Be (@('Exit code 2: a report is missing (verification gap, see Per-subscription output verification failed); no consolidated zip was made.') + $Also)
+    }
+
+    # That the wrapper passes its failed subscriptions in is tested by running
+    # it, in Tests/ExitCodeCarryOver.Tests.ps1: sequential, one subscription
+    # with -ParallelStreams, a failed subscription in a stream, and a stream
+    # summary the wrapper cannot read.
+}
+
+Describe 'Resolve-StreamSummary (the one reader of a stream summary)' {
+    # The summaries are JSON text, parsed as the wrapper parses the file, so
+    # the values have the types ConvertFrom-Json gives them.
+    BeforeAll {
+        $script:GoodRow = '{"Id":"sub-a","Name":"Sub A","Count":3,"Zip":"/reports/a/ResourcesReport_a.zip"}'
+        $script:RunId = '11111111-2222-3333-4444-555555555555'
+        # The summary names this run (as the worker writes it) unless the
+        # case names its own RunId.
+        function script:Read-Case
+        {
+            param([string]$Json, [string[]]$Expected = @('sub-a'))
+            if ($Json -like '{*' -and $Json -notlike '*"RunId"*') { $Json = '{"RunId":"' + $script:RunId + '",' + $Json.Substring(1) }
+            Resolve-StreamSummary -Summary ($Json | ConvertFrom-Json) -RunId $script:RunId -StreamId '0' -ExpectedIds $Expected
+        }
+    }
+
+    It 'accepts a good summary and gives back its values with their types' {
+        $Json = '{"StreamId":"0","Status":"partial-failure","ResourceCounts":[' + $script:GoodRow + '],"Failed":[{"Id":"sub-b","Name":"Sub B","Reason":"it failed"}],"ConsumptionRecords":7,"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":"sub-a"},{"Id":"sub-b","Name":"Sub B","Message":"m","SubscriptionId":""}],"MetricsFailedSubs":[{"Id":"sub-a","Name":"Sub A","Message":"m"}],"CollectorFailures":[{"Id":"sub-a","Module":"VM","Message":"m"}]}'
+        $Read = Read-Case -Json $Json -Expected @('sub-a', 'sub-b')
+        $Read.Accepted | Should -BeTrue -Because $Read.Reason
+        $Read.Status | Should -Be 'partial-failure'
+        @($Read.ResourceCounts).Count | Should -Be 1
+        $Read.ResourceCounts[0].Count | Should -BeOfType [int]
+        $Read.ResourceCounts[0].Count | Should -Be 3
+        $Read.ResourceCounts[0].Zip | Should -Be '/reports/a/ResourcesReport_a.zip'
+        $Read.Failed[0].Reason | Should -Be 'it failed'
+        $Read.ConsumptionRecords | Should -BeOfType [int]
+        $Read.ConsumptionRecords | Should -Be 7
+        @($Read.ConsumptionFailedSubs).Count | Should -Be 2
+        $Read.ConsumptionFailedSubs[0].SubscriptionId | Should -Be 'sub-a'
+        @($Read.MetricsFailedSubs).Count | Should -Be 1
+        @($Read.CollectorFailures).Count | Should -Be 1
+    }
+
+    It 'accepts a summary whose lists and record count are absent, when the stream ran nothing' {
+        $Read = Read-Case -Json '{"StreamId":"0","Status":"ok"}' -Expected @()
+        $Read.Accepted | Should -BeTrue -Because $Read.Reason
+        @($Read.ResourceCounts).Count | Should -Be 0
+        $Read.ConsumptionRecords | Should -BeNullOrEmpty
+    }
+
+    It 'does not confirm a summary whose <Case>' -ForEach @(
+        @{ Case = 'success row has no Count'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Name":"Sub A","Zip":"/r/a.zip"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is text'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":"abc"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is below 0'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":-1}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is not a whole number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1.5}]}'; Reason = 'success row' }
+        @{ Case = 'success row Count is too big'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":3000000000}]}'; Reason = 'success row' }
+        @{ Case = 'success row has no Id'; Json = '{"StreamId":"0","ResourceCounts":[{"Name":"Sub A","Count":1}],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Id is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":5,"Count":1}],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'success row' }
+        @{ Case = 'success row Name is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Name":5,"Count":1}]}'; Reason = 'success row' }
+        @{ Case = 'success row Zip is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1,"Zip":5}]}'; Reason = 'success row' }
+        @{ Case = 'success row is not an object'; Json = '{"StreamId":"0","ResourceCounts":["sub-a"],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'success row' }
+        @{ Case = 'ResourceCounts is one object, not a list'; Json = '{"StreamId":"0","ResourceCounts":{"Id":"sub-a","Count":1}}'; Reason = 'ResourceCounts is not a list' }
+        @{ Case = 'failed row has no Reason'; Json = '{"StreamId":"0","Failed":[{"Id":"sub-a","Name":"Sub A"}]}'; Reason = 'failed row' }
+        @{ Case = 'failed row Reason is a number'; Json = '{"StreamId":"0","Failed":[{"Id":"sub-a","Name":"Sub A","Reason":5}]}'; Reason = 'failed row' }
+        @{ Case = 'failed row has no Id'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":[{"Name":"Sub X","Reason":"r"}]}'; Reason = 'failed row' }
+        @{ Case = 'Failed is text, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":"none"}'; Reason = 'Failed is not a list' }
+        @{ Case = 'ConsumptionRecords is text'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionRecords":"abc"}'; Reason = 'ConsumptionRecords' }
+        @{ Case = 'ConsumptionRecords is below 0'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionRecords":-1}'; Reason = 'ConsumptionRecords' }
+        @{ Case = 'ConsumptionRecords is not a whole number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionRecords":1.5}'; Reason = 'ConsumptionRecords' }
+        @{ Case = 'ConsumptionFailedSubs is one object, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":{"Id":"sub-a"}}'; Reason = 'ConsumptionFailedSubs is not a list' }
+        @{ Case = 'MetricsFailedSubs is text, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"MetricsFailedSubs":"sub-a"}'; Reason = 'MetricsFailedSubs is not a list' }
+        @{ Case = 'CollectorFailures is a number, not a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"CollectorFailures":3}'; Reason = 'CollectorFailures is not a list' }
+        @{ Case = 'CollectorFailures row has no Id'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"CollectorFailures":[{"Module":"VM","Message":"m"}]}'; Reason = 'CollectorFailures row' }
+        @{ Case = 'MetricsFailedSubs row Message is a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"MetricsFailedSubs":[{"Id":"sub-a","Message":["m"]}]}'; Reason = 'MetricsFailedSubs row' }
+        @{ Case = 'ConsumptionFailedSubs row is text'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":["sub-a"]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row has no SubscriptionId'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m"}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is empty'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":""}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is null'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":null}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":5}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":["a","b"]}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'sign-in row SubscriptionId is an object'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"(auth)","Name":"(all subscriptions)","Message":"m","SubscriptionId":{"a":1}}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'other ConsumptionFailedSubs row SubscriptionId is a list'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"ConsumptionFailedSubs":[{"Id":"sub-a","Name":"Sub A","Message":"m","SubscriptionId":["a"]}]}'; Reason = 'ConsumptionFailedSubs row' }
+        @{ Case = 'MetricsFailedSubs row SubscriptionId is a number'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"MetricsFailedSubs":[{"Id":"sub-a","Message":"m","SubscriptionId":5}]}'; Reason = 'MetricsFailedSubs row' }
+        @{ Case = 'CollectorFailures row SubscriptionId is an object'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"CollectorFailures":[{"Id":"sub-a","Module":"VM","Message":"m","SubscriptionId":{"a":1}}]}'; Reason = 'CollectorFailures row' }
+        @{ Case = 'Status is a number'; Json = '{"StreamId":"0","Status":1,"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'Status is not text' }
+        @{ Case = 'StreamId names another stream'; Json = '{"StreamId":"1","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
+        @{ Case = 'StreamId is missing'; Json = '{"ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'names stream' }
+        @{ Case = 'rows miss a subscription the stream ran'; Json = '{"StreamId":"0","ResourceCounts":[],"Failed":[]}'; Reason = 'no row for 1 of the 1' }
+        # One outcome row per subscription the stream ran: a second row
+        # would count its resources and zip twice, and a row for another
+        # subscription would add counts and a zip the stream did not make.
+        @{ Case = 'success rows name one subscription twice'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1,"Zip":"/r/a.zip"},{"Id":"sub-a","Count":1,"Zip":"/r/a.zip"}]}'; Reason = 'more than one row for 1 of the 1' }
+        @{ Case = 'a success row and a failed row name one subscription'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":[{"Id":"sub-a","Name":"Sub A","Reason":"r"}]}'; Reason = 'more than one row for 1 of the 1' }
+        @{ Case = 'success rows name one subscription twice, in another case'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1},{"Id":"SUB-A","Count":1}]}'; Reason = 'more than one row for 1 of the 1' }
+        @{ Case = 'a success row names a subscription the stream did not run'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1},{"Id":"sub-x","Count":5,"Zip":"/r/x.zip"}]}'; Reason = '1 row(s) for a subscription the stream did not run' }
+        @{ Case = 'a failed row names a subscription the stream did not run'; Json = '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}],"Failed":[{"Id":"sub-x","Name":"Sub X","Reason":"r"}]}'; Reason = '1 row(s) for a subscription the stream did not run' }
+        @{ Case = 'text is a list'; Json = '[]'; Reason = 'not a JSON object' }
+        @{ Case = 'RunId names another run'; Json = '{"RunId":"99999999-2222-3333-4444-555555555555","StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }
+        @{ Case = 'RunId is missing'; Json = '{"RunId":null,"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }
+        @{ Case = 'RunId is a number'; Json = '{"RunId":5,"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}'; Reason = 'it is not from this run' }
+    ) {
+        $Read = Read-Case -Json $Json
+        $Read.Accepted | Should -BeFalse
+        $Read.Reason | Should -Match ([regex]::Escape($Reason))
+    }
+
+    It 'does not confirm a summary with no RunId, as an older worker or another tool writes it' {
+        $Read = Resolve-StreamSummary -Summary ('{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":1}]}' | ConvertFrom-Json) -RunId $script:RunId -StreamId '0' -ExpectedIds @('sub-a')
+        $Read.Accepted | Should -BeFalse
+        $Read.Reason | Should -Be 'it is not from this run'
+    }
+
+    It 'never throws on a bad value' {
+        { Read-Case -Json '{"StreamId":"0","ResourceCounts":[{"Id":"sub-a","Count":{"a":1},"Zip":{"b":2}}],"ConsumptionRecords":[1,2]}' } | Should -Not -Throw
+    }
+}
+
+Describe 'Resume state messages whose error text holds braces' {
+    # The error text goes in as a value, not into the format string, so
+    # braces in it (a path, or the bad JSON) cannot break the message.
+    It 'Save-CompletedSubscriptionIds warns and does not throw when the write fails under a folder named with braces' {
+        Mock Write-Host -MockWith { }
+        $Path = Join-Path $script:TestRoot 'gone-{folder}/state.json'
+        { Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('a') -ErrorAction SilentlyContinue } | Should -Not -Throw
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('WARNING: Failed to persist resume state to {0}: *gone-{{folder}}*' -f $Path) }
+    }
+
+    It 'Get-CompletedSubscriptionIds starts fresh and does not throw on a resume state file whose bad JSON holds braces' {
+        Mock Write-Host -MockWith { }
+        $Path = Join-Path $script:TestRoot 'bad-braces.json'
+        Set-Content -LiteralPath $Path -Value '{"TenantID": {x}' -Encoding utf8
+        { $script:Ids = Get-CompletedSubscriptionIds -Path $Path -Tenant 't' } | Should -Not -Throw
+        @($script:Ids).Count | Should -Be 0
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('Could not read resume state file ({0}); starting fresh. *' -f $Path) }
+    }
+}
+
+Describe 'A resume state file that is there but cannot be read' -Skip:$IsWindows {
+    # Mode 000, as when the file is locked or has no access. A read that fails
+    # is not a bad file: it may hold done subscriptions and failures still to
+    # retry, so the run stops with the real reason, before any write over it.
+    BeforeEach {
+        $script:LockDir = Join-Path $script:TestRoot ('lock_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:LockDir -Force | Out-Null
+        $script:LockPath = Join-Path $script:LockDir 'state.json'
+        Save-CompletedSubscriptionIds -Path $script:LockPath -Tenant 't' -Ids @('done-1') -FailedAttempts @([pscustomobject]@{ Id = 'failed-1'; Name = 'F'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 })
+        $script:LockBefore = Get-Content -LiteralPath $script:LockPath -Raw
+        [System.IO.File]::SetUnixFileMode($script:LockPath, [System.IO.UnixFileMode]::None)
+        Mock Write-Host -MockWith { }
+        Mock Exit-Wrapper -MockWith { throw ('stand-in exit {0}' -f $Code) }
+    }
+
+    AfterEach {
+        [System.IO.File]::SetUnixFileMode($script:LockPath, [System.IO.UnixFileMode]'UserRead, UserWrite')
+    }
+
+    It '<Name> stops with exit 1 and names the read failure, not a different tenant' -ForEach @(
+        @{ Name = 'Get-CompletedSubscriptionIds' }
+        @{ Name = 'Get-FailedAttempts' }
+    ) {
+        { & $Name -Path $script:LockPath -Tenant 't' } | Should -Throw 'stand-in exit 1'
+        Should -Invoke Exit-Wrapper -Times 1 -Exactly -ParameterFilter { $Code -eq 1 }
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('ERROR: The resume state file {0} exists but could not be read: *denied*' -f $script:LockPath) }
+        Should -Invoke Write-Host -Times 0 -Exactly -ParameterFilter { ([string]$Object) -like '*different tenant*' }
+        Should -Invoke Write-Host -Times 0 -Exactly -ParameterFilter { ([string]$Object) -like '*starting fresh*' }
+    }
+
+    It 'once it can be read again, the saved completions and failures are all there' {
+        { Get-CompletedSubscriptionIds -Path $script:LockPath -Tenant 't' } | Should -Throw 'stand-in exit 1'
+        [System.IO.File]::SetUnixFileMode($script:LockPath, [System.IO.UnixFileMode]'UserRead, UserWrite')
+        Get-Content -LiteralPath $script:LockPath -Raw | Should -Be $script:LockBefore
+        @(Get-CompletedSubscriptionIds -Path $script:LockPath -Tenant 't') | Should -Be @('done-1')
+        @(Get-FailedAttempts -Path $script:LockPath -Tenant 't').Id | Should -Be @('failed-1')
+    }
+}
+
+Describe 'Save-CompletedSubscriptionIds keeps the old state when its write fails' {
+    BeforeEach {
+        $script:KeepDir = Join-Path $script:TestRoot ('keep_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:KeepDir -Force | Out-Null
+        $script:KeepPath = Join-Path $script:KeepDir 'state.json'
+        Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1') -FailedAttempts @([pscustomobject]@{ Id = 'failed-1'; Name = 'F'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 })
+        $script:KeepBefore = Get-Content -LiteralPath $script:KeepPath -Raw
+    }
+
+    It 'a write that stops part-way (a full disk) leaves the old state, warns, and leaks no error' {
+        # The write leaves a cut temp file and a non-terminating error, as
+        # Set-Content does when the disk fills.
+        Mock Set-Content -MockWith {
+            [System.IO.File]::WriteAllText([string]$(if ($PesterBoundParameters.ContainsKey('LiteralPath')) { $PesterBoundParameters['LiteralPath'] } else { $PesterBoundParameters['Path'] }), '{"TenantID": "t", "Compl')
+            Write-Error 'stand-in: no space left on the disk'
+        }
+        Mock Write-Host -MockWith { }
+        $Out = @(Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1', 'done-2') 2>&1)
+        @($Out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count | Should -Be 0
+        Get-Content -LiteralPath $script:KeepPath -Raw | Should -Be $script:KeepBefore
+        @(Get-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't') | Should -Be @('done-1')
+        @(Get-FailedAttempts -Path $script:KeepPath -Tenant 't').Id | Should -Be @('failed-1')
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '*WARNING: Failed to persist resume state to *no space left on the disk*' }
+        Test-Path -LiteralPath "$script:KeepPath.tmp" | Should -BeFalse
+    }
+
+    It 'a temp path that cannot be written (a folder is there) leaves the old state, warns about the write, and leaks no error' {
+        New-Item -ItemType Directory -Path "$script:KeepPath.tmp" -Force | Out-Null
+        Mock Write-Host -MockWith { }
+        $Out = @(Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1', 'done-2') 2>&1)
+        @($Out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count | Should -Be 0
+        Get-Content -LiteralPath $script:KeepPath -Raw | Should -Be $script:KeepBefore
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like ('WARNING: Failed to persist resume state to {0}: *' -f $script:KeepPath) }
+    }
+
+    It 'a folder with files at the temp path leaves the old state and the folder, warns, and does not throw' {
+        # Remove-Item on a folder with children and no -Recurse asks to
+        # confirm; in a run with no console that is a terminating error.
+        New-Item -ItemType Directory -Path "$script:KeepPath.tmp" -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path "$script:KeepPath.tmp" 'keep.txt') -Value 'x'
+        Mock Write-Host -MockWith { }
+        { $script:Out = @(Save-CompletedSubscriptionIds -Path $script:KeepPath -Tenant 't' -Ids @('done-1', 'done-2') -PassThru 2>&1) } | Should -Not -Throw
+        $script:Out[-1] | Should -BeFalse
+        Get-Content -LiteralPath $script:KeepPath -Raw | Should -Be $script:KeepBefore
+        Test-Path -LiteralPath (Join-Path "$script:KeepPath.tmp" 'keep.txt') -PathType Leaf | Should -BeTrue -Because 'only a temp file is removed, never a folder'
+    }
+}
+
+Describe 'A resume state warning that cannot be written' {
+    # Both state writes run inside a subscription's try, after its success
+    # row is added. When the inventory folder is gone the console or
+    # transcript can be gone too, so the warning itself can fail to write;
+    # that must not reach the subscription's catch and list it as failed.
+    It 'Save-CompletedSubscriptionIds does not throw when its warning cannot be written' {
+        Mock Write-Host -MockWith { throw 'stand-in: the console cannot be written' }
+        $Path = Join-Path $script:TestRoot 'gone-sequential/state.json'
+        { Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('a') } | Should -Not -Throw
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like 'WARNING: Failed to persist resume state to *' }
+        Test-Path -LiteralPath "$Path.tmp" | Should -BeFalse
+    }
+
+    It 'Write-StreamState does not throw when its warning cannot be written' {
+        # The worker's line prefix, which Write-Stream reads from its caller.
+        Set-Variable -Name Tag -Value '[stream-0]'
+        Mock Set-Content -MockWith { throw 'stand-in: the folder is gone' }
+        Mock Write-Host -MockWith { throw 'stand-in: the console cannot be written' }
+        $Path = Join-Path $script:TestRoot 'gone-stream/state.json'
+        { Write-StreamState -Path $Path -Completed @('a') -FailedAttempts @() } | Should -Not -Throw
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: failed to persist stream state to *' }
+    }
+
+    It 'Write-StreamState warns and does not fail when its folder is gone' {
+        # No Set-Content mock: the real write into a missing folder must
+        # reach the catch, so the warning is printed and no error leaks out.
+        Set-Variable -Name Tag -Value '[stream-0]'
+        Mock Write-Host -MockWith { }
+        $Path = Join-Path $script:TestRoot 'gone-stream-real/state.json'
+        { $script:StreamWriteOut = @(Write-StreamState -Path $Path -Completed @('a') -FailedAttempts @() 2>&1) } | Should -Not -Throw
+        @($script:StreamWriteOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count | Should -Be 0
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: failed to persist stream state to *' }
+        Test-Path -LiteralPath $Path | Should -BeFalse
+    }
+
+    It 'Read-StreamState starts fresh and does not throw when its warning cannot be written' {
+        # It runs at stream start; a warning that cannot be written must not
+        # end the stream before its loop.
+        Set-Variable -Name Tag -Value '[stream-0]'
+        Mock Write-Host -MockWith { throw 'stand-in: the console cannot be written' }
+        $Path = Join-Path $script:TestRoot 'bad-stream-state.json'
+        Set-Content -LiteralPath $Path -Value '{"Completed": [' -Encoding utf8
+        { $script:StreamRead = Read-StreamState -Path $Path } | Should -Not -Throw
+        @($script:StreamRead.Completed).Count | Should -Be 0
+        @($script:StreamRead.Failed).Count | Should -Be 0
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { ([string]$Object) -like '`[stream-0`] WARNING: could not read stream state at *' }
+    }
+}
+
+Describe 'A stream resume state holds no [null] failure' {
+    # A worker's first success runs Remove-FailedAttempt on an empty list,
+    # and assigning the empty result sets $null. A [null] in the file then
+    # read back as one failure: the next run's start counted a failure for
+    # every stream file of a stream where every subscription worked.
+    BeforeAll {
+        $script:NullDir = Join-Path $script:TestRoot ('nullstream_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path $script:NullDir -Force | Out-Null
+    }
+
+    It 'Write-StreamState writes [] after the last failure was cleared, as a worker passes it' {
+        Set-Variable -Name Tag -Value '[stream-0]'
+        $Path = Join-Path $script:NullDir 'cleared.json'
+        $FailedAttempts = @()
+        $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id 'sub-a'
+        Write-StreamState -Path $Path -Completed @('sub-a') -FailedAttempts $FailedAttempts
+        $Obj = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        @($Obj.FailedAttempts | Where-Object { $null -eq $_ }).Count | Should -Be 0 -Because (Get-Content -LiteralPath $Path -Raw)
+        @((Read-StreamState -Path $Path).Failed).Count | Should -Be 0
+    }
+
+    It 'Read-StreamState reads [null] in a file an earlier worker wrote as no failure' {
+        $Path = Join-Path $script:NullDir 'older.json'
+        Set-Content -LiteralPath $Path -Value '{"Tenant":"t","StreamId":"0","Completed":["sub-a"],"FailedAttempts":[null]}' -Encoding utf8
+        $Read = Read-StreamState -Path $Path
+        @($Read.Failed).Count | Should -Be 0
+        @($Read.Completed) | Should -Be @('sub-a')
+    }
+
+    It 'Write-StreamState keeps a real failure and drops only the [null]' {
+        Set-Variable -Name Tag -Value '[stream-0]'
+        $Path = Join-Path $script:NullDir 'mixed.json'
+        $Failure = [pscustomobject]@{ Id = 'sub-b'; Name = 'B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 }
+        Write-StreamState -Path $Path -Completed @() -FailedAttempts @($null, $Failure)
+        @((Read-StreamState -Path $Path).Failed).Id | Should -Be @('sub-b')
+        @((Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json).FailedAttempts).Count | Should -Be 1
+    }
 }
 
 Describe 'Add-FailedAttempt / Remove-FailedAttempt single-element handling' {
@@ -431,6 +805,23 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Match 'no usable token'
     }
 
+    It 'non-obfuscated run prints a failed subscription given as text as given, and one given as an object by name and id' {
+        # The wrapper passes text for a stream it could not read and objects
+        # with Name and Id for a subscription that failed.
+        $Lines = Get-RunSummaryLogContent `
+            -Visible 3 -Excluded 0 -Eligible 3 -Processed 3 -Skipped 0 `
+            -FailedSubscriptions @([pscustomobject]@{ Name = 'Contoso-Prod-Sub'; Id = '11111111-1111-1111-1111-111111111111' }, 'stream-0 (corrupt summary)')
+        $Detail = @($Lines | Where-Object { $_ -like '  - *' })
+        $Detail | Should -Be @('  - Contoso-Prod-Sub (11111111-1111-1111-1111-111111111111)', '  - stream-0 (corrupt summary)')
+    }
+
+    It 'obfuscated run prints no failed subscription given as text' {
+        $Text = (Get-RunSummaryLogContent -Obfuscated -Visible 1 -Excluded 0 -Eligible 1 -Processed 1 -Skipped 0 `
+                -FailedSubscriptions @('Contoso-Prod-Sub (stream-0: boom)')) -join "`n"
+        $Text | Should -Not -Match 'Contoso'
+        $Text | Should -Match 'Failed subscriptions\s+:\s+1'
+    }
+
     It 'drops TenantID / SubscriptionID / InventoryRoot from the parameter list' {
         $Params = @{
             TenantID        = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
@@ -488,9 +879,284 @@ Describe 'Get-RunSummaryLogContent run-level shareable log' {
         $Text | Should -Not -Match 'Host / parallelism:'
     }
 
+    It 'names the exit code and what exit code 2 hides, in both modes' {
+        $ExitLines = @(Get-WrapperExitCodeSummary -AuthSkipped $false -CollectorsFailed $true -SubscriptionsFailed $true -ReportMade $true)
+        foreach ($Obf in @($true, $false))
+        {
+            $Lines = @(Get-RunSummaryLogContent -Obfuscated:$Obf -Visible 2 -Eligible 2 -Processed 2 -ExitCodeLines $ExitLines)
+            $At = [array]::IndexOf($Lines, 'Exit code:')
+            $At | Should -BeGreaterThan -1
+            $Lines[$At + 1] | Should -BeExactly ('  ' + $ExitLines[0])
+            $Lines[$At + 2] | Should -BeExactly ('  ' + $ExitLines[1])
+        }
+    }
+
     It 'handles null/empty health collections without throwing (standalone-run safety)' {
         { Get-RunSummaryLogContent -Visible 0 -Eligible 0 -Processed 0 `
                 -FailedSubscriptions $null -CollectorFailures $null `
                 -MetricsFailedSubs $null -ConsumptionFailedSubs $null } | Should -Not -Throw
+    }
+}
+
+Describe 'Consumption failures: one rule for the count, the list and the sign-in skips' {
+
+    BeforeAll {
+        # Contoso-Billing twice (two of its pages failed), a twin with the same
+        # name, and the '(auth)' sign-in rows of two subscriptions (one twice,
+        # as an older stream left it) and of a direct run with no
+        # SubscriptionId.
+        $script:ConsumptionRows = @(
+            [pscustomobject]@{ Name = 'Contoso-Billing'; Id = '44444444-4444-4444-4444-444444444444'; Message = 'page 2 failed' }
+            [pscustomobject]@{ Name = 'Contoso-Billing'; Id = '44444444-4444-4444-4444-444444444444'; Message = 'page 3 failed' }
+            [pscustomobject]@{ Name = 'Contoso-Billing'; Id = '55555555-5555-5555-5555-555555555555'; Message = 'page 2 failed' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '66666666-6666-6666-6666-666666666666' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '66666666-6666-6666-6666-666666666666' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '77777777-7777-7777-7777-777777777777' }
+        )
+    }
+
+    It 'Get-ConsumptionFailureView names each real subscription once by name and id and counts the sign-in skips per subscription' {
+        $View = Get-ConsumptionFailureView -ConsumptionFailedSubs $script:ConsumptionRows
+        @($View.Subscriptions | ForEach-Object { $_.Id }) | Should -Be @('44444444-4444-4444-4444-444444444444', '55555555-5555-5555-5555-555555555555')
+        $View.SignInSkipped | Should -Be 2
+    }
+
+    It 'Get-ConsumptionFailureView counts a sign-in row with no SubscriptionId once, and an empty list as none' {
+        $Direct = @([pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped' })
+        $View = Get-ConsumptionFailureView -ConsumptionFailedSubs $Direct
+        @($View.Subscriptions).Count | Should -Be 0
+        $View.SignInSkipped | Should -Be 1
+        (Get-ConsumptionFailureView -ConsumptionFailedSubs $null).SignInSkipped | Should -Be 0
+    }
+
+    It 'RunSummary.log counts by the same rule, and <Case>' -ForEach @(
+        @{ Case = 'without -Obfuscated lists each real subscription once and no sign-in row'; Obfuscated = $false }
+        @{ Case = 'with -Obfuscated names none'; Obfuscated = $true }
+    ) {
+        $Lines = Get-RunSummaryLogContent -Visible 4 -Eligible 4 -Processed 4 -ConsumptionFailedSubs $script:ConsumptionRows -Obfuscated:$Obfuscated
+        $Text = $Lines -join "`n"
+        $Text | Should -Match 'Consumption failed subs\s+: 2(\r?\n|$)'
+        $Text | Should -Match 'Consumption sign-in skipped\s+: 2 subscription\(s\)'
+        $Text | Should -Not -Match '66666666|77777777' -Because 'the sign-in rows are counted, not named'
+        if ($Obfuscated)
+        {
+            $Text | Should -Not -Match 'Contoso|44444444|55555555'
+        }
+        else
+        {
+            @($Lines | Where-Object { $_ -like '  - Contoso-Billing (*' }).Count | Should -Be 2
+            $Text | Should -Not -Match '\(auth\)'
+        }
+    }
+}
+
+Describe 'The wrapper keeps a resume state with one entry as a list' {
+    # A function's return unrolls a one-item array to the item itself, so a
+    # state file with one completed id (or one failure) read straight into
+    # the wrapper's variables gave a string (or one object). The next += then
+    # glued two ids into one ("<A><B>") instead of adding one.
+    BeforeAll {
+        $Wrapper = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1'), [ref]$null, [ref]$null)
+        $script:StateReads = @($Wrapper.EndBlock.Statements | Where-Object {
+                $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -in @('$CompletedIds', '$FailedAttempts') -and $_.Right.Extent.Text -match 'Get-(CompletedSubscriptionIds|FailedAttempts) '
+            } | ForEach-Object { [scriptblock]::Create($_.Extent.Text) })
+        $script:OneDir = Join-Path ([System.IO.Path]::GetTempPath()) ('rda-one-entry-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $script:OneDir -Force | Out-Null
+    }
+    AfterAll { Remove-Item -LiteralPath $script:OneDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'reads one completed id and one failure as one-item lists, so the next id is added, not glued' {
+        $script:StateReads.Count | Should -Be 2 -Because 'the wrapper reads both lists from the resume state'
+        $ResumeStateFile = Join-Path $script:OneDir 'state.json'
+        $TenantID = 't'
+        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids @('sub-a') -FailedAttempts @([pscustomobject]@{ Id = 'sub-b'; Name = 'B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 })
+        foreach ($Read in $script:StateReads) { . $Read }
+        $CompletedIds += 'sub-c'
+        @($CompletedIds) | Should -Be @('sub-a', 'sub-c')
+        $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id 'sub-d' -Name 'D' -Reason 'r'
+        @($FailedAttempts).Count | Should -Be 2
+    }
+
+    It 'reads a resume state saved once its last failure was cleared as holding no failure, so a later clean run clears it' {
+        # A success clears the last failure: Remove-FailedAttempt returns no
+        # item, the save writes "FailedAttempts": [null], and a read that
+        # counted that null kept the state as one pending retry on every
+        # -Resume run that skipped every subscription.
+        $ResumeStateFile = Join-Path $script:OneDir 'cleared.json'
+        $TenantID = 't'
+        $FailedAttempts = Remove-FailedAttempt -Existing @([pscustomobject]@{ Id = 'sub-b'; Name = 'B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 }) -Id 'sub-b'
+        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids @('sub-a', 'sub-b') -FailedAttempts $FailedAttempts
+        foreach ($Read in $script:StateReads) { . $Read }
+        $FailedAttempts.Count | Should -Be 0 -Because 'the wrapper counts it so to call a run clean'
+        (Get-Content -LiteralPath $ResumeStateFile -Raw | ConvertFrom-Json).FailedAttempts.Count | Should -Be 0 -Because 'the file holds an empty list, not [null], for any other reader'
+        @($CompletedIds) | Should -Be @('sub-a', 'sub-b')
+    }
+}
+
+Describe 'The resume state in a folder whose path holds [ or ]' {
+    # -Path reads [ ] as a wildcard set, so the file was not found: the run
+    # started fresh and its first save wrote over the saved state.
+    BeforeAll {
+        $script:BracketDir = Join-Path $script:TestRoot ('inv[1]_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path $script:BracketDir -Force | Out-Null
+    }
+
+    It 'saves and reads back the main resume state' {
+        $Path = Join-Path $script:BracketDir 'state.json'
+        Save-CompletedSubscriptionIds -Path $Path -Tenant 't' -Ids @('sub-a', 'sub-b') -FailedAttempts @([pscustomobject]@{ Id = 'sub-c'; Name = 'C'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'r'; Attempts = 1 })
+        Test-Path -LiteralPath $Path -PathType Leaf | Should -BeTrue
+        @(Get-CompletedSubscriptionIds -Path $Path -Tenant 't') | Should -Be @('sub-a', 'sub-b')
+        @(Get-FailedAttempts -Path $Path -Tenant 't').Id | Should -Be @('sub-c')
+    }
+
+    It 'saves and reads back a stream resume state' {
+        $Path = Join-Path $script:BracketDir 'stream-0.json'
+        Write-StreamState -Path $Path -Completed @('sub-a') -FailedAttempts @()
+        Test-Path -LiteralPath $Path -PathType Leaf | Should -BeTrue
+        @((Read-StreamState -Path $Path).Completed) | Should -Be @('sub-a')
+    }
+
+    It 'finds the stream resume state files there' {
+        $Tenant = 'tenant-brackets'
+        foreach ($N in 0..1) { [System.IO.File]::WriteAllText((Join-Path $script:BracketDir (".resume-state-$Tenant-stream-$N.json")), '{}') }
+        $Files = @(Get-StreamResumeStateFiles -InventoryRoot $script:BracketDir -Tenant $Tenant)
+        $Files.Count | Should -Be 2
+    }
+}
+
+Describe 'Add-ItemsToZipArchive adds to a zip as Compress-Archive -Update does' {
+    BeforeAll {
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+        # A run's outer zip (one inner zip in it) and the run-level extras the
+        # wrapper folds in: two files, a folder with a file in a sub folder
+        # and an empty sub folder, and an empty folder (which, as in
+        # Compress-Archive, adds nothing). Built under $Parent.
+        function script:New-ZipCase
+        {
+            param([string]$Parent)
+            $Stage = Join-Path $Parent 'stage'
+            $null = [System.IO.Directory]::CreateDirectory((Join-Path $Stage 'HTML_1/deep'))
+            $null = [System.IO.Directory]::CreateDirectory((Join-Path $Stage 'HTML_1/blank'))
+            $null = [System.IO.Directory]::CreateDirectory((Join-Path $Stage 'Empty_1'))
+            [System.IO.File]::WriteAllText((Join-Path $Stage 'RunSummary.log'), 'run summary')
+            [System.IO.File]::WriteAllText((Join-Path $Stage 'MainSummary.html'), '<html>main</html>')
+            [System.IO.File]::WriteAllText((Join-Path $Stage 'HTML_1/deep/report.html'), '<html>sub</html>')
+            $Inner = Join-Path $Parent 'ResourcesReport_1.zip'
+            [System.IO.File]::WriteAllText((Join-Path $Parent 'Inventory_1.json'), '{}')
+            $Zip = [System.IO.Compression.ZipFile]::Open($Inner, [System.IO.Compression.ZipArchiveMode]::Create)
+            try { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Zip, (Join-Path $Parent 'Inventory_1.json'), 'Inventory_1.json') } finally { $Zip.Dispose() }
+            $Outer = Join-Path $Parent 'AllSubscriptions_ResourcesReport_1.zip'
+            $Zip = [System.IO.Compression.ZipFile]::Open($Outer, [System.IO.Compression.ZipArchiveMode]::Create)
+            try
+            {
+                $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Zip, $Inner, 'ResourcesReport_1.zip')
+                # An entry the fold replaces.
+                $Old = $Zip.CreateEntry('runsummary.LOG')
+                $Writer = [System.IO.StreamWriter]::new($Old.Open())
+                try { $Writer.Write('old') } finally { $Writer.Dispose() }
+            }
+            finally { $Zip.Dispose() }
+            return [pscustomobject]@{ Outer = $Outer; Items = @(Get-ChildItem -LiteralPath $Stage -Force | ForEach-Object { $_.FullName }) }
+        }
+        # Each entry of a zip: its name and its text.
+        function script:Get-ZipView
+        {
+            param([string]$Path)
+            $Zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+            try
+            {
+                $View = @()
+                foreach ($Entry in @($Zip.Entries | Sort-Object FullName))
+                {
+                    $Reader = [System.IO.StreamReader]::new($Entry.Open())
+                    try { $View += ('{0}={1}' -f $Entry.FullName, $(if ($Entry.FullName -like '*.zip') { $Entry.Length } else { $Reader.ReadToEnd() })) }
+                    finally { $Reader.Dispose() }
+                }
+                return $View
+            }
+            finally { $Zip.Dispose() }
+        }
+    }
+
+    It 'gives the same entries and contents as Compress-Archive -Update' {
+        $Root = Join-Path $script:TestRoot ('zip-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $A = New-ZipCase -Parent (Join-Path $Root 'a')
+        Compress-Archive -LiteralPath $A.Items -DestinationPath $A.Outer -Update
+        $B = New-ZipCase -Parent (Join-Path $Root 'b')
+        Add-ItemsToZipArchive -ZipPath $B.Outer -Items $B.Items
+        $Expected = Get-ZipView -Path $A.Outer
+        $Expected | Should -Contain 'RunSummary.log=run summary'
+        $Expected | Should -Contain 'HTML_1/deep/report.html=<html>sub</html>'
+        $Expected | Should -Contain 'HTML_1/blank/='
+        Get-ZipView -Path $B.Outer | Should -Be $Expected
+    }
+
+    It 'adds them to a zip in a folder whose path holds [ and ]' {
+        $Root = Join-Path $script:TestRoot ('zip[1]-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $Case = New-ZipCase -Parent $Root
+        Add-ItemsToZipArchive -ZipPath $Case.Outer -Items $Case.Items
+        $View = Get-ZipView -Path $Case.Outer
+        $View | Should -Contain 'RunSummary.log=run summary'
+        $View | Should -Contain 'MainSummary.html=<html>main</html>'
+        $View | Should -Contain 'HTML_1/deep/report.html=<html>sub</html>'
+        $View | Should -Contain 'HTML_1/blank/='
+        @($View | Where-Object { $_ -like 'ResourcesReport_1.zip=*' }).Count | Should -Be 1
+        @($View | Where-Object { $_ -like '*=old' }).Count | Should -Be 0
+        @($View | Where-Object { $_ -like 'Empty_1*' }).Count | Should -Be 0
+    }
+}
+
+Describe 'The stream worker does not say it is done when its summary cannot be written' {
+    # Set-Content into a folder that is gone fails with a non-terminating
+    # error, which a catch sees only with -ErrorAction Stop. Without it the
+    # worker said "complete" and ended with exit 0 though it wrote no
+    # summary. The REAL Run-AllSubscriptions.Stream.ps1 runs in its own pwsh,
+    # with stand-ins for the Az module import and the context import; no
+    # subscription is run (no name is passed for the one id, so the loop has
+    # no pair), so no Azure call is made.
+    BeforeAll {
+        $script:WorkerDir = Join-Path $script:TestRoot ('worker_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        $script:WorkerTree = Join-Path $script:WorkerDir 'tree'
+        New-Item -ItemType Directory -Path $script:WorkerTree -Force | Out-Null
+        $RepoRoot = Split-Path $PSScriptRoot -Parent
+        foreach ($Item in @('Run-AllSubscriptions.Stream.ps1', 'Functions'))
+        {
+            Copy-Item -LiteralPath (Join-Path $RepoRoot $Item) -Destination $script:WorkerTree -Recurse -Force
+        }
+        $script:WorkerHarness = Join-Path $script:WorkerDir 'worker.ps1'
+        @'
+param([string]$Tree, [string]$Case)
+$PSStyle.OutputRendering = 'PlainText'
+function global:Import-Module
+{
+    [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [switch]$DisableNameChecking, [switch]$Force, [version]$MinimumVersion)
+    if (@($Name).Count -eq 1 -and $Name[0] -like 'Az.*') { return }
+    Microsoft.PowerShell.Core\Import-Module @PSBoundParameters
+}
+function global:Disable-AzContextAutosave { param($Scope) }
+$Global:WorkerCase = $Case
+function global:Import-AzContext { param($Path) if ($Global:WorkerCase -eq 'import-fails') { throw 'stand-in: the context snapshot cannot be imported' } }
+$Root = Join-Path $Tree 'out'
+New-Item -ItemType Directory -Path $Root -Force | Out-Null
+# The summary goes in a folder that is not there.
+$SummaryPath = Join-Path $Root 'gone/summary.json'
+$Ids = if ($Case -eq 'empty-slice') { @() } else { @('12345678-1234-1234-1234-123456789012') }
+$global:LASTEXITCODE = 0
+& (Join-Path $Tree 'Run-AllSubscriptions.Stream.ps1') -TenantID '00000000-0000-0000-0000-000000000001' -RunId '11111111-2222-3333-4444-555555555555' -StreamId '0' -InventoryRoot $Root -ScriptRoot $Tree -AzContextPath (Join-Path $Root 'ctx.json') -StreamSummaryPath $SummaryPath -StreamFailuresPath (Join-Path $Root 'failures.log') -SubscriptionIds $Ids -SubscriptionNames @() -SkipMetrics -SkipConsumption
+exit $LASTEXITCODE
+'@ | Set-Content -LiteralPath $script:WorkerHarness -Encoding utf8
+    }
+
+    It 'a worker whose <Case> summary cannot be written says so and ends with exit 1' -ForEach @(
+        @{ Case = 'end-of-run' }
+        @{ Case = 'empty-slice' }
+        @{ Case = 'import-fails' }
+    ) {
+        $Output = '' | & (Join-Path $PSHOME 'pwsh') -NoProfile -NonInteractive -File $script:WorkerHarness -Tree $script:WorkerTree -Case $Case *>&1 | Out-String
+        $Code = $LASTEXITCODE
+        $Code | Should -Be 1 -Because $Output
+        $Output | Should -Match ([regex]::Escape('[stream-0] FATAL: could not write stream summary to ')) -Because $Output
+        $Output | Should -Not -Match '\[stream-0\] complete: ' -Because $Output
+        Test-Path -LiteralPath (Join-Path $script:WorkerTree 'out/gone/summary.json') | Should -BeFalse
     }
 }

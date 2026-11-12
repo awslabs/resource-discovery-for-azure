@@ -252,3 +252,144 @@ Function Global:Write-Log([string]$Message, [string]$Severity, [switch]$NoConsol
         }
     }
 }
+
+# Sign-in checks used by Run-AllSubscriptions.ps1 and by a direct run of
+# ResourceInventory.ps1, so both decide the same way whether an existing Az
+# PowerShell sign-in can be reused. The tool signs in with Az PowerShell only.
+
+# $true when a person can answer a prompt in this console.
+function Test-RdaInteractiveSession
+{
+    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+}
+
+# The subscriptions of tenant $Tenant, as the run lists them: asked from Az
+# PowerShell with -TenantId, so a subscription delegated to the tenant (Azure
+# Lighthouse), whose HomeTenantId is another tenant, is kept. A subscription
+# returned twice is listed once (first one kept, ids compared without case).
+# Every state is kept; callers filter. A direct run without -SubscriptionID
+# keeps the Enabled ones. A direct run with -SubscriptionID keeps every state,
+# so the named one is found. Under -RunAllSubs every state is kept and the
+# wrapper chooses. Each entry has the properties
+# callers read: id, name, tenantId (the tenant asked when Az gives none),
+# homeTenantId and state.
+function Get-RdaTenantSubscriptions
+{
+    param([Parameter(Mandatory = $true)][string]$Tenant)
+    $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $List = [System.Collections.Generic.List[object]]::new()
+    foreach ($Sub in @(Get-AzSubscription -TenantId $Tenant -WarningAction SilentlyContinue))
+    {
+        if ($null -eq $Sub -or [string]::IsNullOrWhiteSpace([string]$Sub.Id)) { continue }
+        if (-not $Seen.Add([string]$Sub.Id)) { continue }
+        $List.Add([pscustomobject][ordered]@{
+                id           = [string]$Sub.Id
+                name         = [string]$Sub.Name
+                tenantId     = $(if ([string]::IsNullOrWhiteSpace([string]$Sub.TenantId)) { $Tenant } else { [string]$Sub.TenantId })
+                homeTenantId = [string]$Sub.HomeTenantId
+                state        = [string]$Sub.State
+            })
+    }
+    return $List.ToArray()
+}
+
+function Get-AzPsSignedInTenant
+{
+    try
+    {
+        $Ctx = Get-AzContext -ErrorAction Stop
+        if ($null -eq $Ctx -or $null -eq $Ctx.Account) { return $null }
+        return $Ctx.Tenant.Id
+    }
+    catch
+    {
+        return $null
+    }
+}
+
+# Probe whether Az PowerShell can silently acquire a token for $TenantID.
+# Get-AzAccessToken in this configuration emits a non-terminating warning
+# instead of throwing on token-acquisition failure, so we capture warnings
+# explicitly and treat any warning as a failure signal in addition to
+# catching outright exceptions. We DO NOT treat the Az.Accounts 4.x
+# deprecation banner as a failure - that warning fires on every successful
+# call now that the SecureString-output cmdlet is the recommended path,
+# and ignoring it lets users on the new module version skip re-auth.
+function Test-AzPsTokenSilent
+{
+    param([Parameter(Mandatory = $true)][string]$Tenant)
+    $Warnings = @()
+    try
+    {
+        $Token = Get-AzAccessToken -TenantId $Tenant -ErrorAction Stop -WarningVariable warnings -WarningAction SilentlyContinue
+        if ($null -eq $Token -or [string]::IsNullOrWhiteSpace($Token.Token)) { return $false }
+        # Filter out known-benign warnings before deciding the call failed.
+        # Az.Accounts >= 4.x emits a deprecation banner about the plain-string
+        # output every time the cmdlet returns successfully; treating that as
+        # failure forces users to re-authenticate every run.
+        $RealWarnings = @($Warnings | Where-Object {
+                $Msg = $_.Message
+                -not (
+                    $Msg -match 'Get-AzAccessToken\s*:?\s*Upcoming breaking changes' -or
+                    $Msg -match 'AsSecureString' -or
+                    $Msg -match 'plain string token output is deprecated'
+                )
+            })
+        if ($RealWarnings.Count -gt 0) { return $false }
+        return $true
+    }
+    catch
+    {
+        return $false
+    }
+}
+
+# The sign-in gate of Run-AllSubscriptions.ps1, before it starts
+# ResourceInventory.ps1 for each subscription. An Az PowerShell sign-in that
+# is on $TenantID and can still acquire a token silently is reused with no
+# prompt (Cloud Shell, a second run). Two things have to be true: the tenant
+# alone is not enough, because a context can persist on disk with the right
+# tenant but an expired or revoked refresh token (typically Conditional
+# Access or MFA), and every data-plane call would then quietly return
+# nothing. Otherwise it signs in once (device code with -DeviceLogin) and
+# checks the token again; when the token still fails it throws, so the
+# wrapper stops instead of prompting a second time or collecting an empty
+# inventory. A usable sign-in is never disconnected.
+function Connect-RdaWrapperSession
+{
+    param([Parameter(Mandatory = $true)][string]$TenantID, [switch]$DeviceLogin)
+
+    $PsTenant = Get-AzPsSignedInTenant
+    if ($PsTenant -eq $TenantID -and (Test-AzPsTokenSilent -Tenant $TenantID))
+    {
+        Write-Host ("Existing session detected for tenant {0} (token probe ok); skipping interactive login." -f $TenantID) -ForegroundColor Green
+        return
+    }
+
+    if ($null -eq $PsTenant)
+    {
+        Write-Host "Az PowerShell is not signed in; authenticating..." -ForegroundColor Cyan
+    }
+    elseif ($PsTenant -ne $TenantID)
+    {
+        Write-Host ("Az PowerShell is signed in to tenant {0}; switching to {1}..." -f $PsTenant, $TenantID) -ForegroundColor Cyan
+    }
+    else
+    {
+        Write-Host ("Az PowerShell session for tenant {0} cannot acquire a token silently (likely expired or CA/MFA-gated); re-authenticating..." -f $TenantID) -ForegroundColor Cyan
+    }
+
+    # As a direct run does: with no console to sign in from (a scheduled task,
+    # CI, stdin redirected), stop instead of opening a browser.
+    if (-not $DeviceLogin -and -not (Test-RdaInteractiveSession))
+    {
+        throw ("Az PowerShell: no usable sign-in for tenant {0}, and this session has no console to sign in from (non-interactive); stopping instead of opening a browser. Run 'Connect-AzAccount -Tenant {0}' before the run, or pass -DeviceLogin." -f $TenantID)
+    }
+    if ($DeviceLogin) { Connect-AzAccount -Tenant $TenantID -UseDeviceAuthentication -ErrorAction Stop | Out-Null }
+    else { Connect-AzAccount -Tenant $TenantID -ErrorAction Stop | Out-Null }
+
+    if (-not (Test-AzPsTokenSilent -Tenant $TenantID))
+    {
+        throw ("Az PowerShell sign-in to tenant {0} did not give a usable token; stopping instead of prompting again. Run 'Connect-AzAccount -Tenant {0}' yourself, complete any MFA or Conditional Access prompt, then re-run (or pass -DeviceLogin)." -f $TenantID)
+    }
+}

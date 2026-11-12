@@ -25,6 +25,9 @@
 
 param (
     [Parameter(Mandatory = $true)] [string]   $TenantID,
+    # The wrapper run's id, written in the summary so the wrapper accepts only
+    # its own run's summaries.
+    [Parameter(Mandatory = $true)] [string]   $RunId,
     [Parameter(Mandatory = $true)] [string]   $StreamId,
     [Parameter(Mandatory = $true)] [string]   $InventoryRoot,
     [Parameter(Mandatory = $true)] [string]   $ScriptRoot,
@@ -59,13 +62,25 @@ param (
 # breaking later with a confusing "command not found".
 # ---------------------------------------------------------------------------
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
     exit 1
 }
 . $FunctionsFile
+
+# The supported Az.Accounts version (Get-RdaAzAccountsMinimumVersion). The
+# wrapper stops when this file is missing, but the worker checks too: without
+# it, it would load any Az.Accounts and make Azure calls with it.
+$AzModulesFunctionsFile = Join-Path $PSScriptRoot 'Functions/AzModules.Functions.ps1'
+if (-not (Test-Path -LiteralPath $AzModulesFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $AzModulesFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $AzModulesFunctionsFile
 
 # Tag used to prefix all stdout lines so the parent wrapper can demultiplex
 # interleaved output across streams.
@@ -78,18 +93,29 @@ $Tag = "[stream-$StreamId]"
 if ($SubscriptionIds.Count -eq 0)
 {
     Write-Stream "no subscriptions in slice; exiting cleanly" 'Yellow'
-    @{
-        StreamId              = $StreamId
-        Tenant                = $TenantID
-        Status                = 'ok'
-        SubsProcessed         = 0
-        Completed             = @()
-        Failed                = @()
-        ResourceCounts        = @()
-        ConsumptionRecords    = 0
-        ConsumptionFailedSubs = @()
-        MetricsFailedSubs     = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    # -ErrorAction Stop: a failed write is otherwise a non-terminating error,
+    # and the worker would end with exit 0 and no summary.
+    try
+    {
+        @{
+            RunId                 = $RunId
+            StreamId              = $StreamId
+            Tenant                = $TenantID
+            Status                = 'ok'
+            SubsProcessed         = 0
+            Completed             = @()
+            Failed                = @()
+            ResourceCounts        = @()
+            ConsumptionRecords    = 0
+            ConsumptionFailedSubs = @()
+            MetricsFailedSubs     = @()
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8 -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Stream ("FATAL: could not write stream summary to {0}: {1}" -f $StreamSummaryPath, $_.Exception.Message) 'Red'
+        exit 1
+    }
     exit 0
 }
 
@@ -102,7 +128,9 @@ Write-Stream ("starting; subs in slice: {0}" -f $SubscriptionIds.Count) 'Cyan'
 # context without prompting for sign-in. Import-AzContext is idempotent.
 try
 {
-    Import-Module Az.Accounts -ErrorAction Stop -Force | Out-Null
+    # -MinimumVersion, as in the wrapper: a plain import takes the first copy
+    # in PSModulePath order, which can be older than the supported one.
+    Import-Module Az.Accounts -MinimumVersion (Get-RdaAzAccountsMinimumVersion) -ErrorAction Stop -Force | Out-Null
     # Prevent the imported context from being persisted to the user's on-disk
     # AzureRmContext.json. Without this, every parallel worker writes its
     # token cache to the same shared profile and the streams race on disk
@@ -116,21 +144,39 @@ try
 catch
 {
     Write-Stream ("FATAL: could not import Az context from {0}: {1}" -f $AzContextPath, $_.Exception.Message) 'Red'
+    $ImportError = $_.Exception.Message
+    # Under -Resume the stream would have skipped the subscriptions its own
+    # resume file lists as completed, so they are not failed this run and get
+    # no row. A file that cannot be read skips none (Read-StreamState), as in
+    # the loop below.
+    $PriorDone = @()
+    if ($Resume)
+    {
+        $PriorDone = @((Read-StreamState -Path (Join-Path $InventoryRoot (".resume-state-{0}-stream-{1}.json" -f $TenantID, $StreamId))).Completed)
+    }
     # Write a minimum stream summary so the parent doesn't think the stream
-    # disappeared silently.
-    @{
-        StreamId      = $StreamId
-        Tenant        = $TenantID
-        Status        = 'failed-to-start'
-        Reason        = $_.Exception.Message
-        Completed     = @()
-        Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
-                $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
-                $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
-                [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
-            })
-        ResourceCounts = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    # disappeared silently. -ErrorAction Stop, so a failed write is named.
+    try
+    {
+        @{
+            RunId         = $RunId
+            StreamId      = $StreamId
+            Tenant        = $TenantID
+            Status        = 'failed-to-start'
+            Reason        = $ImportError
+            Completed     = @()
+            Failed        = @(0..([Math]::Max($SubscriptionIds.Count, $SubscriptionNames.Count) - 1) | ForEach-Object {
+                    $Name = if ($_ -lt $SubscriptionNames.Count) { $SubscriptionNames[$_] } else { '<unknown>' }
+                    $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
+                    [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
+                } | Where-Object { $PriorDone -notcontains $_.Id })
+            ResourceCounts = @()
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8 -ErrorAction Stop
+    }
+    catch
+    {
+        Write-Stream ("FATAL: could not write stream summary to {0}: {1}" -f $StreamSummaryPath, $_.Exception.Message) 'Red'
+    }
     exit 1
 }
 
@@ -220,6 +266,13 @@ for ($i = 0; $i -lt $PairCount; $i++)
 
     try
     {
+        # ResourceInventory.ps1 ends without `exit` when it succeeds, and that
+        # leaves $LASTEXITCODE as it was: the `exit 1` of an earlier
+        # subscription in this stream would mark this one failed.
+        $global:LASTEXITCODE = 0
+        # Cleared too, so a run that ends before naming its zip cannot leave
+        # the previous subscription's zip as its own.
+        $Global:ZipOutputFile = $null
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
         # Only treat as failure if the inner script set a non-zero exit code.
         # Some completion paths in ResourceInventory.ps1 leave $LASTEXITCODE
@@ -232,15 +285,29 @@ for ($i = 0; $i -lt $PairCount; $i++)
         # in this stream worker's scope. The inner script resets $Global:Resources
         # to @() at the start of every invocation.
         $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
-        $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount }
+        # Zip: the report zip this run wrote, which the wrapper's output
+        # verification looks for.
+        $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount; Zip = $Global:ZipOutputFile }
 
-        if ($ResCount -eq 0)
+        # Narration only, as in the wrapper: a failed write must not turn the
+        # success into a failure (the subscription would be listed as both).
+        try
         {
-            Write-Stream ("WARNING: '{0}' returned 0 resources (likely permission gap or empty sub)" -f $SubName) 'Yellow'
+            if ($ResCount -eq 0)
+            {
+                Write-Stream ("WARNING: '{0}' returned 0 resources (likely permission gap or empty sub)" -f $SubName) 'Yellow'
+            }
+            else
+            {
+                Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
+            }
         }
-        else
+        catch
         {
-            Write-Stream ("done: {0} - {1:N0} resources" -f $SubName, $ResCount) 'Green'
+            # Its own guard, as in the wrapper.
+            $NarrationError = $_.Exception.Message
+            try { Write-Verbose ("Could not write the completion line: {0}" -f $NarrationError) }
+            catch { $null = $_ }
         }
 
         if (-not ($Completed -contains $SubId))
@@ -289,7 +356,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         }
         $DiagLines += ""
 
-        try { $DiagLines | Out-File -FilePath $StreamFailuresPath -Append -Encoding utf8 }
+        try { $DiagLines | Out-File -LiteralPath $StreamFailuresPath -Append -Encoding utf8 }
         catch { Write-Stream ("could not write to stream failures log {0}: {1}" -f $StreamFailuresPath, $_.Exception.Message) 'Yellow' }
 
         $FailedSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = $ErrRecord.Exception.Message }
@@ -318,8 +385,14 @@ $ConsumptionTotal = if ($null -ne $Global:ConsumptionRecordCount) { [int]$Global
 $ConsumptionFailedSubs = if ($null -ne $Global:ConsumptionFailedSubs) { @($Global:ConsumptionFailedSubs) } else { @() }
 $MetricsFailedSubs = if ($null -ne $Global:MetricsFailedSubs) { @($Global:MetricsFailedSubs) } else { @() }
 $CollectorFailures = if ($null -ne $Global:CollectorFailures) { @($Global:CollectorFailures) } else { @() }
+# One row per Id, Name, Message and SubscriptionId (the '(auth)' sign-in
+# row's own subscription), first seen kept, in order: the rows are objects,
+# and Select-Object -Unique sees two of them as one.
+$SeenConsumptionFailure = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$ConsumptionFailedSubs = @($ConsumptionFailedSubs | Where-Object { $SeenConsumptionFailure.Add(('{0}|{1}|{2}|{3}' -f $_.Id, $_.Name, $_.Message, $_.SubscriptionId)) })
 
 $Summary = [pscustomobject]@{
+    RunId                  = $RunId
     StreamId               = $StreamId
     Tenant                 = $TenantID
     Status                 = if ($FailedSubs.Count -eq 0) { 'ok' } else { 'partial-failure' }
@@ -328,13 +401,15 @@ $Summary = [pscustomobject]@{
     Failed                 = $FailedSubs
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
-    ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
+    ConsumptionFailedSubs  = @($ConsumptionFailedSubs)
     MetricsFailedSubs      = @($MetricsFailedSubs)
     CollectorFailures      = @($CollectorFailures)
 }
 try
 {
-    $Summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    # -ErrorAction Stop: a failed write is otherwise a non-terminating error
+    # that skips this catch, and the worker said "complete" with exit 0.
+    $Summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8 -ErrorAction Stop
 }
 catch
 {

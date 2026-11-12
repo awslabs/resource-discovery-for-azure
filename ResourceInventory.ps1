@@ -11,12 +11,22 @@ param ($TenantID,
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
     [switch]$DeviceLogin,
+    [switch]$UseManagedIdentity,
     [switch]$Obfuscate,
     [switch]$RunAllSubs,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
     $OutputDirectory)
+
+# PowerShell 7 on every platform, checked first, before any module or sign-in
+# step can stop the run with other advice.
+if ($PSVersionTable.PSVersion.Major -lt 7)
+{
+    Write-Host "You must use PowerShell 7 to run the inventory script." -ForegroundColor Red
+    Write-Host "https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell" -ForegroundColor Yellow
+    exit 1
+}
 
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
 if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
@@ -35,6 +45,15 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
     exit 1
 }
 . $CommonFunctionsFile
+
+$AzModulesFunctionsFile = Join-Path $PSScriptRoot 'Functions/AzModules.Functions.ps1'
+if (-not (Test-Path -LiteralPath $AzModulesFunctionsFile -PathType Leaf))
+{
+    Write-Host "ERROR: Required functions file not found: $AzModulesFunctionsFile" -ForegroundColor Red
+    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    exit 1
+}
+. $AzModulesFunctionsFile
 
 if ($Debug.IsPresent) { $DebugPreference = 'Continue' }
 
@@ -204,64 +223,73 @@ Function RunInventorySetup()
 
     function CheckCliRequirements()
     {
+        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
+
+        # An earlier run in this session loaded the modules. Skip the checks
+        # only when all four are still loaded (one can have been removed
+        # since, with Remove-Module) and the lowest loaded Az.Accounts is
+        # still the supported version: an older build of the tool may have
+        # loaded an older one. Get-Module without -ListAvailable reads the
+        # session only, so this stays cheap. Otherwise the full check below
+        # runs: it loads what is missing, or stops the run.
         if ($Global:AzPowerShellLoaded)
         {
-            return
-        }
-
-        Write-Log -Message ('Verifying Azure CLI is installed...') -Severity 'Info'
-
-        $AzCliVersion = az --version
-
-        if ($null -eq $AzCliVersion)
-        {
-            Write-Log -Message ("Azure CLI Not Found. Please install and run the script again.") -Severity 'Error'
-            Read-Host "Press <Enter> to exit"
-            Exit
-        }
-
-        Write-Log -Message ('CLI Version: {0}' -f $AzCliVersion[0]) -Severity 'Success'
-
-        Write-Log -Message ('Verifying Azure CLI Extension...') -Severity 'Info'
-
-        $AzCliExtension = az extension list --output json | ConvertFrom-Json
-        $AzCliExtension = $AzCliExtension | Where-Object { $_.name -eq 'resource-graph' }
-
-        Write-Log -Message ('Current Resource-Graph Extension Version: {0}' -f $AzCliExtension.Version) -Severity 'Success'
-
-        $AzCliExtensionVersion = $AzCliExtension | Where-Object { $_.name -eq 'resource-graph' }
-
-        if (!$AzCliExtensionVersion)
-        {
-            Write-Log -Message ('Azure CLI Extension not found') -Severity 'Warning'
-            Write-Log -Message ('Installing Azure CLI Extension...') -Severity 'Info'
-            az extension add --name resource-graph
+            $NotLoaded = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ErrorAction SilentlyContinue | Select-Object -First 1) })
+            $LoadedAzAccounts = @(Get-Module -Name Az.Accounts -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -and $_.Version } |
+                    ForEach-Object { [version]$_.Version } |
+                    Sort-Object) | Select-Object -First 1
+            if ($NotLoaded.Count -eq 0 -and $LoadedAzAccounts -and $LoadedAzAccounts -ge (Get-RdaAzAccountsMinimumVersion))
+            {
+                return
+            }
         }
 
         Write-Log -Message ('Checking Azure PowerShell Module...') -Severity 'Info'
 
-        $RequiredAzSubModules = @('Az.Accounts', 'Az.Compute', 'Az.Monitor', 'Az.Billing')
-
         $MissingAzSubModules = @($RequiredAzSubModules | Where-Object { $null -eq (Get-Module -Name $_ -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1) })
 
-        if ($MissingAzSubModules.Count -eq 0)
-        {
-            $VarAzPs = Get-Module -Name Az.Accounts -ListAvailable -ErrorAction SilentlyContinue | Select-Object -First 1
-            Write-Log -Message ('Azure PowerShell modules present (Az.Accounts {0}); required: {1}' -f $VarAzPs.Version, ($RequiredAzSubModules -join ', ')) -Severity 'Success'
-        }
-        else
+        if ($MissingAzSubModules.Count -gt 0)
         {
             Write-Log -Message ('Required Azure PowerShell module(s) not found: {0}' -f ($MissingAzSubModules -join ', ')) -Severity 'Error'
             Write-Log -Message ('This tool needs only these Az submodules. Install them manually before re-running. From an elevated PowerShell 7 prompt:') -Severity 'Error'
             Write-Log -Message ('  Install-Module -Name {0} -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck' -f ($RequiredAzSubModules -join ',')) -Severity 'Error'
             Write-Log -Message ('Or install the full rollup (larger, slower first import): Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
             Write-Log -Message ('Or in Cloud Shell, the Az module is already preinstalled - if it is missing your shell environment is broken.') -Severity 'Error'
-            throw ('Required Azure PowerShell submodule(s) not found: {0}. See log above for installation instructions.' -f ($MissingAzSubModules -join ', '))
+            # exit, not throw: the production 'SilentlyContinue' preference
+            # suppresses a bare throw and the run would go on to sign in and
+            # collect without the modules its collectors need.
+            exit 1
         }
+
+        # Az.Accounts must be the supported version or newer, on disk and in
+        # this session (Functions/AzModules.Functions.ps1 holds the number).
+        # The printed command is the way out: once it has run, the next run
+        # passes this check.
+        # -SubModule: Az modules an earlier run in this session loaded can
+        # hold an older Az.Accounts there, and the copy of a submodule that
+        # would load can pin one in its manifest; the check names the one to
+        # update, before anything is loaded.
+        $AzAccountsCheck = Test-RdaAzAccountsVersion -SubModule $RequiredAzSubModules
+        if ($AzAccountsCheck.Status -ne 'Ok')
+        {
+            foreach ($Line in $AzAccountsCheck.Messages)
+            {
+                Write-Log -Message $Line -Severity 'Error'
+            }
+            # exit, not throw, for the same reason as above.
+            exit 1
+        }
+        Write-Log -Message ('Azure PowerShell modules present (Az.Accounts {0}, {1} or newer needed); required: {2}' -f $AzAccountsCheck.Installed, $AzAccountsCheck.Required, ($RequiredAzSubModules -join ', ')) -Severity 'Success'
 
         try
         {
-            foreach ($AzSubModule in $RequiredAzSubModules)
+            # Az.Accounts first, with -MinimumVersion: the check above saw the
+            # highest copy on disk, but a plain import takes the first copy in
+            # PSModulePath order, which can be an older one.
+            Write-Log -Message 'Loading Az.Accounts...' -Severity 'Info'
+            Import-Module Az.Accounts -MinimumVersion (Get-RdaAzAccountsMinimumVersion) -ErrorAction Stop -DisableNameChecking | Out-Null
+            foreach ($AzSubModule in @($RequiredAzSubModules | Where-Object { $_ -ne 'Az.Accounts' }))
             {
                 Write-Log -Message ('Loading {0}...' -f $AzSubModule) -Severity 'Info'
                 Import-Module $AzSubModule -ErrorAction Stop -DisableNameChecking | Out-Null
@@ -275,7 +303,28 @@ Function RunInventorySetup()
             Write-Log -Message ('Reinstall with: Install-Module -Name Az -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck') -Severity 'Error'
             Write-Log -Message ('If the broken install was created by a previous run of this script, also run: Get-Module Az* -ListAvailable | Uninstall-Module -Force') -Severity 'Error'
             $Global:AzPowerShellLoaded = $false
-            throw "Azure PowerShell (Az) module is broken on disk and cannot be loaded. See log above for remediation."
+            # exit, not throw, for the same reason as above.
+            exit 1
+        }
+
+        # Check the copy that actually loaded. The import above takes 5.5.4 or
+        # newer, but Az.Compute, Az.Monitor and Az.Billing load after it: one
+        # whose manifest asks for an exact older Az.Accounts (RequiredVersion)
+        # makes PowerShell load that older copy next to the new one, and the
+        # check reads the lowest loaded copy. A new session alone loads the
+        # same pair again, so -SubModule makes the advice name the submodule
+        # and the command that updates it. The printed advice is the way out;
+        # nothing retries.
+        $AzAccountsCheck = Test-RdaAzAccountsVersion -SubModule $RequiredAzSubModules
+        if ($AzAccountsCheck.Status -ne 'Ok')
+        {
+            foreach ($Line in $AzAccountsCheck.Messages)
+            {
+                Write-Log -Message $Line -Severity 'Error'
+            }
+            $Global:AzPowerShellLoaded = $false
+            # exit, not throw, for the same reason as above.
+            exit 1
         }
 
     }
@@ -303,17 +352,10 @@ Function RunInventorySetup()
             {
                 Write-Log -Message ('Identified Environment as PowerShell Desktop') -Severity 'Success'
                 $Global:PlatformOS = 'PowerShell Desktop'
-
-                $PsVersion = $PSVersionTable.PSVersion.Major
-                Write-Log -Message ("PowerShell Version {0}" -f $PsVersion) -Severity 'Info'
-
-                if ($PSVersionTable.PSVersion.Major -lt 7)
-                {
-                    Write-Log -Message ("You must use Powershell 7 to run the inventory script.") -Severity 'Error'
-                    Write-Log -Message ("https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.3") -Severity 'Error'
-                    Exit
-                }
             }
+
+            # PowerShell 7 is checked at the top of the script.
+            Write-Log -Message ("PowerShell Version {0}" -f $PSVersionTable.PSVersion.Major) -Severity 'Info'
         }
 
         $ProcDiscriminator = ('{0:x4}' -f ($PID -band 0xffff))
@@ -337,18 +379,27 @@ Function RunInventorySetup()
             }
             catch
             {
-                Write-Log -Message ("Wrong OutputDirectory Path! OutputDirectory Parameter must contain the full path.") -Severity 'Error'
-                Exit
+                Write-Log -Message ("The output directory {0} could not be found or made. Pass -OutputDirectory as the full path of a folder you can write to." -f $OutputDirectory) -Severity 'Error'
+                exit 1
             }
         }
 
         $Global:DefaultPath = if ($OutputDirectory) { $OutputDirectory } else { $DefaultOutputDir }
 
-        if ($platformOS -eq 'Azure CloudShell')
+        # Refused before sign-in, so nobody is asked to sign in or pick a
+        # tenant for a run that cannot go on.
+        if (![string]::IsNullOrEmpty($ResourceGroup) -and [string]::IsNullOrEmpty($SubscriptionID))
         {
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
+            Write-Log -Message ("-ResourceGroup was given without -SubscriptionID.") -Severity 'Error'
+            Write-Log -Message ("Pass -SubscriptionID when you use -ResourceGroup.") -Severity 'Error'
+            exit 1
         }
-        elseif ($platformOS -eq 'PowerShell Unix' -or $platformOS -eq 'PowerShell Desktop')
+
+        # Every environment signs in through LoginSession. In Cloud Shell the
+        # sign-in Cloud Shell made is a cached sign-in like any other (rule 2),
+        # so -Appid, -UseManagedIdentity, -DeviceLogin and -TenantID are
+        # honoured and its token and tenant are checked there too.
+        if ($platformOS -in 'Azure CloudShell', 'PowerShell Unix', 'PowerShell Desktop')
         {
             LoginSession
         }
@@ -358,177 +409,383 @@ Function RunInventorySetup()
     {
         if (-not $Global:RdaSessionInitialized)
         {
-            $CloudEnv = az cloud list | ConvertFrom-Json
+            # The cloud of the Az PowerShell sign-in (Connect-AzAccount signs
+            # in to AzureCloud unless it is told another environment).
+            $CloudEnvName = try { (Get-AzContext -ErrorAction Stop).Environment.Name } catch { $null }
             Write-Host "Azure Cloud Environment: " -NoNewline
-
-            $CurrentCloudEnvName = $CloudEnv | Where-Object { $_.isActive -eq 'True' }
-            Write-Host $CurrentCloudEnvName.name -ForegroundColor Green
+            if ($CloudEnvName) { Write-Host $CloudEnvName -ForegroundColor Green }
+            else { Write-Host 'AzureCloud (not signed in yet)' -ForegroundColor Green }
         }
 
-        $ExistingAccount = az account show --output json --only-show-errors 2>$null | ConvertFrom-Json
-        if ($null -ne $ExistingAccount)
+        # Direct run (not -RunAllSubs), Azure Cloud Shell included. The tool
+        # signs in with Az PowerShell only, by three rules:
+        #  1. -Appid/-Secret/-TenantID: always the service principal, even
+        #     when a user is already signed in. If that sign-in fails, or the
+        #     context is then not that service principal, the run stops with
+        #     exit 1; it never goes on as whoever was signed in before. The
+        #     same holds for -UseManagedIdentity and the machine's identity.
+        #  2. Otherwise a cached sign-in that can acquire a token for the
+        #     target tenant silently is reused, with no prompt: as it is when
+        #     it is on that tenant, switched to it for this process when it is
+        #     on another one. Cloud Shell's own sign-in is such a sign-in.
+        #  3. Otherwise sign in once (device code with -DeviceLogin; a
+        #     session with no console stops with exit 1 instead of opening a
+        #     browser), then check the token; if the sign-in fails or the
+        #     token still fails the run stops with exit 1 instead of prompting
+        #     again or collecting an empty inventory. The next run starts from
+        #     the same checks, so it cannot loop either.
+        # Whatever the rule, the run goes on only when the context is on the
+        # target tenant (Invoke-AzRestMethod and Get-AzSubscription use the
+        # context's tenant) and the tenant lists a subscription to collect:
+        # an Enabled one without -SubscriptionID, else the one it names.
+        # With nothing usable and no -TenantID, the sign-in is made without a
+        # tenant and the tenant is chosen afterwards. A usable sign-in is never
+        # disconnected; a tenant switch applies to this process only, and so
+        # do service principal and managed identity sign-ins.
+        if (!$RunAllSubs.IsPresent)
         {
-            if (-not $Global:RdaSessionInitialized)
+            function Stop-SignIn([string]$Message, [string]$Advice)
             {
-                Write-Log -Message ("Already authenticated as: {0}" -f $ExistingAccount.user.name) -Severity 'Success'
+                Write-Log -Message $Message -Severity 'Error'
+                Write-Log -Message $Advice -Severity 'Error'
+                exit 1
             }
 
-            if (!$TenantID -or $ExistingAccount.tenantId -eq $TenantID)
+            function Stop-UnusableSignIn([string]$Tenant, [string]$Advice)
             {
-                $AzContext = Get-AzContext -ErrorAction SilentlyContinue
-                $NeedsConnect = $null -eq $AzContext -or
-                [string]::IsNullOrEmpty($AzContext.Tenant.Id) -or
-                $AzContext.Tenant.Id -ne $ExistingAccount.tenantId
-                if ($NeedsConnect)
+                Stop-SignIn -Message ("Az PowerShell: sign-in to tenant {0} did not give a usable token; stopping instead of prompting again." -f $Tenant) -Advice $Advice
+            }
+
+            function Get-UserSignInAdvice([string]$Tenant)
+            {
+                $Command = if ($Tenant) { "Connect-AzAccount -Tenant $Tenant" } else { 'Connect-AzAccount' }
+                return ("Run '{0}' yourself, complete any MFA or Conditional Access prompt, then re-run (or pass -DeviceLogin, or -UseManagedIdentity on an Azure VM)." -f $Command)
+            }
+
+            # The one sign-in of a run. A failed sign-in stops the run: it is
+            # not tried again, and the run does not go on with whatever was
+            # signed in before it.
+            function Invoke-AzPsSignIn([hashtable]$SignInArgs, [string]$What, [string]$Advice)
+            {
+                try { Connect-AzAccount @SignInArgs -ErrorAction Stop | Out-Null }
+                catch { Stop-SignIn -Message ("Az PowerShell: {0} failed: {1}" -f $What, $_.Exception.Message) -Advice $Advice }
+            }
+
+            function Invoke-AzPsUserSignIn([string]$Tenant)
+            {
+                $Advice = Get-UserSignInAdvice -Tenant $Tenant
+                if (-not $DeviceLogin.IsPresent -and -not (Test-RdaInteractiveSession))
                 {
-                    Write-Log -Message ('Setting PowerShell Az context...') -Severity 'Info'
-                    if ($DeviceLogin.IsPresent)
+                    Stop-SignIn -Message 'Az PowerShell: no usable sign-in, and this session has no console to sign in from (non-interactive); stopping instead of opening a browser.' -Advice ('Sign in before the run, or pass -Appid/-Secret/-TenantID, -UseManagedIdentity on an Azure VM, or -DeviceLogin. ' + $Advice)
+                }
+                $SignInArgs = @{}
+                if ($Tenant) { $SignInArgs.Tenant = $Tenant }
+                if ($DeviceLogin.IsPresent) { $SignInArgs.UseDeviceAuthentication = $true }
+                # The reconnect before metrics and consumption reads this: a
+                # run prompts a person at most once.
+                $script:RdaUserSignInMade = $true
+                Invoke-AzPsSignIn -SignInArgs $SignInArgs -What 'sign-in' -Advice $Advice
+            }
+
+            # The tenant id (a GUID) of tenant $Tenant, given as an id or a
+            # domain: a domain is resolved through the token Az PowerShell
+            # acquires for it.
+            function Get-AzPsTenantId([string]$Tenant)
+            {
+                $Id = [guid]::Empty
+                if ([guid]::TryParse($Tenant, [ref]$Id)) { return $Tenant }
+                try { return [string](Get-AzAccessToken -TenantId $Tenant -ErrorAction Stop -WarningAction SilentlyContinue).TenantId }
+                catch { return $null }
+            }
+
+            function Test-AzPsContextOnTenant([string]$Tenant)
+            {
+                $Current = Get-AzPsSignedInTenant
+                $Expected = Get-AzPsTenantId -Tenant $Tenant
+                return ([bool]$Current -and [bool]$Expected -and $Current -eq $Expected)
+            }
+
+            # A token for the tenant does not prove the context is on it, and
+            # the collectors use the context. Returns the tenant id.
+            function Confirm-AzPsContextTenant([string]$Tenant, [string]$Advice)
+            {
+                if (-not (Test-AzPsContextOnTenant -Tenant $Tenant))
+                {
+                    $Current = Get-AzPsSignedInTenant
+                    Stop-SignIn -Message ("Az PowerShell: the context is on tenant {0}, not on tenant {1}; stopping instead of collecting another tenant." -f $(if ($Current) { $Current } else { '(none)' }), $Tenant) -Advice $Advice
+                }
+                return (Get-AzPsSignedInTenant)
+            }
+
+            # After a service principal or managed identity sign-in the
+            # context must be that identity, never a cached user.
+            function Confirm-AzPsAccount([string]$Type, [string]$Id, [string]$What, [string]$Advice)
+            {
+                $Account = try { (Get-AzContext -ErrorAction Stop).Account } catch { $null }
+                if ($null -eq $Account -or [string]$Account.Type -ne $Type -or ($Id -and [string]$Account.Id -ne $Id))
+                {
+                    Stop-SignIn -Message ("Az PowerShell: after the {0} the context is not that identity; stopping instead of running as another account." -f $What) -Advice $Advice
+                }
+            }
+
+            # The run's subscriptions. A direct run with none stops instead of
+            # writing an empty report. Without -SubscriptionID only Enabled
+            # subscriptions are kept, as `az account list` did by default. With
+            # -SubscriptionID every state is kept, so a named Disabled or Warned
+            # subscription is still found; a named one the sign-in does not
+            # list stops the run.
+            function Set-RdaRunSubscriptions([string]$Tenant)
+            {
+                $script:RdaRunTenant = $Tenant
+                $Listed = @(Get-RdaTenantSubscriptions -Tenant $Tenant)
+                $Access = 'Check that the signed-in identity has at least Reader on a subscription of the tenant, and that -TenantID names the right tenant, then re-run.'
+                $Empty = "Az PowerShell: tenant {0} lists {1} for this sign-in; stopping instead of writing an empty report."
+                if ($Listed.Count -eq 0)
+                {
+                    Stop-SignIn -Message ($Empty -f $Tenant, 'no subscriptions') -Advice $Access
+                }
+                if ([string]::IsNullOrEmpty($SubscriptionID))
+                {
+                    $Listed = @($Listed | Where-Object { [string]$_.state -eq 'Enabled' })
+                    if ($Listed.Count -eq 0)
                     {
-                        Connect-AzAccount -UseDeviceAuthentication -Tenant $ExistingAccount.tenantId | Out-Null
-                    }
-                    else
-                    {
-                        Connect-AzAccount -Tenant $ExistingAccount.tenantId | Out-Null
-                    }
-                }
-
-                $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-                if ($TenantID) { $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID }) }
-                return
-            }
-            else
-            {
-                Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Re-authenticating." -f $ExistingAccount.tenantId, $TenantID) -Severity 'Warning'
-            }
-        }
-
-        if (!$TenantID)
-        {
-            Write-Log -Message ('Tenant ID not specified. Use -TenantID parameter if you want to specify directly.') -Severity 'Warning'
-            Write-Log -Message ('Authenticating Azure') -Severity 'Info'
-
-            Write-Log -Message ('Clearing account cache') -Severity 'Info'
-
-            if (!$RunAllSubs.IsPresent)
-            {
-                az account clear | Out-Null
-            }
-
-            $DebugPreference = "SilentlyContinue"
-
-            if (!$RunAllSubs.IsPresent)
-            {
-                Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info'
-                if ($DeviceLogin.IsPresent)
-                {
-                    Write-Log -Message ('Using device login') -Severity 'Info'
-                    az login --use-device-code
-                    Connect-AzAccount -UseDeviceAuthentication | Out-Null
-                }
-                else
-                {
-                    Write-Log -Message ('Using browser login') -Severity 'Info'
-                    az login --only-show-errors | Out-Null
-                    Connect-AzAccount | Out-Null
-                }
-            }
-
-            $DebugPreference = "Continue"
-
-            $Tenants = (Get-AzSubscription -WarningAction SilentlyContinue).HomeTenantId | Sort-Object -Unique
-
-            Write-Log -Message ('Checking number of Tenants') -Severity 'Info'
-
-            if ($Tenants.Count -eq 1)
-            {
-                Write-Log -Message ('You have privileges only in One Tenant') -Severity 'Success'
-                $TenantID = $Tenants
-            }
-            else
-            {
-                Write-Log -Message ('Select the the Azure Tenant ID that you want to connect: ') -Severity 'Warning'
-
-                $SequenceID = 1
-                foreach ($TenantID in $Tenants)
-                {
-                    write-host "$SequenceID)  $TenantID"
-                    $SequenceID ++
-                }
-
-                $IsInteractiveSession = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
-                if ($RunAllSubs.IsPresent -or -not $IsInteractiveSession)
-                {
-                    $TenantID = $Tenants[0]
-                    Write-Log -Message ("Non-interactive session with multiple tenants and no -TenantID: defaulting to the first tenant ({0}). Pass -TenantID to choose explicitly." -f $TenantID) -Severity 'Warning'
-                }
-                else
-                {
-                    [int]$SelectTenant = read-host "Select Tenant (Default 1)"
-                    if ($SelectTenant -lt 1) { $SelectTenant = 1 }
-                    $TenantID = $Tenants[$SelectTenant - 1]
-                }
-
-                if (!$RunAllSubs.IsPresent)
-                {
-                    if ($DeviceLogin.IsPresent)
-                    {
-                        az login --use-device-code -t $TenantID
-                        Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
-                    }
-                    else
-                    {
-                        az login -t $TenantID --only-show-errors | Out-Null
-                        Connect-AzAccount -Tenant $TenantID | Out-Null
+                        Stop-SignIn -Message ($Empty -f $Tenant, 'no Enabled subscription') -Advice ('Without -SubscriptionID only Enabled subscriptions are collected. To collect a subscription that is not Enabled, pass -SubscriptionID; or pass -TenantID for a tenant with Enabled subscriptions.')
                     }
                 }
+                elseif (@($Listed | Where-Object { [string]$_.id -eq $SubscriptionID }).Count -eq 0)
+                {
+                    Stop-SignIn -Message ("Az PowerShell: tenant {0} does not list subscription {1} for this sign-in; stopping instead of writing an empty report." -f $Tenant, $SubscriptionID) -Advice 'Check that -SubscriptionID is right, that -TenantID names its tenant, and that the signed-in identity has at least Reader on it, then re-run.'
+                }
+                $Global:Subscriptions = $Listed
             }
 
-            Write-Log -Message ("Extracting from Tenant $TenantID") -Severity 'Info'
-            Write-Log -Message ("Extracting Subscriptions") -Severity 'Info'
-
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID })
-        }
-        else
-        {
-
-            if (!$RunAllSubs.IsPresent)
+            if ($Appid)
             {
-                az account clear | Out-Null
-
-                if (!$Appid)
+                if ($UseManagedIdentity.IsPresent)
                 {
-                    if ($DeviceLogin.IsPresent)
-                    {
-                        az login --use-device-code -t $TenantID
-                        Connect-AzAccount -UseDeviceAuthentication -Tenant $TenantID | Out-Null
-                    }
-                    else
-                    {
-                        az login -t $TenantID --only-show-errors | Out-Null
-                        Connect-AzAccount -Tenant $TenantID | Out-Null
-                    }
+                    Write-Log -Message ('-UseManagedIdentity is ignored because -Appid is given; signing in as the Service Principal.') -Severity 'Warning'
                 }
-                elseif ($Appid -and $Secret -and $tenantid)
-                {
-                    Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
-                    $UnsecuredSecret = [System.Net.NetworkCredential]::new('', $Secret).Password
-                    $UnsecuredSecret | az login --service-principal -u $appid --tenant $TenantID --password-stdin --only-show-errors | Out-Null
-                    Remove-Variable -Name unsecuredSecret -ErrorAction SilentlyContinue
-                    $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
-                    Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID | Out-Null
-                }
-                else
+                if (!$Secret -or !$TenantID)
                 {
                     Write-Log -Message ("You are trying to use Service Principal Authentication Method in a wrong way.") -Severity 'Error'
                     Write-Log -Message ("It's Mandatory to specify Application ID, Secret and Tenant ID in Azure Resource Inventory") -Severity 'Error'
                     Write-Log -Message (".\ResourceInventory.ps1 -appid <SP AppID> -secret <SP Secret> -tenant <TenantID>") -Severity 'Error'
-                    Exit
+                    exit 1
+                }
+
+                Write-Log -Message ("Using Service Principal Authentication Method") -Severity 'Success'
+                $SpAdvice = 'Check the -Appid, -Secret and -TenantID values and that the Service Principal can sign in to the tenant, then re-run.'
+                # The secret stays a SecureString inside the credential.
+                $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
+                # -Scope Process: not saved as the default context, so a later
+                # run without -Appid does not reuse the service principal.
+                Invoke-AzPsSignIn -SignInArgs @{ ServicePrincipal = $true; Credential = $Credential; Tenant = $TenantID; Scope = 'Process' } -What 'service principal sign-in' -Advice $SpAdvice
+                Confirm-AzPsAccount -Type 'ServicePrincipal' -Id $Appid -What 'service principal sign-in' -Advice $SpAdvice
+                if (!(Test-AzPsTokenSilent -Tenant $TenantID)) { Stop-UnusableSignIn -Tenant $TenantID -Advice $SpAdvice }
+
+                Set-RdaRunSubscriptions -Tenant (Confirm-AzPsContextTenant -Tenant $TenantID -Advice $SpAdvice)
+                return
+            }
+
+            if ($UseManagedIdentity.IsPresent)
+            {
+                Write-Log -Message ('Using Managed Identity Authentication Method') -Severity 'Info'
+                $MiAdvice = 'Check that this machine has a managed identity with access to the tenant (and pass -TenantID for a specific tenant), then re-run.'
+                # -Scope Process, as for the service principal.
+                $MiArgs = @{ Identity = $true; Scope = 'Process' }
+                if ($TenantID) { $MiArgs.Tenant = $TenantID }
+                Invoke-AzPsSignIn -SignInArgs $MiArgs -What 'managed identity sign-in' -Advice $MiAdvice
+                Confirm-AzPsAccount -Type 'ManagedService' -What 'managed identity sign-in' -Advice $MiAdvice
+
+                $TargetTenant = if ($TenantID) { $TenantID } else { Get-AzPsSignedInTenant }
+                if (!$TargetTenant) { Stop-UnusableSignIn -Tenant '(managed identity)' -Advice $MiAdvice }
+                if (!(Test-AzPsTokenSilent -Tenant $TargetTenant)) { Stop-UnusableSignIn -Tenant $TargetTenant -Advice $MiAdvice }
+
+                Set-RdaRunSubscriptions -Tenant (Confirm-AzPsContextTenant -Tenant $TargetTenant -Advice $MiAdvice)
+                return
+            }
+
+            $PsTenant = Get-AzPsSignedInTenant
+            $PsTokenOk = if ($PsTenant) { Test-AzPsTokenSilent -Tenant $PsTenant } else { $false }
+
+            # Without -TenantID the target is the tenant of the cached sign-in,
+            # usable or not: one that cannot acquire a token is signed in to
+            # that same tenant again below.
+            $TargetTenant = $null
+            if ($TenantID) { $TargetTenant = $TenantID }
+            elseif ($PsTenant) { $TargetTenant = $PsTenant }
+
+            if (!$TargetTenant)
+            {
+                # Nothing usable and no -TenantID: sign in once without a
+                # tenant, choose the tenant, then check the token on it.
+                Write-Log -Message ('Tenant ID not specified. Use -TenantID parameter if you want to specify directly.') -Severity 'Warning'
+                Write-Log -Message ('Authenticating Azure') -Severity 'Info'
+
+                # No Az debug lines during the sign-in; afterwards the caller's
+                # setting again (Continue only under -Debug).
+                $SavedDebugPreference = $DebugPreference
+                $DebugPreference = "SilentlyContinue"
+                if ($DeviceLogin.IsPresent) { Write-Log -Message ('Calling Login, using device login.') -Severity 'Info' }
+                # With no console, Invoke-AzPsUserSignIn stops instead of
+                # opening a browser, so the line is only for a console.
+                elseif (Test-RdaInteractiveSession) { Write-Log -Message ('Calling Login, the browser will open and prompt you to login.') -Severity 'Info' }
+
+                try { Invoke-AzPsUserSignIn }
+                finally { $DebugPreference = $SavedDebugPreference }
+
+                # The tenants the sign-in reaches, by the tenant each
+                # subscription is accessed through (TenantId, not
+                # HomeTenantId: a subscription delegated with Azure Lighthouse
+                # has the customer's tenant as its home), plus the tenant the
+                # sign-in is on.
+                $Tenants = @(@(@(Get-AzSubscription -WarningAction SilentlyContinue).TenantId) + @(Get-AzPsSignedInTenant) | Where-Object { $_ } | Sort-Object -Unique)
+
+                Write-Log -Message ('Checking number of Tenants') -Severity 'Info'
+
+                if ($Tenants.Count -eq 0)
+                {
+                    Stop-UnusableSignIn -Tenant '(none given)' -Advice (Get-UserSignInAdvice)
+                }
+                elseif ($Tenants.Count -eq 1)
+                {
+                    Write-Log -Message ('You have privileges only in One Tenant') -Severity 'Success'
+                    $TargetTenant = $Tenants[0]
+                }
+                else
+                {
+                    Write-Log -Message ('Select the the Azure Tenant ID that you want to connect: ') -Severity 'Warning'
+
+                    $SequenceID = 1
+                    foreach ($ListedTenant in $Tenants)
+                    {
+                        write-host "$SequenceID)  $ListedTenant"
+                        $SequenceID ++
+                    }
+
+                    if (-not (Test-RdaInteractiveSession))
+                    {
+                        $TargetTenant = $Tenants[0]
+                        Write-Log -Message ("Non-interactive session with multiple tenants and no -TenantID: defaulting to the first tenant ({0}). Pass -TenantID to choose explicitly." -f $TargetTenant) -Severity 'Warning'
+                    }
+                    else
+                    {
+                        # Asked at most twice; an answer that is not a number
+                        # of the list stops the run.
+                        for ($Ask = 1; $Ask -le 2 -and !$TargetTenant; $Ask++)
+                        {
+                            $Answer = [string](Read-Host "Select Tenant (Default 1)")
+                            $Number = 0
+                            if ([string]::IsNullOrWhiteSpace($Answer)) { $Number = 1 }
+                            elseif (-not [int]::TryParse($Answer.Trim(), [ref]$Number)) { $Number = 0 }
+                            if ($Number -ge 1 -and $Number -le $Tenants.Count) { $TargetTenant = $Tenants[$Number - 1] }
+                            else { Write-Log -Message ("'{0}' is not a number from 1 to {1}." -f $Answer, $Tenants.Count) -Severity 'Warning' }
+                        }
+                        if (!$TargetTenant)
+                        {
+                            Stop-SignIn -Message 'No tenant was chosen; stopping.' -Advice 'Re-run with -TenantID <tenant> to choose the tenant directly.'
+                        }
+                    }
+                }
+
+                # Point Az PowerShell at the chosen tenant (no new sign-in); this
+                # process only, so the user's saved context is left alone.
+                if ((Get-AzPsSignedInTenant) -ne $TargetTenant)
+                {
+                    Set-AzContext -Tenant $TargetTenant -Scope Process | Out-Null
+                }
+
+                $Advice = Get-UserSignInAdvice -Tenant $TargetTenant
+                if (!(Test-AzPsTokenSilent -Tenant $TargetTenant)) { Stop-UnusableSignIn -Tenant $TargetTenant -Advice $Advice }
+                $TargetTenant = Confirm-AzPsContextTenant -Tenant $TargetTenant -Advice $Advice
+
+                Write-Log -Message ("Extracting from Tenant $TargetTenant") -Severity 'Info'
+                Write-Log -Message ("Extracting Subscriptions") -Severity 'Info'
+
+                Set-RdaRunSubscriptions -Tenant $TargetTenant
+                return
+            }
+
+            $Reused = $false
+            if ($PsTokenOk -and $PsTenant -eq $TargetTenant)
+            {
+                Write-Log -Message ("Az PowerShell: reusing existing sign-in for tenant {0}" -f $TargetTenant) -Severity 'Success'
+                $Reused = $true
+            }
+            elseif ($PsTenant -and $PsTenant -ne $TargetTenant -and (Test-AzPsTokenSilent -Tenant $TargetTenant))
+            {
+                # The cached account reaches the target tenant without a
+                # prompt: switch this process to it instead of signing in.
+                Write-Log -Message ("Az PowerShell: signed in to tenant {0}; switching this process to {1} with the same sign-in." -f $PsTenant, $TargetTenant) -Severity 'Info'
+                Set-AzContext -Tenant $TargetTenant -Scope Process | Out-Null
+                $Reused = Test-AzPsContextOnTenant -Tenant $TargetTenant
+            }
+
+            if (-not $Reused)
+            {
+                if ($null -eq $PsTenant) { Write-Log -Message ('Az PowerShell: not signed in; signing in.') -Severity 'Info' }
+                elseif ($PsTenant -ne $TargetTenant) { Write-Log -Message ("Az PowerShell: signed in to tenant {0}; signing in to {1}." -f $PsTenant, $TargetTenant) -Severity 'Warning' }
+                else { Write-Log -Message ("Az PowerShell: session for tenant {0} cannot acquire a token silently; signing in again." -f $TargetTenant) -Severity 'Warning' }
+
+                Invoke-AzPsUserSignIn -Tenant $TargetTenant
+
+                if (!(Test-AzPsTokenSilent -Tenant $TargetTenant))
+                {
+                    Stop-UnusableSignIn -Tenant $TargetTenant -Advice (Get-UserSignInAdvice -Tenant $TargetTenant)
                 }
             }
 
-            $Global:Subscriptions = @(az account list --output json --only-show-errors | ConvertFrom-Json)
-            $Global:Subscriptions = @($Subscriptions | Where-Object { $_.tenantID -eq $TenantID })
+            Set-RdaRunSubscriptions -Tenant (Confirm-AzPsContextTenant -Tenant $TargetTenant -Advice (Get-UserSignInAdvice -Tenant $TargetTenant))
+            return
+        }
+
+        # -RunAllSubs: Run-AllSubscriptions.ps1 has already signed Az
+        # PowerShell in to -TenantID before it starts this script, so that
+        # sign-in is used as it is: no sign-in here.
+        $Context = try { Get-AzContext -ErrorAction Stop } catch { $null }
+        $ContextTenant = if ($null -ne $Context -and $null -ne $Context.Account) { [string]$Context.Tenant.Id } else { $null }
+        if ($ContextTenant -and -not $Global:RdaSessionInitialized)
+        {
+            Write-Log -Message ("Already authenticated as: {0}" -f $Context.Account.Id) -Severity 'Success'
+        }
+
+        $TargetTenant = if ($TenantID) { $TenantID } else { $ContextTenant }
+        if ($TargetTenant -and $ContextTenant -and $ContextTenant -ne $TargetTenant)
+        {
+            Write-Log -Message ("Current session is for tenant {0}, but requested tenant is {1}. Switching this process to it." -f $ContextTenant, $TargetTenant) -Severity 'Warning'
+            Set-AzContext -Tenant $TargetTenant -Scope Process | Out-Null
+        }
+
+        if (!$TargetTenant)
+        {
+            Write-Log -Message ('Tenant ID not specified. Use -TenantID parameter if you want to specify directly.') -Severity 'Warning'
+            $Tenants = @((Get-AzSubscription -WarningAction SilentlyContinue).HomeTenantId | Where-Object { $_ } | Sort-Object -Unique)
+            if ($Tenants.Count -gt 0)
+            {
+                $TargetTenant = $Tenants[0]
+                if ($Tenants.Count -gt 1) { Write-Log -Message ("Non-interactive session with multiple tenants and no -TenantID: defaulting to the first tenant ({0}). Pass -TenantID to choose explicitly." -f $TargetTenant) -Severity 'Warning' }
+                Write-Log -Message ("Extracting from Tenant $TargetTenant") -Severity 'Info'
+            }
+        }
+
+        if (!$TargetTenant)
+        {
+            $Global:Subscriptions = @()
+            return
+        }
+
+        # The wrapper starts this script once per subscription in the same
+        # process; the tenant's subscription list is read once.
+        $Cache = $Global:RdaTenantSubscriptionCache
+        if ($null -ne $Cache -and $Cache.Tenant -eq $TargetTenant)
+        {
+            $Global:Subscriptions = @($Cache.Subscriptions)
+            return
+        }
+        $Global:Subscriptions = @(Get-RdaTenantSubscriptions -Tenant $TargetTenant)
+        if ($Global:Subscriptions.Count -gt 0)
+        {
+            $Global:RdaTenantSubscriptionCache = @{ Tenant = $TargetTenant; Subscriptions = @($Global:Subscriptions) }
         }
     }
 
@@ -551,18 +808,20 @@ Function RunInventorySetup()
         $Global:RdaSessionInitialized = $true
     }
 
+    # The resources are sorted by their id in lower case. Resource Graph sorts
+    # text by its exact characters, upper case first, and the case of the
+    # resource group in an id can change between two reads of the same resource
+    # (a virtual machine that is starting or stopping switches several times).
+    # Sorted by the id as returned, such a resource moves between pages while
+    # they are read: it is listed twice or not at all, and the resource at a
+    # page edge is lost or listed twice with it.
     function ResourceInventoryLoop()
     {
-        if (![string]::IsNullOrEmpty($ResourceGroup) -and [string]::IsNullOrEmpty($SubscriptionID))
-        {
-            Write-Log -Message ("Resource Group Name present, but missing Subscription ID.") -Severity 'Error'
-            Write-Log -Message ("If using ResourceGroup parameter you must also put SubscriptionId") -Severity 'Error'
-            Exit
-        }
-
         if (![string]::IsNullOrEmpty($ResourceGroup))
         {
-            $ResourceGroup = $ResourceGroup.ToLower()
+            # Invariant rules: on a tr-TR or az-Latn host ToLower() turns 'I'
+            # into a dotless i, and the query then matches no resource group.
+            $ResourceGroup = $ResourceGroup.ToLowerInvariant()
         }
 
         if (![string]::IsNullOrEmpty($ResourceGroup) -and ![string]::IsNullOrEmpty($SubscriptionID))
@@ -572,26 +831,16 @@ Function RunInventorySetup()
             $Subscri = $SubscriptionID
 
             $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri)
-            $EnvSizeNum = $EnvSize.data.'count_'
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId @($Subscri) -HideRawOutput:$Obfuscate.IsPresent
+            $EnvSizeNum = Get-AzGraphCount -Result $EnvSize
 
             if ($EnvSizeNum -ge 1)
             {
-                $Loop = $EnvSizeNum / 1000
-                $Loop = [math]::ceiling($Loop)
-                $Looper = 0
-                $Limit = 0
+                # Every page, read with the skip token.
+                $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by tolower(id) asc"
+                $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId @($Subscri) -Lowercase -HideRawOutput:$Obfuscate.IsPresent
 
-                while ($Looper -lt $Loop)
-                {
-                    $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri, '--skip', $Limit, '--first', 1000) -Lowercase
-
-                    $Global:Resources += $Resource.data
-                    Start-Sleep 2
-                    $Looper ++
-                    $Limit = $Limit + 1000
-                }
+                $Global:Resources += $Resource.data
             }
         }
         elseif ([string]::IsNullOrEmpty($ResourceGroup) -and ![string]::IsNullOrEmpty($SubscriptionID))
@@ -599,81 +848,69 @@ Function RunInventorySetup()
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID)
-            $EnvSizeNum = $EnvSize.data.'count_'
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId @($SubscriptionID) -HideRawOutput:$Obfuscate.IsPresent
+            $EnvSizeNum = Get-AzGraphCount -Result $EnvSize
 
             if ($EnvSizeNum -ge 1)
             {
-                $Loop = $EnvSizeNum / 1000
-                $Loop = [math]::ceiling($Loop)
-                $Looper = 0
-                $Limit = 0
+                # Every page, read with the skip token.
+                $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by tolower(id) asc"
+                $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId @($SubscriptionID) -Lowercase -HideRawOutput:$Obfuscate.IsPresent
 
-                while ($Looper -lt $Loop)
-                {
-                    $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID, '--skip', $Limit, '--first', 1000) -Lowercase
-
-                    $Global:Resources += $Resource.data
-                    Start-Sleep 2
-                    $Looper ++
-                    $Limit = $Limit + 1000
-                }
+                $Global:Resources += $Resource.data
             }
         }
         else
         {
+            # Every subscription of the run, named explicitly (in batches of
+            # 1000), rather than whatever scope Resource Graph defaults to.
+            $RunSubscriptionIds = @($Global:Subscriptions | ForEach-Object { [string]$_.id })
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery
-            $EnvSizeCount = $EnvSize.Data.'count_'
+            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId $RunSubscriptionIds -HideRawOutput:$Obfuscate.IsPresent
+            $EnvSizeCount = Get-AzGraphCount -Result $EnvSize
 
             Write-Log -Message ("Resources Output: {0} Resources Identified" -f $EnvSizeCount) -Severity 'Success'
 
             if ($EnvSizeCount -ge 1)
             {
-                $Loop = $EnvSizeCount / 1000
-                $Loop = [math]::Ceiling($Loop)
-                $Looper = 0
-                $Limit = 0
+                # Every page, read with the skip token.
+                $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by tolower(id) asc"
+                $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId $RunSubscriptionIds -Lowercase -HideRawOutput:$Obfuscate.IsPresent
 
-                while ($Looper -lt $Loop)
-                {
-                    $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
-
-                    $Global:Resources += $Resource.Data
-                    Start-Sleep 2
-                    $Looper++
-                    $Limit = $Limit + 1000
-                }
+                $Global:Resources += $Resource.Data
             }
         }
     }
 
     function ResourceInventoryAvd()
     {
-        $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()"
-        $AVDSizeCount = $AVDSize.data.'count_'
+        # The subscriptions ResourceInventoryLoop reads: -SubscriptionID alone
+        # when it is given, else every subscription of the run, named explicitly
+        # (in batches of 1000). Session hosts of other subscriptions never match
+        # this run's host pools, and the wrapper runs one -SubscriptionID run per
+        # subscription, so reading them put their real ids in every run's
+        # dictionary, each run with its own tokens, and counted them as the
+        # run's own resources.
+        $RunSubscriptionIds = if (![string]::IsNullOrEmpty($SubscriptionID)) { @([string]$SubscriptionID) } else { @($Global:Subscriptions | ForEach-Object { [string]$_.id }) }
+        # A -ResourceGroup run reads that group only, for the same reason. =~
+        # matches without regard to case: only the resources table is known to
+        # keep resourceGroup in lower case, other tables may keep the portal's.
+        # Lower-cased without the host's culture: on a Turkish host ToLower()
+        # turns I into a dotless i, which matches no group.
+        $AVDGroupFilter = if (![string]::IsNullOrEmpty($ResourceGroup)) { " | where resourceGroup =~ '{0}'" -f $ResourceGroup.ToLowerInvariant() } else { '' }
+        $AVDSize = Invoke-AzGraphQuerySafe -Query ("desktopvirtualizationresources{0} | summarize count()" -f $AVDGroupFilter) -SubscriptionId $RunSubscriptionIds -HideRawOutput:$Obfuscate.IsPresent
+        $AVDSizeCount = Get-AzGraphCount -Result $AVDSize
 
         Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
 
         if ($AVDSizeCount -ge 1)
         {
-            $Loop = $AVDSizeCount / 1000
-            $Loop = [math]::ceiling($Loop)
-            $Looper = 0
-            $Limit = 0
+            # Every page, read with the skip token, sorted by the id in lower
+            # case for the reason given above ResourceInventoryLoop.
+            $GraphQuery = "desktopvirtualizationresources$AVDGroupFilter | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by tolower(id) asc"
+            $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -SubscriptionId $RunSubscriptionIds -Lowercase -HideRawOutput:$Obfuscate.IsPresent
 
-            while ($Looper -lt $Loop)
-            {
-                $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
-
-                $Global:Resources += $AVD.data
-                Start-Sleep 2
-                $Looper++
-                $Limit = $Limit + 1000
-            }
+            $Global:Resources += $AVD.data
         }
     }
 
@@ -852,33 +1089,72 @@ function ExecuteInventoryProcessing()
 
         Write-Log -Message ("{0}: no usable Azure context/token detected; attempting one reconnect before collecting {0} data." -f $Phase) -Severity 'Warning'
 
+        # At most one reconnect per run, whatever the identity: after it,
+        # later phases are skipped without trying again. A user is never
+        # prompted a second time in a run, and only for the run's tenant.
+        if ($script:RdaReconnectTried)
+        {
+            Write-Log -Message ("{0}: the one reconnect of this run was already made; not trying again. Re-authenticate (Connect-AzAccount), then re-run." -f $Phase) -Severity 'Error'
+            return $false
+        }
+        $RunTenant = if ($TenantID) { $TenantID } else { $script:RdaRunTenant }
+
         try
         {
             if ($Appid -and $Secret -and $TenantID)
             {
+                $script:RdaReconnectTried = $true
                 Write-Log -Message ("{0}: reconnecting via Service Principal." -f $Phase) -Severity 'Info'
                 $Credential = New-Object System.Management.Automation.PSCredential($Appid, $Secret)
-                Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID -ErrorAction Stop | Out-Null
+                Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant $TenantID -Scope Process -ErrorAction Stop | Out-Null
+            }
+            elseif ($UseManagedIdentity.IsPresent)
+            {
+                # Never a user sign-in for a managed identity run.
+                $script:RdaReconnectTried = $true
+                Write-Log -Message ("{0}: reconnecting with the managed identity." -f $Phase) -Severity 'Info'
+                if ($TenantID) { Connect-AzAccount -Identity -Tenant $TenantID -Scope Process -ErrorAction Stop | Out-Null }
+                else { Connect-AzAccount -Identity -Scope Process -ErrorAction Stop | Out-Null }
+                if (& $TokenOk) { return $true }
+                Write-Log -Message ("{0}: the managed identity reconnect did not give a usable token. Check that this machine has a managed identity with access to the tenant, then re-run." -f $Phase) -Severity 'Error'
+                return $false
             }
             elseif ($RunAllSubs.IsPresent)
             {
                 Write-Log -Message ("{0}: running under -RunAllSubs without Service Principal credentials - cannot prompt for interactive login in this context. Authenticate before the run (e.g. Connect-AzAccount) or supply -appid/-secret/-tenant." -f $Phase) -Severity 'Error'
                 return $false
             }
-            elseif (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected)
+            elseif ($RunTenant -and (Test-AzPsTokenSilent -Tenant $RunTenant))
+            {
+                # The sign-in still reaches the run's tenant without a prompt:
+                # point this process back at it.
+                $script:RdaReconnectTried = $true
+                Write-Log -Message ("{0}: switching this process back to tenant {1} with the same sign-in." -f $Phase, $RunTenant) -Severity 'Info'
+                Set-AzContext -Tenant $RunTenant -Scope Process -ErrorAction Stop | Out-Null
+            }
+            elseif ($script:RdaUserSignInMade)
+            {
+                Write-Log -Message ("{0}: reconnecting would prompt a second time in this run; not prompting again. Re-authenticate (Connect-AzAccount{1}), then re-run." -f $Phase, $(if ($RunTenant) { " -Tenant $RunTenant" })) -Severity 'Error'
+                return $false
+            }
+            elseif (-not (Test-RdaInteractiveSession))
             {
                 Write-Log -Message ("{0}: no usable Azure context and no interactive console to prompt for login (non-interactive session). Authenticate before the run (Connect-AzAccount) or supply -appid/-secret/-tenant, then re-run." -f $Phase) -Severity 'Error'
                 return $false
             }
-            elseif ($DeviceLogin.IsPresent)
-            {
-                Write-Log -Message ("{0}: reconnecting via device login." -f $Phase) -Severity 'Info'
-                Connect-AzAccount -UseDeviceAuthentication -ErrorAction Stop | Out-Null
-            }
             else
             {
-                Write-Log -Message ("{0}: reconnecting via interactive browser login." -f $Phase) -Severity 'Info'
-                Connect-AzAccount -ErrorAction Stop | Out-Null
+                $script:RdaReconnectTried = $true
+                $script:RdaUserSignInMade = $true
+                $SignInArgs = @{}
+                if ($RunTenant) { $SignInArgs.Tenant = $RunTenant }
+                if ($DeviceLogin.IsPresent)
+                {
+                    Write-Log -Message ("{0}: reconnecting via device login." -f $Phase) -Severity 'Info'
+                    $SignInArgs.UseDeviceAuthentication = $true
+                }
+                else { Write-Log -Message ("{0}: reconnecting via interactive browser login." -f $Phase) -Severity 'Info' }
+                Connect-AzAccount @SignInArgs -ErrorAction Stop | Out-Null
             }
         }
         catch
@@ -1224,10 +1500,14 @@ function ExecuteInventoryProcessing()
 
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
+            # SubscriptionId: the one subscription a wrapper run is for (empty
+            # in a direct run of all), so the wrapper counts each skip once.
+            # Only counted, never printed.
             $Global:ConsumptionFailedSubs += [pscustomobject]@{
-                Name    = '(all subscriptions)'
-                Id      = '(auth)'
-                Message = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Name           = '(all subscriptions)'
+                Id             = '(auth)'
+                Message        = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                SubscriptionId = [string]$SubscriptionID
             }
             return
         }
@@ -1252,7 +1532,7 @@ function ExecuteInventoryProcessing()
             $ContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                $null = Set-AzContext -Subscription $sub.id -Scope Process -ErrorAction Stop
                 $ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch
@@ -1605,7 +1885,10 @@ if (-not $RunAllSubs.IsPresent)
             $FreeMB = [math]::Round($Drive.Free / 1MB, 0)
             if ($FreeMB -lt 100)
             {
-                throw ("Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB)
+                # exit, not throw: the production 'SilentlyContinue' preference
+                # suppresses a bare throw, and the run would go on.
+                Write-Host ("ERROR: Pre-flight: free disk space at {0} is {1} MB; the script needs at least 100 MB to start. Free space and re-run." -f $PreFlightInventoryRoot, $FreeMB) -ForegroundColor Red
+                exit 1
             }
             elseif ($FreeMB -lt 500)
             {
@@ -1619,7 +1902,6 @@ if (-not $RunAllSubs.IsPresent)
     }
     catch
     {
-        if ($_.Exception.Message -match '^Pre-flight:') { throw }
         Write-Host ("WARNING: Could not determine free disk space at {0}: {1}" -f $PreFlightInventoryRoot, $_.Exception.Message) -ForegroundColor Yellow
     }
 
@@ -1637,13 +1919,27 @@ if (-not $RunAllSubs.IsPresent)
     }
     catch
     {
+        $ProbeError = $_.Exception.Message
         try { if (Test-Path $ProbePath) { Remove-Item -Path $ProbePath -Force -ErrorAction SilentlyContinue } }
         catch { Write-Verbose ("Probe cleanup failed at {0}: {1}" -f $ProbePath, $_.Exception.Message) }
-        throw ("Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $_.Exception.Message)
+        Write-Host ("ERROR: Pre-flight: cannot write to {0}: {1}. This usually means readonly directory, denied permissions, antivirus or DLP product blocking writes, or a stale handle. Verify the directory is writable and re-run." -f $PreFlightInventoryRoot, $ProbeError) -ForegroundColor Red
+        exit 1
     }
 
     Write-Host "Pre-flight checks passed." -ForegroundColor Green
     Write-Host ""
+}
+
+# A direct run owns the health lists, so it starts them empty: a second run in
+# the same session must not report the first run's failures. Under -RunAllSubs
+# the wrapper (or its stream worker) empties them once at its own start and
+# gathers every subscription's entries in them, so they are left alone here.
+if (-not $RunAllSubs.IsPresent)
+{
+    $Global:CollectorFailures = @()
+    $Global:MetricsFailedSubs = @()
+    $Global:ConsumptionFailedSubs = @()
+    $Global:ConsumptionRecordCount = 0
 }
 
 $Global:Runtime = Measure-Command -Expression {

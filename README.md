@@ -19,6 +19,8 @@ For most users, this is everything you need.
 
 **1. Open Azure Cloud Shell** at [shell.azure.com](https://shell.azure.com), or run a local PowerShell 7 prompt with the [prerequisites](#prerequisites) installed.
 
+The tool needs Az PowerShell only: PowerShell 7 and the four Az submodules `Az.Accounts`, `Az.Compute`, `Az.Monitor` and `Az.Billing`. The Azure CLI is not needed and is not used. On a local machine, sign in with `Connect-AzAccount -Tenant <tenant>` first, or let the script sign you in.
+
 **2. Download the script:**
 
 ```powershell
@@ -85,9 +87,7 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 #### Option 2: Local Environment
 - **[Git](https://git-scm.com/downloads)** — required first. The recommended way to get the script is `git clone`, which also avoids Windows' Mark-of-the-Web / execution-policy friction. On a fresh Windows box without Git, install it before anything else (see [Step 2: Get the Script](#step-2-get-the-script) for the BITS-based silent install).
 - [PowerShell 7 or later](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell)
-- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli)
-- Azure CLI Resource-Graph Extension (auto-installed by script)
-- **Az PowerShell module** — only four submodules are needed (install before running — see below)
+- **Az PowerShell module** — only four submodules are needed: `Az.Accounts` **5.5.4 or newer**, `Az.Compute`, `Az.Monitor` and `Az.Billing` (install before running — see below). The Azure CLI is not needed, and neither is `Az.ResourceGraph`: Resource Graph is queried through `Invoke-AzRestMethod` from `Az.Accounts`.
 
 > **On Windows with only Windows PowerShell 5.1?** The tool requires PowerShell 7. If you launch `Run-AllSubscriptions.ps1` from Windows PowerShell 5.1, it detects the old version and automatically re-launches itself under PowerShell 7, forwarding your arguments. If PowerShell 7 isn't installed, it offers to install it first (official Microsoft MSI) when run interactively. Nothing extra to do — just run the same command:
 > ```powershell
@@ -100,11 +100,19 @@ The script runs in either Azure Cloud Shell or a local PowerShell 7 install. Pic
 
 **You normally don't need to install anything by hand.** When you run `Run-AllSubscriptions.ps1`, its pre-flight bootstrap checks for the four Az submodules it needs (`Az.Accounts`, `Az.Compute`, `Az.Monitor`, `Az.Billing`) and, if any are missing, offers to install just those for you on interactive runs. It does this **before** any Az call — not mid-run — and then **verifies the module actually loads** (by importing `Az.Accounts`) before proceeding, so a broken/partial install is caught up front with a clear repair message instead of failing much later with confusing errors like "no consumption records". The tool needs only those four submodules, not the full ~80-submodule `Az` rollup (the full rollup works too — it loads only the four it needs). The report is a self-contained HTML file with no Excel/ImportExcel dependency, so there is nothing else to install.
 
-**Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules). From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
+**Optional — install by hand.** Do this only if you want to skip the prompt, are running **non-interactively** (the bootstrap won't prompt then, it fails loud with this same command), or are calling `ResourceInventory.ps1` **directly** — the inner script does *not* auto-install (by design, to avoid half-installed modules); if one of the four is missing or does not load, a direct run says which and stops with exit code `1` before it signs in. From a **PowerShell 7** prompt (`pwsh`); `-Scope CurrentUser` needs no administrator elevation:
 
 ```powershell
 Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck -Scope CurrentUser
 ```
+
+**Az.Accounts 5.5.4 or newer is required.** Both scripts check this before any Azure call. If the newest installed `Az.Accounts` is older (or missing), the run prints the version it found, the version it needs and this command, then stops with exit code `1` (the wrapper offers to run it for you on interactive runs):
+
+```powershell
+Install-Module -Name Az.Accounts -MinimumVersion 5.5.4 -Repository PSGallery -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+```
+
+If an older `Az.Accounts` is already loaded in your PowerShell session, it cannot be replaced while the session runs: the run stops and asks you to open a new PowerShell session (use `pwsh -NoProfile` if your profile loads `Az.Accounts`). In that new session, sign in first (`Connect-AzAccount`, or `Connect-AzAccount -Identity` on an Azure VM), then run again.
 
 If a previous run left a broken `Az` install behind, remove it and reinstall:
 
@@ -128,7 +136,8 @@ Install-Module -Name Az.Accounts,Az.Compute,Az.Monitor,Az.Billing -Repository PS
 
 **For Local Environment:**
 1. Open PowerShell 7 as Administrator
-2. Ensure Azure CLI is installed and configured
+2. Ensure the four Az PowerShell submodules are installed (see [Installing the required PowerShell modules](#installing-the-required-powershell-modules))
+3. Sign in with Az PowerShell (`Connect-AzAccount -Tenant <tenant>`), or let the script sign you in. The Azure CLI is not needed.
 
 ### Step 2: Get the Script
 
@@ -165,10 +174,20 @@ git clone https://github.com/awslabs/resource-discovery-for-azure.git
 
 ### Authentication Notes
 
-- **Azure Cloud Shell:** Authentication is automatic
-- **Local PowerShell:** Run `az login` and `Connect-AzAccount` before executing the script. If you plan to scan all subscriptions in a tenant, use `Run-AllSubscriptions.ps1`, which prompts you to sign in once and then reuses the session for every subscription.
+- **Azure Cloud Shell:** Cloud Shell's own sign-in is used when it can still get a token for the tenant (rule 2 below), so usually there is no prompt. `-Appid`, `-UseManagedIdentity`, `-DeviceLogin` and `-TenantID` work in Cloud Shell as anywhere else.
+- **Local PowerShell:** The tool signs in with Az PowerShell only (`Connect-AzAccount`); the Azure CLI is not used. You can sign in beforehand with `Connect-AzAccount -Tenant <tenant>` or let the script do it. If you plan to scan all subscriptions in a tenant, use `Run-AllSubscriptions.ps1`, which signs in once and then reuses the session for every subscription.
 
-You might get more than one authentication request due to different collector processes running in parallel.
+Sign-in follows three rules, in this order:
+
+1. **Service principal:** `-Appid`, `-Secret` and `-TenantID` always sign in as the service principal (`Connect-AzAccount -ServicePrincipal`, the secret kept as a SecureString), even when a user is already signed in; `-Appid` without the other two stops with exit code `1`. If the service principal sign-in fails, or Az PowerShell is then not signed in as that service principal, the run stops with exit code `1`; it never continues as a user who was already signed in. `-UseManagedIdentity` works the same way with the identity of the Azure VM or service the script runs on.
+2. **Existing sign-in:** otherwise an Az PowerShell sign-in that is on the target tenant and can still get a token without a prompt is reused, with no prompt. When that sign-in is on another tenant but can get a token for `-TenantID` without a prompt, the script's process is switched to `-TenantID` (`Set-AzContext -Scope Process`) instead of signing in again. Without `-TenantID` the target tenant is the one that sign-in is on, and only that tenant's subscriptions are collected (listed with `Get-AzSubscription -TenantId`, so subscriptions delegated to the tenant are included).
+3. **One sign-in attempt:** otherwise the script signs in once (`Connect-AzAccount`; `-DeviceLogin` uses the device-code flow, `-UseManagedIdentity` the identity of the Azure VM or service it runs on) and checks the token. If the sign-in fails, or still gives no token without a prompt (for example because of MFA or Conditional Access), the run stops with exit code `1` and says which command to run yourself; it does not prompt again or continue with an empty inventory. With no usable sign-in and no `-TenantID`, the sign-in is made without a tenant and you pick the tenant afterwards (the first one in a non-interactive session); the list holds the tenants your subscriptions are accessed through, so a tenant that manages subscriptions with Azure Lighthouse is offered. A number outside the list is asked for once more, then the run stops. In a session with no console (CI, a scheduled task), the script does not open a browser: it stops with exit code `1` unless `-DeviceLogin`, a service principal or `-UseManagedIdentity` is given.
+
+The run goes on only when Az PowerShell is signed in to the target tenant and that tenant lists at least one subscription for the sign-in; otherwise it stops with exit code `1` instead of writing an empty or wrong-tenant report.
+
+A usable sign-in is never signed out; switching to the chosen tenant applies to the script's own process only (`Set-AzContext -Scope Process`). Service principal and managed identity sign-ins are kept to the script's process too (`Connect-AzAccount -Scope Process`), so a later run without `-Appid` or `-UseManagedIdentity` does not reuse them. If the token is lost later in the run, metrics and consumption reconnect at most once per run, with the same identity: the service principal, the managed identity (never a user sign-in), or, for a user, a switch back to the run's tenant when that needs no prompt, or one sign-in on the run's tenant if the run has not prompted yet. Otherwise that phase is skipped with an error and the rest of the inventory continues.
+
+A run asks you to sign in at most once: the parallel collectors and the `Run-AllSubscriptions.ps1` streams use that one sign-in.
 
 ### Basic Execution
 
@@ -249,7 +268,7 @@ The wrapper prints the count of excluded subscriptions and a per-state breakdown
 
 Before doing any inventory work, `Run-AllSubscriptions.ps1` verifies that the signed-in identity can actually read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity has no role on — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions (and, for consumption data, it can even attribute one subscription's billing to another).
 
-The check makes one cheap control-plane call per subscription (`az group list`) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
+The check makes one cheap control-plane call per subscription with Az PowerShell, a GET of the subscription's resource groups (`Invoke-AzRestMethod -Method GET -Path '/subscriptions/<id>/resourcegroups?api-version=2021-04-01'`), to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
 
 By default, if **any** in-scope subscription is not readable, the wrapper lists the offending subscriptions (name, id, and reason) and **stops before doing any work**, so you can grant the missing Reader role and re-run:
 
@@ -484,8 +503,9 @@ ACR storage, serverless SQL `app_cpu_billed`) use a fixed 1-day window and are
 | Parameter | Type | Description | Example |
 |-----------|------|-------------|----------|
 | `Appid` | String | Service Principal application ID | `-Appid "app-id-here"` |
-| `Secret` | String | Service Principal client secret | `-Secret "secret-here"` |
+| `Secret` | SecureString | Service Principal client secret, as a SecureString (a plain string is refused) | `-Secret (Read-Host -Prompt 'Client secret' -AsSecureString)` |
 | `DeviceLogin` | Switch | Use device code authentication | `-DeviceLogin` |
+| `UseManagedIdentity` | Switch | Sign in Az PowerShell (`Connect-AzAccount -Identity`, with `-Tenant` when `-TenantID` is given) with the managed identity of the Azure VM or service the script runs on. Direct runs of `ResourceInventory.ps1` only. | `-UseManagedIdentity` |
 
 ### Debugging Parameters
 
@@ -524,13 +544,13 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 
 **Authentication Errors:**
 - Ensure you have the required Azure roles assigned
-- For local environments, run `az login` before executing the script
-- Multiple authentication prompts may appear due to parallel processing
+- For local environments, run `Connect-AzAccount -Tenant <tenant>` before executing the script, or let the script sign you in
+- A run prompts at most once. If it stops with "did not give a usable token", run the `Connect-AzAccount` command it prints yourself, complete any MFA or Conditional Access prompt, then re-run
 - "Get-AzSubscription returned no subscriptions" — usually a Conditional Access / MFA gate. Re-run with `-DeviceLogin` to use the browser-based device-code flow.
 - Tenant-domain-style `-TenantID` (e.g. `contoso.onmicrosoft.com`) is resolved via Microsoft's public OIDC discovery endpoint, no sign-in needed. Pass the tenant GUID directly if discovery fails.
 
 **Subscription returned 0 resources:**
-- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `az graph query` acid-test command to confirm.
+- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints an `Invoke-AzRestMethod` command (Az.Accounts, which the tool already loads) that counts the subscription's resources in Resource Graph, to confirm it.
 - Less commonly, the subscription is genuinely empty.
 - Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
 
@@ -578,18 +598,17 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 | Code | Meaning |
 |---|---|
 | `0` | Clean run — no failures of any kind. |
-| `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
+| `1` | Hard failure during pre-flight, authentication, or setup (most of these stop the run before it collects anything). This includes, with `-ParallelStreams`, something already at one of this run's stream summary paths (their names hold the run's own id) that could not be removed: the run stops before any stream starts, so nothing is collected; remove it by hand and run again. It also includes a resume state file or a stream resume state file that is there but cannot be opened (locked, no access): it may hold failures still to retry, so the run stops before it merges it into the resume state. That is at the start, before any subscription and before the resume state is written, except for a stream resume state file that cannot be opened when the streams are done (it may have been readable at the start): then the stop comes after them, their reports are kept, their records are kept in the stream resume state files (and in the resume state, for a stream that could not start or write its own; when the resume state cannot be written either, those records go to a stream resume state file of their own, `.resume-state-<TenantID>-stream-summary-<run id>.json`, which the next run reads at its start, so its `-ResumeFailedOnly` retries them; only when that file cannot be written too, the stop names each subscription whose record is therefore in no file, by name and id, and keeps the stream summaries that hold them, which no run reads: `-ResumeFailedOnly` does not retry those subscriptions, so once the file can be opened, run again without `-Resume` and `-ResumeFailedOnly`, as a plain run runs every subscription, then remove the kept stream summaries), the file that could not be opened is kept, and no consolidated zip is made; the next run stops at its start until that file can be opened. Fix its permissions and run again, or move it away to drop its records. |
+| `2` | A subscription's report is missing from the consolidated zip, or cannot be confirmed. Either one or more subscriptions failed (they are listed under `Subscriptions Failed`): the consolidated zip is still made and holds the reports of the subscriptions that worked, or no zip is made when none worked. Or a per-subscription output verification gap (a subscription reported success but its output zip is missing, also when the whole inventory folder is gone): the run stops before consolidation, so no zip is made. Or, with `-ParallelStreams`, a stream's summary file is missing or could not be read (a summary that is not a JSON object, is from another run, names another stream, has no row for a subscription the stream ran, or holds in a field the wrapper reads a value the stream never writes, such as a success row with no Count, a Count that is not a whole number of 0 or more, a Zip that is not a path, or a ConsumptionRecords that is not a whole number, counts as one that could not be read): that stream's subscriptions are not confirmed (they are not counted as failed, and their reports may well be in the consolidated zip), so check the zip, if one was made; the console prints `Stream Summary Missing` or `Stream Summary Unreadable` for it. When every stream summary is read, the consolidated zip holds only the zips this run's subscriptions named, so a zip another run writes under the same inventory root at the same time is left out. Takes precedence over `3`–`5`. The last console lines (`Exit code 2: ...`) say which case it is and name any condition `2` hides (Metrics/Consumption skipped for sign-in, collector failures). For a failed subscription, or a missing or unreadable stream summary, the "FAILED (auth)" and "FAILED (collectors)" banners also print, and when a consolidated zip is made its `RunSummary.log` holds the same lines under `Exit code:`. For a verification gap, the run stops right after the "Per-subscription output verification failed" block: it prints the failed-subscription count (if any) and the `Exit code 2: ...` lines, but no Summary block, no FAILED banners and no `RunSummary.log`. |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |
 
-Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
+Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result. Code `2` can come with a consolidated zip too (see above), so check for the `AllSubscriptions_ResourcesReport_*.zip` file, or the `Exit code:` lines, rather than reading `2` as "no report".
 
 ### Important Notes
 
 - The script does not upgrade existing PowerShell modules
-- Resource-Graph extension installs automatically if missing
 - All operations are read-only and safe to execute
 - Historical data covers the previous 31 days
 

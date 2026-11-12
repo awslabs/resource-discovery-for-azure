@@ -49,17 +49,34 @@ if ($Task -eq 'Processing')
             $WAF = $false
             if ($1.TYPE -eq 'microsoft.network/frontdoors')
             {
-                $WafId = $Data.frontendendpoints.properties.webApplicationFirewallPolicyLink.id
-                if (![string]::IsNullOrEmpty($WafId))
+                # Each frontend endpoint links its own WAF policy, or none. Name every distinct
+                # policy, sorted by id and joined with ', ', and count the endpoints without one,
+                # so a Front Door with an unprotected endpoint does not read as fully covered.
+                $Endpoints = @($Data.frontendendpoints | Where-Object { $null -ne $_ })
+                $WafIds = [System.Collections.Generic.List[string]]::new()
+                foreach ($Endpoint in $Endpoints)
                 {
-                    $WAF = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
+                    $WafId = [string]$Endpoint.properties.webApplicationFirewallPolicyLink.id
+                    if (-not [string]::IsNullOrEmpty($WafId)) { $WafIds.Add($WafId) }
+                }
+                if ($WafIds.Count -gt 0)
+                {
+                    $WafNames = foreach ($WafId in @($WafIds | Sort-Object -Unique))
                     {
-                        if ($ResourceIdDictionary.ContainsKey($WafId)) { $ResourceIdDictionary[$WafId] } else { 'obfuscated' }
+                        if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0)
+                        {
+                            if ($ResourceIdDictionary.ContainsKey($WafId)) { $ResourceIdDictionary[$WafId] } else { 'obfuscated' }
+                        }
+                        else
+                        {
+                            # A link id that is not an ARM id has no name segment: keep it whole.
+                            $WafName = $WafId.split('/')[8]
+                            if ([string]::IsNullOrEmpty($WafName)) { $WafId } else { $WafName }
+                        }
                     }
-                    else
-                    {
-                        $WafId.split('/')[8]
-                    }
+                    $WAF = @($WafNames) -join ', '
+                    $NoWaf = $Endpoints.Count - $WafIds.Count
+                    if ($NoWaf -gt 0) { $WAF += (' ({0} of {1} endpoints without WAF)' -f $NoWaf, $Endpoints.Count) }
                 }
             }
             else

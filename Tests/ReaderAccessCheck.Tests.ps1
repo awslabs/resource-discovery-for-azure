@@ -1529,7 +1529,10 @@ Describe 'Write-SkippedSubscriptionSummary (end-of-run list)' {
         # skipped-subscription lists. The only code allowed after them is the direct-run
         # exit 4 check: its comment lines, the failure count and one exit line.
         $ExitFourCheck = '(\r?\n)+(#[^\r\n]*\r?\n)*\$CollectorFailureCount = [^\r\n]*\r?\nif \([^\r\n]*\) \{ exit 4 \}'
-        $Direct | Should -Match ([regex]::Escape('Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity ''Success''') + '\s*\r?\n(#[^\n]*\n)*' + [regex]::Escape('Write-NoUsageSummary -ConsumptionResult $script:ConsumptionCheckResult') + '\r?\n' + [regex]::Escape('Write-SkippedSubscriptionSummary -Decision $script:AccessSkipped') + '(' + $ExitFourCheck + ')?$')
+        # The last report line names the zip only when this run wrote it, else says
+        # no report was written (if/else on $ZipWritten); the lists come right after.
+        $ReportLine = 'if \(\$ZipWritten\)\r?\n\{\r?\n    ' + [regex]::Escape('Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity ''Success''') + '\r?\n\}\r?\nelse\r?\n\{(\r?\n    [^\r\n]*)+\r?\n\}'
+        $Direct | Should -Match ($ReportLine + '\s*\r?\n(#[^\n]*\n)*' + [regex]::Escape('Write-NoUsageSummary -ConsumptionResult $script:ConsumptionCheckResult') + '\r?\n' + [regex]::Escape('Write-SkippedSubscriptionSummary -Decision $script:AccessSkipped') + '(' + $ExitFourCheck + ')?$')
     }
 }
 

@@ -229,6 +229,8 @@ function CreateResourceJobs
 }
 function GetResorceConsumption { }
 function Get-AzContext { }
+# The up-front role check of a direct run: no subscription is reported unreadable.
+function Test-SubscriptionRoleAccessAll { }
 '@
 
     # Summary.ps1 stand-in that also records whether the collector data is still held

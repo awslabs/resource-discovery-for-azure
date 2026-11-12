@@ -684,7 +684,6 @@ Describe 'Resource group runs (-ResourceGroup)' {
         @{ Case = 'a JSON array'; Raw = '[]' }
         @{ Case = 'resources not an object'; Raw = '{"Microsoft.Resources": "x"}' }
     ) {
-        param($Case, $Raw)
         # A caller's shell can run with strict mode on, which a missing property read stops on.
         & {
             Set-StrictMode -Version Latest

@@ -282,6 +282,16 @@ Describe 'Metrics.ps1 Azure Monitor requests per resource' {
         $Run.Records.Count | Should -Be 2
     }
 
+    It 'does not retry a one-definition request that Azure rejects with BadRequest' {
+        $Vm = New-TestResource -Type 'microsoft.compute/virtualmachines' -Provider 'Microsoft.Compute/virtualMachines' -Name 'vm-01'
+        $Run = Invoke-MetricsRun -Resources @($Vm) -RunName 'vm-single-badrequest' -Invalid 'vm-01|Percentage CPU'
+
+        # The same name is rejected the same way on every attempt, so it is asked for once.
+        @($Run.Calls | Where-Object { @($_.MetricName) -contains 'Percentage CPU' }).Count | Should -Be 1
+        @($Run.Calls | Where-Object { @($_.MetricName) -contains 'Available Memory Bytes' }).Count | Should -Be 1
+        @($Run.Records | Where-Object { $_.MetricError } | ForEach-Object { $_.Metric }) | Should -Be @('Percentage CPU')
+    }
+
     It 'groups SQL database metrics by time window, time grain and aggregation' {
         $Dtu = New-TestResource -Type 'microsoft.sql/servers/databases' -Provider 'Microsoft.Sql/servers/sql-test/databases' -Name 'db-dtu' -Kind 'v12.0,user'
         $Serverless = New-TestResource -Type 'microsoft.sql/servers/databases' -Provider 'Microsoft.Sql/servers/sql-test/databases' -Name 'db-serverless' -Kind 'v12.0,user,vcore,serverless'

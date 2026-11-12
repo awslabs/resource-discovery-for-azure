@@ -893,7 +893,7 @@ if ($Task -eq 'Processing')
 
                 if ($GroupDefs.Count -eq 1)
                 {
-                    $Request = Invoke-MetricRequest -Def $GroupDefs[0] -MetricNames $GroupDefs[0].MetricName -Kind 'Request'
+                    $Request = Invoke-MetricRequest -Def $GroupDefs[0] -MetricNames $GroupDefs[0].MetricName -Kind 'Request' -StopOnBadRequest
                     Add-MetricRecord -Def $GroupDefs[0] -Request $Request -MetricQuery $Request.Query -CallStopwatch $CallStopwatch
                 }
                 else

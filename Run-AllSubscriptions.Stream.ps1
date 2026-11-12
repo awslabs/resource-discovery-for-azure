@@ -171,7 +171,7 @@ $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 # ---- Per-sub iteration -------------------------------------------------------
 #
 # This is the same shape as the wrapper's existing loop: invoke the inner
-# script via `&`, capture $Global:Resources / $Global:Consumption* afterward,
+# script via `&`, capture $Global:ResourceCount / $Global:Consumption* afterward,
 # and record a per-sub status row for the wrapper to aggregate.
 
 $ResourceCounts = @()
@@ -228,10 +228,10 @@ for ($i = 0; $i -lt $PairCount; $i++)
         if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
 
         # Capture inner-script globals while we are still in the same scope.
-        # ResourceInventory.ps1 is invoked via `&` so its $Global:Resources lives
-        # in this stream worker's scope. The inner script resets $Global:Resources
-        # to @() at the start of every invocation.
-        $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+        # ResourceInventory.ps1 is invoked via `&` so its $Global:ResourceCount lives
+        # in this stream worker's scope. The inner script resets $Global:ResourceCount
+        # to 0 at the start of every invocation.
+        $ResCount = if ($null -ne $Global:ResourceCount) { $Global:ResourceCount } else { 0 }
         $ResourceCounts += [pscustomobject]@{ Name = $SubName; Id = $SubId; Count = $ResCount }
 
         if ($ResCount -eq 0)

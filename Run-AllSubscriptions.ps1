@@ -996,11 +996,11 @@ if ($ParallelStreams -le 1)
             if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
 
             # Capture the per-subscription resource count from the inner script.
-            # ResourceInventory.ps1 invokes via `& <path>` so its $Global:Resources
+            # ResourceInventory.ps1 invokes via `& <path>` so its $Global:ResourceCount
             # lives in this wrapper's scope. The inner script resets that variable
-            # to @() at the start of every invocation, so the count after return
+            # to 0 at the start of every invocation, so the count after return
             # accurately reflects the subscription that just finished.
-            $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+            $ResCount = if ($null -ne $Global:ResourceCount) { $Global:ResourceCount } else { 0 }
             $SubResourceCounts += [pscustomobject]@{
                 Name  = $Sub.Name
                 Id    = $Sub.Id
@@ -1193,7 +1193,7 @@ else
                 & (Join-Path $PSScriptRoot "ResourceInventory.ps1") -TenantID $TenantID -SubscriptionID $Sub.Id @InventoryPassthrough -RunAllSubs
                 # Same null-guard as the sequential branch above.
                 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Script exited with code $LASTEXITCODE" }
-                $ResCount = if ($null -ne $Global:Resources) { @($Global:Resources).Count } else { 0 }
+                $ResCount = if ($null -ne $Global:ResourceCount) { $Global:ResourceCount } else { 0 }
                 $SubResourceCounts += [pscustomobject]@{ Name = $Sub.Name; Id = $Sub.Id; Count = $ResCount }
                 if ($ResCount -eq 0)
                 {

@@ -1712,11 +1712,11 @@ Describe 'Resume-state helpers: the retry list and an unreadable per-stream file
         $Src | Should -Match ([regex]::Escape('if ($UnreadableNotMoved.Count -gt 0) { Stop-WrongShapeStateNotMoved -Files $UnreadableNotMoved -ResumeFailedOnly:$ResumeFailedOnly }'))
     }
 
-    It 'Move-UnreadableStreamStateFile -AtRunEnd says a later -Resume collects the subscriptions, and names a file it cannot move' {
+    It 'Move-UnreadableStreamStateFile -AtRunEnd says a later -Resume collects all of this run''s subscriptions, and names a file it cannot move' {
         $File = Join-Path $script:Dir '.resume-state-t-stream-3.json'
         Set-Content -LiteralPath $File -Value 'cut'
         $null = Move-UnreadableStreamStateFile -File (Get-Item -LiteralPath $File -Force) -Now ([datetime]'2026-10-29T14:02:55') -AtRunEnd
-        $script:Lines[0] | Should -Be 'WARNING: The per-stream state file .resume-state-t-stream-3.json could not be read, so its records are not used: the subscriptions it lists are not counted as completed, and a later -Resume collects them again. It was moved aside to .resume-state-t-stream-3.json.unreadable-20261029-140255.'
+        $script:Lines[0] | Should -Be 'WARNING: The per-stream state file .resume-state-t-stream-3.json could not be read, so its records are not used: none of this run''s subscriptions is counted as completed, and a later -Resume collects them all again. It was moved aside to .resume-state-t-stream-3.json.unreadable-20261029-140255.'
         $script:Lines.Clear()
         Set-Content -LiteralPath $File -Value 'cut'
         Mock Rename-Item { throw 'denied' }

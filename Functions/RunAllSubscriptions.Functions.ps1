@@ -593,7 +593,7 @@ function Move-UnreadableStreamStateFile
     }
     if ($AtRunEnd)
     {
-        $Lead = 'WARNING: The per-stream state file {0} could not be read, so its records are not used: the subscriptions it lists are not counted as completed, and a later -Resume collects them again.' -f $File.Name
+        $Lead = 'WARNING: The per-stream state file {0} could not be read, so its records are not used: none of this run''s subscriptions is counted as completed, and a later -Resume collects them all again.' -f $File.Name
     }
     else
     {

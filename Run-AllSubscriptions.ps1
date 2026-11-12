@@ -1559,6 +1559,7 @@ else
             $AllCompletedFromStreams = @()
             $AllFailedFromStreams = @()
             $ReadStreamFiles = @()
+            $RunEndUnreadable = $false
             foreach ($StreamFile in $AllStreamFiles)
             {
                 $Obj = Read-StreamResumeStateFile -Path $StreamFile.FullName
@@ -1566,8 +1567,10 @@ else
                 {
                     # Its records are not used, so none of the subscriptions it
                     # lists counts as completed and a later -Resume collects
-                    # them. Moved aside with a warning, not deleted. One that
-                    # cannot be moved aside ends the run with exit 1 (below).
+                    # them (see $RunEndUnreadable below). Moved aside with a
+                    # warning, not deleted. One that cannot be moved aside ends
+                    # the run with exit 1 (below).
+                    $RunEndUnreadable = $true
                     $Unreadable = Move-UnreadableStreamStateFile -File $StreamFile -AtRunEnd
                     $UnreadableStreamFiles = @(@($UnreadableStreamFiles | Where-Object { $null -ne $_ }) + $Unreadable)
                     if ($Unreadable.NotMoved) { $StreamStateNotMoved += $Unreadable }
@@ -1590,6 +1593,15 @@ else
                     $AllFailedFromStreams += @($Obj.FailedAttempts | Where-Object { $null -ne $_ })
                 }
             }
+            if ($RunEndUnreadable)
+            {
+                # A file that cannot be read may hold this run's failure of a
+                # subscription an earlier run completed. So of this run's
+                # subscriptions only those a file that was read lists as
+                # completed keep a completion; -Resume collects the others again.
+                $ThisRunIds = @($Slices | ForEach-Object { @($_) } | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.Id })
+                $CompletedIds = @($CompletedIds | Where-Object { $ThisRunIds -notcontains [string]$_ -or $AllCompletedFromStreams -contains $_ })
+            }
             if ($AllCompletedFromStreams.Count -gt 0)
             {
                 $CompletedIds = @($CompletedIds + $AllCompletedFromStreams | Sort-Object -Unique)
@@ -1598,7 +1610,7 @@ else
             # See Merge-FailedAttempts for the recency/completion rules.
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
             $StreamStateSaved = $true
-            if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
+            if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0 -or $RunEndUnreadable)
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
                 # Read back: Save-CompletedSubscriptionIds only warns when its

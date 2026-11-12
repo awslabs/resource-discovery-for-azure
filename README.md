@@ -273,9 +273,9 @@ For tenants with many subscriptions, the run can be cut short by environment-lev
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -Resume
 ```
 
-After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The state file is cleared automatically after a clean run with no failures.
+After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`, together with the path of that ZIP and whether the run used `-Obfuscate`. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The consolidated `AllSubscriptions_ResourcesReport_<timestamp>.zip` of the `-Resume` run still covers the skipped subscriptions: it carries the ZIP the earlier run recorded for each one, provided that ZIP is still on disk, opens as a ZIP and was written with the same `-Obfuscate` setting as this run. A skipped subscription whose ZIP cannot be carried is named under a `FAILED (earlier report not carried)` banner and the run exits with code `2`; re-run without `-Resume`, or collect that subscription on its own with `./ResourceInventory.ps1 -TenantID <tenant> -SubscriptionID <id>`. The state file is cleared automatically after a clean run with no failures.
 
-`-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription`, and existing state is left untouched.
+`-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription` and still updates the state file as it goes: a subscription that writes its ZIP is recorded as completed with that ZIP, replacing any earlier record, and one that fails or leaves no ZIP is taken off the completed list, so a later `-Resume` collects it again (a failure is also recorded for `-ResumeFailedOnly`). As with `-Resume`, a clean run with no failures deletes the state file.
 
 #### Parallel subscription processing
 
@@ -579,7 +579,7 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 |---|---|
 | `0` | Clean run — no failures of any kind. |
 | `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
+| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing), or a `-Resume` run could not carry the report of a subscription it skipped as already completed (see the "FAILED (earlier report not carried)" banner). Takes precedence over `3`–`5`. |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |

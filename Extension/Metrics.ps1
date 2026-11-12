@@ -938,9 +938,11 @@ if ($Task -eq 'Processing')
                             # BadRequest, so a rejected group is not retried and falls back to one
                             # request per metric; only a metric that also fails on its own is
                             # marked as an error. A metric missing from a successful response is
-                            # requested on its own too. Its elapsed time includes the group request.
+                            # requested on its own too. A BadRequest on that single request is not
+                            # retried either: Azure rejects the same name the same way every time.
+                            # Its elapsed time includes the group request.
                             $SingleStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-                            $SingleRequest = Invoke-MetricRequest -Def $Def -MetricNames $Def.MetricName -Kind 'Fallback'
+                            $SingleRequest = Invoke-MetricRequest -Def $Def -MetricNames $Def.MetricName -Kind 'Fallback' -StopOnBadRequest
                             Add-MetricRecord -Def $Def -Request $SingleRequest -MetricQuery $SingleRequest.Query -CallStopwatch $SingleStopwatch -ExtraSeconds $GroupSeconds
                         }
                     }

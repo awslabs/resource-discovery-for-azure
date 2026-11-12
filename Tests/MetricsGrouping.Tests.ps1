@@ -458,8 +458,9 @@ Describe 'Metrics.ps1 fallback when Azure rejects a grouped request' {
         $Single = @($script:Rejected.Calls | Where-Object { @($_.MetricName).Count -eq 1 })
         $Grouped = @($script:Rejected.Calls | Where-Object { @($_.MetricName).Count -eq 4 })
         $Grouped.Count | Should -Be 1
-        # A single-metric request keeps the full retry ladder (4 attempts), BadRequest included.
-        @($Single | Where-Object { $_.MetricName -eq 'Composite Disk Write Bytes/sec' }).Count | Should -Be 4
+        # A single-metric request that Azure rejects with BadRequest is not retried either:
+        # the same name is rejected the same way on every attempt.
+        @($Single | Where-Object { $_.MetricName -eq 'Composite Disk Write Bytes/sec' }).Count | Should -Be 1
         @($Single | Where-Object { $_.MetricName -ne 'Composite Disk Write Bytes/sec' }).Count | Should -Be 3
     }
 

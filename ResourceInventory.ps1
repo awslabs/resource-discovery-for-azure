@@ -890,6 +890,15 @@ function ExecuteInventoryProcessing()
         return (& $TokenOk)
     }
 
+    # The name of the report folder this run writes to (the last part of
+    # $Global:DefaultPath), or $null before it is set. Failure entries carry
+    # it, so the wrapper's main summary marks the row of that report.
+    function Get-ReportFolderName
+    {
+        if ($Global:DefaultPath) { return (Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Leaf) }
+        return $null
+    }
+
     function CreateMetricsJob()
     {
         Write-Log -Message ('Checking if Metrics Job Should be Run.') -Severity 'Info'
@@ -906,6 +915,9 @@ function ExecuteInventoryProcessing()
 
                 if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                 $MetricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                # The report folder this run writes to, as the consumption phase records it,
+                # so the wrapper's main summary marks that report's row.
+                $MetricsReportFolder = Get-ReportFolderName
                 $AffectedSubs = @(
                     if (![string]::IsNullOrEmpty($SubscriptionID))
                     {
@@ -919,13 +931,13 @@ function ExecuteInventoryProcessing()
                 if ($AffectedSubs.Count -eq 0)
                 {
                     $IdLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(unknown)' }
-                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg; ReportFolder = $MetricsReportFolder }
                 }
                 else
                 {
                     foreach ($asub in $AffectedSubs)
                     {
-                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg }
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg; ReportFolder = $MetricsReportFolder }
                     }
                 }
                 return
@@ -1218,6 +1230,11 @@ function ExecuteInventoryProcessing()
         $ReportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
         $ReportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
 
+        # Name of the report folder this run writes to, recorded on a consumption
+        # failure (and on the sign-in skip below) so the wrapper's main summary can
+        # mark that report's row.
+        $ConsumptionReportFolder = Get-ReportFolderName
+
         if (-not (Test-DataPlaneAuthReady -Phase 'Consumption'))
         {
             Write-Log -Message ('Consumption: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Consumption was requested (no -SkipConsumption) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
@@ -1225,9 +1242,10 @@ function ExecuteInventoryProcessing()
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
             $Global:ConsumptionFailedSubs += [pscustomobject]@{
-                Name    = '(all subscriptions)'
-                Id      = '(auth)'
-                Message = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Name         = '(all subscriptions)'
+                Id           = '(auth)'
+                Message      = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                ReportFolder = $ConsumptionReportFolder
             }
             return
         }
@@ -1274,6 +1292,7 @@ function ExecuteInventoryProcessing()
                     Complete         = $false
                     PageAtFailure    = 0
                     RecordsCollected = 0
+                    ReportFolder     = $ConsumptionReportFolder
                 }
 
                 continue
@@ -1445,6 +1464,7 @@ function ExecuteInventoryProcessing()
                     Complete         = $false
                     PageAtFailure    = $ConsumptionPageIndex
                     RecordsCollected = $ConsumptionRecordsThisSub
+                    ReportFolder     = $ConsumptionReportFolder
                 }
             }
         }

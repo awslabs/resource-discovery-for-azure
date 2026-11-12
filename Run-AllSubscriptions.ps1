@@ -3038,11 +3038,10 @@ if (@($UncarriedSkipped).Count -gt 0)
 # tell what is owed) and no -Resume skips a subscription as done. Only when neither
 # works does the note ask to run without -Resume or -ResumeFailedOnly. The run
 # ends with exit 2 (see the exit code below).
-$StateSetAside = ''
 # Done here at the end, or by Exit-Wrapper when a later step stops the run (see
 # $RdaNotSavedOnExit below "All subscriptions processed!").
 $script:RdaNotSavedOnExit = $false
-if ($ResumeStateSaveFailed -and -not $RunClean) { $StateSetAside = Set-NotSavedResumeStateAside -ResumeStateFile $ResumeStateFile }
+if ($ResumeStateSaveFailed -and -not $RunClean) { $null = Set-NotSavedResumeStateAside -ResumeStateFile $ResumeStateFile }
 
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.

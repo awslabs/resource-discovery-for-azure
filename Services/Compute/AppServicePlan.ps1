@@ -7,7 +7,7 @@ if ($Task -eq 'Processing')
 
     if ($APPSvcPlan)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $APPSvcPlan)
         {
@@ -41,7 +41,7 @@ if ($Task -eq 'Processing')
                 'ZoneRedundant'         = $Data.zoneRedundant;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

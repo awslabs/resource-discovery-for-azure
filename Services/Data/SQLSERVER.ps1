@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($SQLSERVER)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $SQLSERVER)
         {
@@ -25,7 +25,7 @@ if ($Task -eq 'Processing')
                 'ZoneRedundant'         = $1.zones;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

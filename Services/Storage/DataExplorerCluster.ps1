@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($DataExplorer)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $DataExplorer)
         {
@@ -32,7 +32,7 @@ if ($Task -eq 'Processing')
                 'OptimizedAutoscaleMin'     = $Data.optimizedAutoscale.minimum;
                 'OptimizedAutoscaleMax'     = $Data.optimizedAutoscale.maximum;
             }
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
         $Tmp
     }

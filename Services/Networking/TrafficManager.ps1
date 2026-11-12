@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($TrafficManager)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $TrafficManager)
         {
@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'MonitorStatus'                    = $Data.monitorconfig.profilemonitorstatus;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

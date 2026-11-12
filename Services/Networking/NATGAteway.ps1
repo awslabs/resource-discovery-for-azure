@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($NATGAT)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $NATGAT)
         {
@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'IdleTimeoutMin'        = $Data.idleTimeoutInMinutes;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

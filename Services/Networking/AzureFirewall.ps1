@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($AzureFirewall)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $AzureFirewall)
         {
@@ -22,7 +22,7 @@ if ($Task -eq 'Processing')
                 'SKU'                               = $Data.sku.tier;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

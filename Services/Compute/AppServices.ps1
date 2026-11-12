@@ -6,7 +6,7 @@ If ($Task -eq 'Processing')
 
     if ($AppSvc)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $AppSvc)
         {
@@ -29,7 +29,7 @@ If ($Task -eq 'Processing')
                 'ServerFarmId'                  = if (![string]::IsNullOrEmpty($Data.serverFarmId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.serverFarmId)) { $ResourceIdDictionary[$Data.serverFarmId] } else { 'obfuscated' } } else { $Data.serverFarmId };
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

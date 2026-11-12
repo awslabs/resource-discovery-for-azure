@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($AvSet)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $AvSet)
         {
@@ -30,7 +30,7 @@ if ($Task -eq 'Processing')
                         'VirtualMachines'  = [string]$VmIds;
                     }
 
-                    $Tmp += $Obj
+                    [void]$Tmp.Add($Obj)
                 }
             }
             else
@@ -46,7 +46,7 @@ if ($Task -eq 'Processing')
                     'VirtualMachines'  = '';
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

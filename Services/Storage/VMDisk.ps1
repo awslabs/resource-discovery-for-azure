@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($Disks)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($disk in $Disks)
         {
@@ -34,7 +34,7 @@ if ($Task -eq 'Processing')
                 'CreatedTime'           = $Timecreated;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

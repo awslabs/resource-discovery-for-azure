@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($SQLDB)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $SQLDB)
         {
@@ -48,7 +48,7 @@ if ($Task -eq 'Processing')
                 'ElasticPoolID'              = $PoolId;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

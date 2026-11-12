@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($SQLSERVERMIDB)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $SQLSERVERMIDB)
         {
@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'Status'                    = $Data.status;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($LoadBalancer)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $LoadBalancer)
         {
@@ -26,7 +26,7 @@ if ($Task -eq 'Processing')
                 'RuleCount'                 = $RuleCount.count;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

@@ -8,7 +8,7 @@ if ($Task -eq 'Processing')
 
     if ($VirtualWAN)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $VirtualWAN)
         {
@@ -36,7 +36,7 @@ if ($Task -eq 'Processing')
                             'LinkSpeedMbps'                 = [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkSpeedInMbps;
                         }
 
-                        $Tmp += $Obj
+                        [void]$Tmp.Add($Obj)
                     }
                 }
             }
@@ -52,7 +52,7 @@ if ($Task -eq 'Processing')
                         'Location'                      = $1.LOCATION;
                     }
 
-                    $Tmp += $Obj
+                    [void]$Tmp.Add($Obj)
                 }
             }
         }

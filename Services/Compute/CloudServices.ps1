@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($CloudServices)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $CloudServices)
         {
@@ -38,7 +38,7 @@ if ($Task -eq 'Processing')
                 $Obj.Roles.Add($RoleProfileObj)
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

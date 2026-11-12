@@ -11,7 +11,7 @@ if ($Task -eq 'Processing')
 
     if ($Vault)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $Vault)
         {
@@ -54,7 +54,7 @@ if ($Task -eq 'Processing')
                 'EnablePurgeProtection'         = $Purge
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

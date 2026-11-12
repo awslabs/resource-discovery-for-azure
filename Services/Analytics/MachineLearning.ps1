@@ -6,7 +6,7 @@ If ($Task -eq 'Processing')
 
     if ($AzureML)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $AzureML)
         {
@@ -53,7 +53,7 @@ If ($Task -eq 'Processing')
                 'ApplicationInsight'        = $Insight;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

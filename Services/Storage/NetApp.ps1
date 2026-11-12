@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($NetApp)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
         foreach ($1 in $NetApp)
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
@@ -32,7 +32,7 @@ if ($Task -eq 'Processing')
                 'LDAP'                              = $Data.ldapEnabled;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

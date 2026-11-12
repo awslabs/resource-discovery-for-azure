@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($VNETGTW)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $VNETGTW)
         {
@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'ActiveActiveMode'       = $Data.activeActive;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

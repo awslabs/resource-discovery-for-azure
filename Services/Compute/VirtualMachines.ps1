@@ -30,7 +30,23 @@ If ($Task -eq 'Processing')
 
     if ($VirtualMachines)
     {
-        $Tmp = @()
+        # Index the disks by id once so each VM finds its OS disk with a lookup
+        # instead of scanning every disk. Resource ids compare case-insensitively,
+        # as the -eq this replaces did. A disk with no id can never match, so it
+        # is left out; disks sharing an id stay together in input order.
+        $DiskById = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($DiskRow in $Disk)
+        {
+            if ($null -eq $DiskRow.id) { continue }
+            $DiskKey = [string]$DiskRow.id
+            if (-not $DiskById.ContainsKey($DiskKey))
+            {
+                $DiskById[$DiskKey] = [System.Collections.Generic.List[object]]::new()
+            }
+            $DiskById[$DiskKey].Add($DiskRow)
+        }
+
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($vm in $VirtualMachines)
         {
@@ -52,8 +68,17 @@ If ($Task -eq 'Processing')
 
             if ($Data.storageProfile.osDisk.managedDisk.id)
             {
-                $OSDisk = ($Disk | Where-Object { $_.id -eq $Data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).sku.name
-                $OSDiskSize = ($Disk | Where-Object { $_.id -eq $Data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).Properties.diskSizeGB
+                $OSDiskRows = $null
+                if ($DiskById.TryGetValue([string]$Data.storageProfile.osDisk.managedDisk.id, [ref]$OSDiskRows))
+                {
+                    $OSDisk = ($OSDiskRows | Select-Object -Unique).sku.name
+                    $OSDiskSize = ($OSDiskRows | Select-Object -Unique).Properties.diskSizeGB
+                }
+                else
+                {
+                    $OSDisk = $null
+                    $OSDiskSize = $null
+                }
             }
             else
             {
@@ -100,7 +125,7 @@ If ($Task -eq 'Processing')
                 'Tags'                          = $Tags;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

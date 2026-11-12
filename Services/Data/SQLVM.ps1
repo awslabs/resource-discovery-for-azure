@@ -6,7 +6,7 @@ If ($Task -eq 'Processing')
 
     if ($SQLVM)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $SQLVM)
         {
@@ -44,7 +44,7 @@ If ($Task -eq 'Processing')
                 'SQLImageSku'               = $Data.sqlImageSku;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

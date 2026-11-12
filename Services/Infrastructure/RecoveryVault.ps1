@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($RECOVAULT)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $RECOVAULT)
         {
@@ -22,7 +22,7 @@ if ($Task -eq 'Processing')
                 'SKUTier'            = $1.sku.tier;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

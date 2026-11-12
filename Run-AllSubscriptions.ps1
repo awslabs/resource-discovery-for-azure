@@ -907,7 +907,7 @@ else
     # before it reaches one (an access or consumption check, Ctrl+C), and it
     # adds to the unified file rather than starting it again: so each retry
     # entry a stale file holds is merged into the unified file first, as at the
-    # start of -Resume (the newer entry wins, so its count and reason are kept,
+    # start of -Resume (the entry with the most failed runs wins, so its count and reason are kept,
     # and it ends the completion an older run recorded), and -Resume or
     # -ResumeFailedOnly still collects that subscription. A stale file that
     # cannot be read is put aside, like one an earlier run put aside: those
@@ -949,7 +949,8 @@ else
         $StaleFailedIds = @($StaleFailed | ForEach-Object { [string]$_.Id } | Sort-Object -Unique)
         $CompletedIds = @($CompletedIds | Where-Object { $StaleFailedIds -notcontains [string]$_ })
         $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and $StaleFailedIds -notcontains [string]$_.Id })
-        $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $StaleFailed -CompletedIds $CompletedIds
+        # The most failed runs win, as in the -Resume fold (Merge-RecoveredFailedAttempts).
+        $FailedAttempts = Merge-RecoveredFailedAttempts -ExistingFailedAttempts $FailedAttempts -RecoveredFailedAttempts $StaleFailed -CompletedIds $CompletedIds
         Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
         if (-not (Test-ResumeStateSaved -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports))
         {
@@ -2564,7 +2565,7 @@ if ($RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))
 # clean run owes nothing, and a run whose resume state was saved holds its
 # failures (read in at the start by the run that found no state, and kept by
 # every save since). One that cannot be removed is named.
-if (-not $ResumeStateSaveFailed -and ($RunClean -or (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)))
+if ($RunClean -or (-not $ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)))
 {
     foreach ($Aside in @($StatePutAside | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }))
     {

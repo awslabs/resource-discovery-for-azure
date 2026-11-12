@@ -1310,10 +1310,14 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @()
         $IsClean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$RunClean' })
         $Clean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)' })
-        $Marks = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '-not $ResumeStateSaveFailed -and ($RunClean -or (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))' })
+        $Marks = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$RunClean -or (-not $ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf))' })
         $Marks.Count | Should -Be 1
-        $End = [scriptblock]::Create("param(`$ResumeStateFile, `$StatePutAside, `$Owed)`n`$FailedSubscriptions = @(); `$RetryOwedCount = `$Owed; `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @(); `$ResumeStateSaveFailed = `$false`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Marks[0].Extent.Text)
+        $End = [scriptblock]::Create("param(`$ResumeStateFile, `$StatePutAside, `$Owed, `$ResumeStateSaveFailed = `$false)`n`$FailedSubscriptions = @(); `$RetryOwedCount = `$Owed; `$NotCollected = @(); `$UnreadableStreamFiles = @(); `$LeftStreamFiles = @()`n" + $IsClean[0].Extent.Text + "`n" + $Clean[0].Extent.Text + "`n" + $Marks[0].Extent.Text)
         & $End $script:State @($Mark) 0 6>$null
+        Test-Path -LiteralPath $Mark | Should -BeFalse
+        # A clean run whose last save failed removes it too: nothing is owed.
+        Set-Content -LiteralPath $Mark -Value '{}'
+        & $End $script:State @($Mark) 0 $true 6>$null
         Test-Path -LiteralPath $Mark | Should -BeFalse
         # A run that is not clean but saved its state (which holds the mark's
         # failures) removes the mark too, so an older mark cannot bring back a

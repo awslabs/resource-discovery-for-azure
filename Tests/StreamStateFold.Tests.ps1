@@ -103,10 +103,10 @@ Describe 'The per-stream resume state files at the start of a run' {
         @($R2.Lines | Where-Object { $_ -like 'Recovered per-stream state*' }) | Should -BeNullOrEmpty
     }
 
-    It 'keep the higher count of failed runs over an entry dated later (a clock moved back)' {
+    It 'keep the higher count of failed runs over an entry dated later (a clock moved back; <Mode>)' -ForEach @(@{ Mode = '-Resume'; Resume = $true }, @{ Mode = 'a run without -Resume'; Resume = $false }) {
         Save-CompletedSubscriptionIds -Path (Join-Path $script:Root '.resume-state-t.json') -Tenant 't' -Ids @() -FailedAttempts @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = (Get-Date).AddDays(2).ToUniversalTime().ToString('o'); Reason = 'parent'; Attempts = 1 }) -Reports @()
         $null = script:New-StreamFile -Root $script:Root -N 0 -Failed @([pscustomobject]@{ Id = 'sub-x'; Name = 'Sub X'; LastFailedAt = (Get-Date).AddDays(-1).ToUniversalTime().ToString('o'); Reason = 'stream'; Attempts = 2 })
-        $null = script:Invoke-Fold -Root $script:Root -Resume $true
+        $null = script:Invoke-Fold -Root $script:Root -Resume $Resume
         $E = @(Get-FailedAttempts -Path (Join-Path $script:Root '.resume-state-t.json') -Tenant 't' | Where-Object Id -eq 'sub-x')
         [int]$E[0].Attempts | Should -Be 2
         [string]$E[0].Reason | Should -Be 'stream'

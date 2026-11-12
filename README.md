@@ -584,6 +584,8 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |
 
+A direct run of `ResourceInventory.ps1` (without `-RunAllSubs`) exits `1` and writes no report when Resource Graph discovery fails, for example when a page of results cannot be read or a query still fails after 4 attempts; the console shows `Resource discovery failed` followed by the Resource Graph error. Under `-RunAllSubs` that subscription is listed as failed instead, and `-ResumeFailedOnly` retries it.
+
 Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
 
 ### Important Notes

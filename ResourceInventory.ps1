@@ -555,6 +555,37 @@ Function RunInventorySetup()
         $Global:RdaSessionInitialized = $true
     }
 
+    # Every resource discovery query goes through here. Invoke-AzGraphQuerySafe
+    # throws when a Resource Graph call still fails after its retries or returns
+    # output that cannot be parsed. Unless -Debug is passed this script runs with
+    # ErrorActionPreference SilentlyContinue, and under that preference a throw
+    # that nothing catches does not stop the run: a direct run would leave the
+    # page out of the inventory with no error, or retry a lasting failure without
+    # end. A direct run stops here with exit 1 before any report is written.
+    # Under -RunAllSubs the error is passed on, so Run-AllSubscriptions.ps1
+    # records the subscription as failed with this reason and -ResumeFailedOnly
+    # retries it; the other subscriptions carry on.
+    function Invoke-DiscoveryGraphQuery
+    {
+        param(
+            [Parameter(Mandatory = $true)][string]$Query,
+            [object[]]$ExtraArgs = @(),
+            [switch]$Lowercase
+        )
+
+        try
+        {
+            return (Invoke-AzGraphQuerySafe -Query $Query -ExtraArgs $ExtraArgs -Lowercase:$Lowercase)
+        }
+        catch
+        {
+            if ($RunAllSubs.IsPresent) { throw }
+
+            Write-Log -Message ("Resource discovery failed, so the inventory would be incomplete. No report was written; fix the cause below and re-run. {0}" -f $_.Exception.Message) -Severity 'Error'
+            exit 1
+        }
+    }
+
     function ResourceInventoryLoop()
     {
         if (![string]::IsNullOrEmpty($ResourceGroup) -and [string]::IsNullOrEmpty($SubscriptionID))
@@ -576,7 +607,7 @@ Function RunInventorySetup()
             $Subscri = $SubscriptionID
 
             $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri)
+            $EnvSize = Invoke-DiscoveryGraphQuery -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri)
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1)
@@ -589,7 +620,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where resourceGroup == '$ResourceGroup' and (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri, '--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-DiscoveryGraphQuery -Query $GraphQuery -ExtraArgs @('--subscriptions', $Subscri, '--skip', $Limit, '--first', 1000) -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -603,7 +634,7 @@ Function RunInventorySetup()
             Write-Log -Message ('Extracting Resources from Subscription: ' + $SubscriptionID) -Severity 'Success'
 
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID)
+            $EnvSize = Invoke-DiscoveryGraphQuery -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID)
             $EnvSizeNum = $EnvSize.data.'count_'
 
             if ($EnvSizeNum -ge 1)
@@ -616,7 +647,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID, '--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-DiscoveryGraphQuery -Query $GraphQuery -ExtraArgs @('--subscriptions', $SubscriptionID, '--skip', $Limit, '--first', 1000) -Lowercase
 
                     $Global:Resources += $Resource.data
                     Start-Sleep 2
@@ -628,7 +659,7 @@ Function RunInventorySetup()
         else
         {
             $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | summarize count()"
-            $EnvSize = Invoke-AzGraphQuerySafe -Query $GraphQuery
+            $EnvSize = Invoke-DiscoveryGraphQuery -Query $GraphQuery
             $EnvSizeCount = $EnvSize.Data.'count_'
 
             Write-Log -Message ("Resources Output: {0} Resources Identified" -f $EnvSizeCount) -Severity 'Success'
@@ -643,7 +674,7 @@ Function RunInventorySetup()
                 while ($Looper -lt $Loop)
                 {
                     $GraphQuery = "resources | where (isnull(properties.definition.actions) or strlen(properties.definition.actions) < 123000) | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                    $Resource = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
+                    $Resource = Invoke-DiscoveryGraphQuery -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
 
                     $Global:Resources += $Resource.Data
                     Start-Sleep 2
@@ -656,7 +687,7 @@ Function RunInventorySetup()
 
     function ResourceInventoryAvd()
     {
-        $AVDSize = Invoke-AzGraphQuerySafe -Query "desktopvirtualizationresources | summarize count()"
+        $AVDSize = Invoke-DiscoveryGraphQuery -Query "desktopvirtualizationresources | summarize count()"
         $AVDSizeCount = $AVDSize.data.'count_'
 
         Write-Host ("AVD Resources Output: {0} AVD Resources Identified" -f $AVDSizeCount) -BackgroundColor Black -ForegroundColor Green
@@ -671,7 +702,7 @@ Function RunInventorySetup()
             while ($Looper -lt $Loop)
             {
                 $GraphQuery = "desktopvirtualizationresources | project id,name,type,tenantId,kind,location,resourceGroup,subscriptionId,managedBy,sku,plan,properties,identity,zones,extendedLocation,tags | order by id asc"
-                $AVD = Invoke-AzGraphQuerySafe -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
+                $AVD = Invoke-DiscoveryGraphQuery -Query $GraphQuery -ExtraArgs @('--skip', $Limit, '--first', 1000) -Lowercase
 
                 $Global:Resources += $AVD.data
                 Start-Sleep 2

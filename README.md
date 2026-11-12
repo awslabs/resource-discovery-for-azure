@@ -231,7 +231,7 @@ Use `Run-AllSubscriptions.ps1` to generate a separate inventory report for each 
 ./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com"
 ```
 
-Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery.
+Each subscription produces its own set of timestamped reports in `InventoryReports/`. After all subscriptions are processed, the wrapper bundles the per-subscription ZIPs into a single `AllSubscriptions_ResourcesReport_<timestamp>.zip` in the same folder for easy delivery. Run one wrapper at a time per inventory folder: the zip takes every per-subscription report zip written in that folder since the run started, so a second run in the same folder at the same time (another tenant included) would mix its reports into this run's zip. Names made from the time to the second (the wrapper transcript, this zip and `MainSummary_<time>.html`) still never write over a file that is already there: the run takes the next free name (`<name>-2`, `-3`, up to `-100`). The consolidated zip is built and checked under a private name (`rda-build-<id>.partial` in the same folder) and takes its name only after its last check, so no file under that name is a zip that was not checked. A run stopped or killed while or after the zip was built can leave that `.partial` file: it may be incomplete or never have passed its checks, and it holds copies of that run's reports (with real names unless the run used `-Obfuscate`). The next run in the folder that builds a consolidated zip names each one it finds in a warning and leaves it in place. Delete it and do not share it; only a file the run said it kept after its checks (the banner names it) can be renamed to a `.zip` name and used.
 
 #### Subscription state filter
 
@@ -579,7 +579,7 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 |---|---|
 | `0` | Clean run — no failures of any kind. |
 | `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
+| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing, or the whole inventory folder is gone at the end of the run), or the consolidated `AllSubscriptions_ResourcesReport_<timestamp>.zip` could not be built or was lost while the run summary was added to it, for example because the disk is full, or passed its checks but found every name taken (it is then kept as `rda-build-<id>.partial`, named in the banner) (see the "FAILED (consolidated zip)" banner; except when the inventory folder itself is gone, the per-subscription report zips are still on disk under it). Takes precedence over `3`–`5`. |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |

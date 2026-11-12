@@ -488,6 +488,17 @@ $Global:CollectorFailures = @()
 # transcript). Computed up front so the transcript can be started before
 # anything else writes to the host.
 $InventoryRoot = if ($PSVersionTable.Platform -eq 'Unix') { "$HOME/InventoryReports" } else { "C:\InventoryReports" }
+# A folder whose path holds [ ] * or ? (the last two allowed in folder names
+# on Linux and macOS) cannot be used: PowerShell reads them as a wildcard,
+# and the zip step (Compress-Archive) fails on such a path. Stopped
+# here, before anything is written.
+if ($InventoryRoot.IndexOfAny([char[]]'[]*?') -ge 0)
+{
+    Write-Host ("ERROR: The inventory folder {0} has [ ] * or ? in its path, which this script cannot use. Set HOME to a folder without them and run again." -f $InventoryRoot) -ForegroundColor Red
+    # Exit-Wrapper reads it; no transcript has started yet.
+    $WrapperTranscriptStarted = $false
+    Exit-Wrapper -Code 1
+}
 if (-not (Test-Path -Path $InventoryRoot -PathType Container))
 {
     try { New-Item -Path $InventoryRoot -ItemType Directory -Force | Out-Null }
@@ -513,9 +524,14 @@ if (-not (Test-Path -Path $InventoryRoot -PathType Container))
 # Start-Transcript is idempotent in the sense that we Stop it on every exit
 # path via Exit-Wrapper.
 $WrapperTranscriptStarted = $false
-$WrapperTranscriptFile = Join-Path $InventoryRoot ("RunAllSubscriptions_transcript_{0}.txt" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+$WrapperTranscriptStem = "RunAllSubscriptions_transcript_{0}" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')
+$WrapperTranscriptFile = Join-Path $InventoryRoot ($WrapperTranscriptStem + '.txt')
+$WrapperTranscriptReserved = $false
 try
 {
+    # Never another run's transcript of the same second (New-RunOutputFile).
+    $WrapperTranscriptFile = New-RunOutputFile -Directory $InventoryRoot -Stem $WrapperTranscriptStem -Extension '.txt'
+    $WrapperTranscriptReserved = $true
     Start-Transcript -Path $WrapperTranscriptFile -UseMinimalHeader -Force | Out-Null
     $WrapperTranscriptStarted = $true
     Write-Host ("Wrapper transcript: {0}" -f $WrapperTranscriptFile) -ForegroundColor DarkGray
@@ -526,6 +542,8 @@ catch
     # an already-running transcript on this host), the run continues without
     # one rather than aborting.
     Write-Host ("WARNING: Could not start wrapper transcript at {0}: {1}" -f $WrapperTranscriptFile, $_.Exception.Message) -ForegroundColor Yellow
+    # The name this run reserved holds no transcript: nothing is left under it.
+    if ($WrapperTranscriptReserved) { Remove-Item -LiteralPath $WrapperTranscriptFile -Force -ErrorAction SilentlyContinue }
 }
 
 
@@ -958,6 +976,9 @@ if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = 
 # Loop through each subscription and run ResourceInventory
 $SkippedCount = 0
 $DiagFile = $null
+# The report zips the output check finds after the collection; the
+# consolidated zip build reads them, also when that check does not run.
+$ActualSubZips = @()
 # Per-subscription resource counts collected for the final summary so the user
 # can see at a glance which subscriptions came back empty (the most common
 # explanation is that the signed-in identity does not have Reader on the
@@ -1683,6 +1704,15 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
 
 # Consolidate per-subscription ZIPs into a single outer ZIP
 $OuterZipFile = $null
+# Set when the consolidated ZIP could not be built or was lost afterwards;
+# named in the FAILED (consolidated zip) banner and gives exit code 2.
+$BundleBuildError = $null
+# Set when the inventory folder is gone at the end of a run that expected
+# report zips; named after the run summary and gives exit code 2.
+$InventoryFolderGone = $false
+# Set when a checked zip could not take its name and is kept under its
+# private name; the banner then says to rename it, not to run again.
+$ZipKeptAs = $null
 
 if (Test-Path -Path $InventoryRoot -PathType Container)
 {
@@ -1690,20 +1720,92 @@ if (Test-Path -Path $InventoryRoot -PathType Container)
     $SubZips = @(Get-ChildItem -Path $InventoryRoot -Directory | ForEach-Object { Get-ChildItem -Path $_.FullName -Filter "*.zip" -File | Where-Object { $_.LastWriteTime -ge $RunStartTime } })
     if ($SubZips.Count -gt 0)
     {
+        # A run stopped (Ctrl+C, a killed process) while or after its
+        # consolidated zip was built leaves it under its private name: it may be
+        # cut short or never have passed its checks, and it holds copies of that
+        # run's reports. Each one from before this run is named, so it is not
+        # left unseen; it is not removed, as it can be the zip of a run still
+        # going. (A zip a run kept there after its checks is named by that run,
+        # with what to do.)
+        foreach ($LeftZip in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter 'rda-build-*.partial' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $RunStartTime }))
+        {
+            Write-Host ("WARNING: {0} is a consolidated zip an earlier run did not finish. It may be incomplete or unchecked, and it holds copies of that run's reports (with real names unless that run used -Obfuscate). Delete it; do not share it. Only if that run said it kept this file after its checks, rename it to a .zip name to use it." -f $LeftZip.FullName) -ForegroundColor Yellow
+        }
         $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-        $OuterZipFile = Join-Path $InventoryRoot "AllSubscriptions_ResourcesReport_$Timestamp.zip"
-        Write-Host ("Compressing {0} per-subscription report(s) into: {1}" -f $SubZips.Count, $OuterZipFile) -ForegroundColor Cyan
-        Compress-Archive -Path $SubZips.FullName -DestinationPath $OuterZipFile -Force
-        Write-Host ("Reporting Data File: {0}" -f $OuterZipFile) -ForegroundColor Green
+        # The name it ships under: today's, or the next free one (-2, -3, ...)
+        # when another run of the same second has it (Move-RunOutputFile, at
+        # the last check below).
+        $OuterZipStem = "AllSubscriptions_ResourcesReport_$Timestamp"
+        $PartialZip = $null
+        $PartialBuilt = $false
+        try
+        {
+            Write-Host ("Compressing {0} per-subscription report(s) into a consolidated zip in {1}" -f $SubZips.Count, $InventoryRoot) -ForegroundColor Cyan
+            # A report zip the output check found that is gone now (an antivirus
+            # quarantine, storage evicted in between) would be left out without
+            # a word: the zip is not built, and the run ends with exit 2.
+            $GoneSinceCheck = @(@($ActualSubZips) | Where-Object { $null -ne $_ -and @($SubZips | ForEach-Object { $_.FullName }) -notcontains $_.FullName })
+            if ($GoneSinceCheck.Count -gt 0) { throw ('{0} report zip(s) found by the output check are gone now: {1}. Run again without -Resume or -ResumeFailedOnly to collect them again (either one skips the subscriptions this run completed)' -f $GoneSinceCheck.Count, (@($GoneSinceCheck | ForEach-Object { $_.FullName }) -join ', ')) }
+            # Built, checked, given the run summary and checked again under a
+            # name of its own in the same folder; it takes the name a run
+            # ships only after the last check, so a run stopped part-way
+            # leaves nothing under that name. The private name matches none of
+            # the patterns the inventory folder is listed with, and has no
+            # leading dot: Compress-Archive -Update does not find a hidden file.
+            # shortcut: Compress-Archive reads -DestinationPath as a wildcard ([ ] *
+            # ?), and -Update fails on a path with [ or ] even when escaped (pwsh
+            # 7.4), so an inventory folder whose path holds any of them is stopped
+            # at the start; build with System.IO.Compression when such a HOME must
+            # be supported.
+            $PartialZip = Join-Path $InventoryRoot ('rda-build-{0}.partial' -f [guid]::NewGuid().ToString('N'))
+            Compress-Archive -Path $SubZips.FullName -DestinationPath $PartialZip -ErrorAction Stop
+            $ZipProblem = Get-ConsolidatedZipProblem -Path $PartialZip -SubZipNames $SubZips.Name
+            if ($ZipProblem)
+            {
+                throw $ZipProblem
+            }
+            # The main summary, the fold and the last check below work on it.
+            $OuterZipFile = $PartialZip
+            $PartialBuilt = $true
+        }
+        catch
+        {
+            $BundleBuildError = "Could not build the consolidated zip in {0}: {1}" -f $InventoryRoot, $_.Exception.Message
+            Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
+            # The main summary, the fold and the final check below all key on
+            # $OuterZipFile, so none of them may point at the missing zip.
+            $OuterZipFile = $null
+        }
+        finally
+        {
+            # Whatever a failed or stopped build left of it goes. One that
+            # cannot be removed (held open, or not allowed) is named, as it
+            # holds copies of the reports and may be cut short.
+            if (-not $PartialBuilt -and $null -ne $PartialZip -and (Test-Path -LiteralPath $PartialZip))
+            {
+                Remove-Item -LiteralPath $PartialZip -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $PartialZip)
+                {
+                    if ($BundleBuildError) { $BundleBuildError += (" {0} could not be removed: delete it, do not share it." -f $PartialZip) }
+                    Write-Host ("WARNING: {0} is the consolidated zip this run could not finish, and it could not be removed: delete it, do not share it." -f $PartialZip) -ForegroundColor Yellow
+                }
+            }
+        }
     }
     else
     {
         Write-Host ("No per-subscription zip files found under {0} to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
+        # Every report zip the output check found is gone now: no consolidated zip.
+        if (@($ActualSubZips).Count -gt 0) { $BundleBuildError = 'The {0} report zip(s) found by the output check are all gone now, so no consolidated zip was built. Run again without -Resume or -ResumeFailedOnly to collect them again (either one skips the subscriptions this run completed).' -f @($ActualSubZips).Count }
     }
 }
 else
 {
     Write-Host ("Inventory root not found at {0}. Nothing to consolidate." -f $InventoryRoot) -ForegroundColor Yellow
+    # Every report zip the run expected went with the folder, so none of them
+    # is in a consolidated zip: a FAILED line after the run summary, and exit
+    # code 2 at the end, as for a consolidated zip that could not be built.
+    if ($ExpectedZipCount -gt 0) { $InventoryFolderGone = $true }
 }
 
 # Aggregate "main" HTML summary across all per-subscription reports from
@@ -1716,6 +1818,7 @@ else
 # the per-sub reports and the consolidated zip are already written, so any
 # error is downgraded to a warning and $MainSummaryFile is left $null.
 $MainSummaryFile = $null
+$MainSummaryBuilt = $false
 if ($null -ne $OuterZipFile)
 {
     try
@@ -1731,7 +1834,8 @@ if ($null -ne $OuterZipFile)
             throw "Main summary functions not found at '$AllSubSummaryFunctions'."
         }
         . $AllSubSummaryFunctions
-        $MainSummaryFile = Join-Path $InventoryRoot ("MainSummary_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        # Never another run's main summary of the same second (New-RunOutputFile).
+        $MainSummaryFile = New-RunOutputFile -Directory $InventoryRoot -Stem ("MainSummary_{0}" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')) -Extension '.html'
         # Source the version from Version.json rather than $Global:Version:
         # in parallel mode the inner script runs in child processes, so the
         # wrapper's $Global:Version is never set. Fall back to it (and then
@@ -1739,7 +1843,7 @@ if ($null -ne $OuterZipFile)
         $MainVer = $Global:Version
         try
         {
-            $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+            $VerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             $MainVer = ('{0}.{1}.{2}' -f $VerObj.MajorVersion, $VerObj.MinorVersion, $VerObj.BuildVersion)
         }
         catch { Write-Verbose ("MainSummary: could not read Version.json: {0}" -f $_.Exception.Message) }
@@ -1750,10 +1854,22 @@ if ($null -ne $OuterZipFile)
             -CollectorFailures $Global:CollectorFailures `
             -TenantId $TenantID -Version $MainVer -PlatOS $PSVersionTable.OS `
             -Detailed:$Detailed -Obfuscated:$Obfuscate
+        $MainSummaryBuilt = $true
     }
     catch
     {
         Write-Host ("WARNING: Could not build the main summary: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+    finally
+    {
+        # The name this run reserved (New-RunOutputFile): whatever a failed or
+        # stopped build left under it is removed, so no empty or partial main
+        # summary is left or added to the consolidated zip.
+        if (-not $MainSummaryBuilt -and $null -ne $MainSummaryFile)
+        {
+            Remove-Item -LiteralPath $MainSummaryFile -Force -ErrorAction SilentlyContinue
+            $MainSummaryFile = $null
+        }
     }
 }
 
@@ -2012,10 +2128,6 @@ elseif ($FailedAttempts.Count -gt 0)
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
-if ($OuterZipFile)
-{
-    Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
-}
 if ($WrapperTranscriptStarted)
 {
     Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Green
@@ -2045,7 +2157,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         $BundleVer = $Global:Version
         try
         {
-            $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw | ConvertFrom-Json
+            $BundleVerObj = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Version.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             $BundleVer = ('{0}.{1}.{2}' -f $BundleVerObj.MajorVersion, $BundleVerObj.MinorVersion, $BundleVerObj.BuildVersion)
         }
         catch { Write-Verbose ("Bundle finalize: could not read Version.json: {0}" -f $_.Exception.Message) }
@@ -2113,7 +2225,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         if ($StageItems.Count -gt 0)
         {
             Compress-Archive -Path $StageItems -DestinationPath $OuterZipFile -Update
-            Write-Host ("Bundle finalized: RunSummary.log + MainSummary.html folded into {0}" -f (Split-Path -Path $OuterZipFile -Leaf)) -ForegroundColor Green
+            Write-Host "Bundle finalized: RunSummary.log + MainSummary.html folded into the consolidated zip" -ForegroundColor Green
         }
         Remove-Item -LiteralPath $BundleStage -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -2121,6 +2233,105 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
     {
         Write-Host ("WARNING: Could not fold run-summary / main-summary into the consolidated zip: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
     }
+    finally
+    {
+        # The staging folder holds copies of the reports: removed on every path,
+        # and named when it cannot be.
+        $StageLeft = Get-Variable -Name BundleStage -ValueOnly -ErrorAction SilentlyContinue
+        if ($StageLeft -and [System.IO.Directory]::Exists($StageLeft))
+        {
+            try { Remove-Item -LiteralPath $StageLeft -Recurse -Force -ErrorAction Stop }
+            catch { Write-Host ("WARNING: Could not remove the staging folder {0}: {1} Delete it by hand." -f $StageLeft, $_.Exception.Message) -ForegroundColor Yellow }
+        }
+    }
+}
+
+# A failed fold can remove the zip itself (a full disk does), so it is checked
+# again: the extras are optional, the per-subscription zips are not. Only then
+# does it take the name a run ships, and its path is printed.
+if ($null -ne $OuterZipFile)
+{
+    $ZipProblem = Get-ConsolidatedZipProblem -Path $OuterZipFile -SubZipNames $SubZips.Name
+    $NameProblem = $null
+    if (-not $ZipProblem)
+    {
+        try { $OuterZipFile = Move-RunOutputFile -Source $OuterZipFile -Directory $InventoryRoot -Stem $OuterZipStem -Extension '.zip' }
+        catch { $NameProblem = $_.Exception.Message }
+    }
+    if ($NameProblem -and -not (Test-Path -LiteralPath $OuterZipFile -PathType Leaf))
+    {
+        # The move failed because the zip itself went away: it is lost.
+        $ZipProblem = 'the zip is not on disk.'
+        $NameProblem = $null
+    }
+    if ($NameProblem)
+    {
+        # The zip passed its check but could not take its name: it is kept
+        # under its private name, which the error gives, and is not printed as
+        # the run's zip.
+        $BundleBuildError = "The consolidated zip passed its check but could not take its name ({0}). It is kept as {1}: rename it to a .zip name to use it." -f $NameProblem, $OuterZipFile
+        $ZipKeptAs = $OuterZipFile
+        Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
+        $OuterZipFile = $null
+    }
+    elseif ($ZipProblem)
+    {
+        $BundleBuildError = "The consolidated zip was lost while the run summary was added to it: {0}" -f $ZipProblem
+        # Still under its private name: it is not left in the folder. When it
+        # cannot be removed, the error names it, so it is not shipped.
+        Remove-Item -LiteralPath $OuterZipFile -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $OuterZipFile)
+        {
+            $BundleBuildError += (" {0} could not be removed: delete it, do not share it." -f $OuterZipFile)
+        }
+        Write-Host ("ERROR: {0}" -f $BundleBuildError) -ForegroundColor Red
+        $OuterZipFile = $null
+    }
+    else
+    {
+        Write-Host ("Reporting Data File: {0}" -f $OuterZipFile) -ForegroundColor Green
+        Write-Host ("Consolidated Report:     {0}" -f $OuterZipFile) -ForegroundColor Green
+    }
+}
+
+# The inventory folder went away during the run: its report zips and the
+# resume state went with it.
+if ($InventoryFolderGone)
+{
+    Write-Host ""
+    Write-Host ("FAILED (report missing): the inventory folder {0} is gone, with the report zips and the resume state that were in it, so no consolidated zip was built. The next run collects every subscription again." -f $InventoryRoot) -ForegroundColor Red
+}
+
+# The consolidated zip is the run's output. When it could not be built, or was
+# lost afterwards, this banner says so after the summary and the run exits 2
+# below, even though every per-subscription report was written.
+if ($null -ne $BundleBuildError)
+{
+    Write-Host ""
+    Write-Host "================ FAILED (consolidated zip) ================" -ForegroundColor Red
+    Write-Host $BundleBuildError -ForegroundColor Red
+    # Read now: the folder can go while the zip is built, summarised or checked.
+    if (Test-Path -LiteralPath $InventoryRoot -PathType Container)
+    {
+        # A report zip the output check found can be gone by now (see the build).
+        $GoneZips = @(@($ActualSubZips) | Where-Object { $null -ne $_ -and -not (Test-Path -LiteralPath $_.FullName -PathType Leaf) })
+        if ($GoneZips.Count -gt 0 -and $GoneZips.Count -eq @(@($ActualSubZips) | Where-Object { $null -ne $_ }).Count) { Write-Host ("All {0} per-subscription report zip(s) of this run are gone from {1}." -f $GoneZips.Count, $InventoryRoot) -ForegroundColor Red }
+        elseif ($GoneZips.Count -gt 0) { Write-Host ("{0} per-subscription report zip(s) of this run are gone; the others are still on disk under {1}." -f $GoneZips.Count, $InventoryRoot) -ForegroundColor Red }
+        else { Write-Host ("The per-subscription report zips of this run are still on disk under {0}." -f $InventoryRoot) -ForegroundColor Red }
+    }
+    else
+    {
+        Write-Host ("The inventory folder {0} is gone, with the report zips and the resume state that were in it. The next run collects every subscription again." -f $InventoryRoot) -ForegroundColor Red
+    }
+    if ($null -ne $ZipKeptAs)
+    {
+        Write-Host ("The zip itself is complete: rename {0} to a .zip name (for example after removing old AllSubscriptions_ResourcesReport_*.zip files of that second) instead of running again." -f $ZipKeptAs) -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host "Fix the cause (for example, free up disk space), then run again." -ForegroundColor Red
+    }
+    Write-Host "=========================================================" -ForegroundColor Red
 }
 
 # Final, last-thing-the-user-sees banner when a requested data phase could not
@@ -2175,6 +2386,12 @@ if ($WrapperTranscriptStarted)
     catch { Write-Verbose ("Stop-Transcript on normal completion failed: {0}" -f $_.Exception.Message) }
 }
 
+# No consolidated zip means no report of this run is in it: exit 2, as for the
+# per-subscription verification gap, ahead of codes 3-5.
+if ($null -ne $BundleBuildError -or $InventoryFolderGone)
+{
+    exit 2
+}
 
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0

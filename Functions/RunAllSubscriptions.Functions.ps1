@@ -1113,3 +1113,109 @@ function Get-RunSummaryLogContent
 
     return $Lines.ToArray()
 }
+
+# ---- Consolidated zip check -------------------------------------------------
+
+# Returns $null when the consolidated zip at $Path opens and holds every
+# per-subscription zip named in $SubZipNames, otherwise one line saying why not.
+# Compress-Archive removes its destination when a write fails (a full disk does
+# this, also during -Update), so "the command finished" does not mean the zip is
+# there. Reads only the zip's directory, not the reports in it.
+function Get-ConsolidatedZipProblem
+{
+    param(
+        [string]$Path,
+        [string[]]$SubZipNames
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf))
+    {
+        return 'the zip is not on disk.'
+    }
+    try
+    {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+        try
+        {
+            $EntryNames = [System.Collections.Generic.HashSet[string]]::new([string[]]@($Archive.Entries | ForEach-Object { $_.FullName }), [System.StringComparer]::Ordinal)
+        }
+        finally
+        {
+            $Archive.Dispose()
+        }
+    }
+    catch
+    {
+        return ('the zip cannot be read: {0}' -f $_.Exception.Message)
+    }
+    $Missing = @($SubZipNames | Where-Object { -not $EntryNames.Contains($_) })
+    if ($Missing.Count -gt 0)
+    {
+        return ('{0} of the {1} per-subscription zip(s) are not in it.' -f $Missing.Count, @($SubZipNames).Count)
+    }
+    return $null
+}
+
+# A new, empty file <Stem><Extension> in Directory, or, when that name is taken,
+# <Stem>-2<Extension> to <Stem>-100<Extension>. It is created here, only if
+# absent, so this run never writes over a file that is there (one of an earlier
+# run, or of another run in the same second; two runs must still not share an
+# inventory folder at the same time, see the README). Returns its path; throws
+# when every name is taken or the file cannot be created.
+function New-RunOutputFile
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$Stem,
+        [Parameter(Mandatory = $true)][string]$Extension
+    )
+    for ($N = 1; $N -le 100; $N++)
+    {
+        $Name = if ($N -eq 1) { $Stem + $Extension } else { '{0}-{1}{2}' -f $Stem, $N, $Extension }
+        $Path = Join-Path $Directory $Name
+        try
+        {
+            $Stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $Stream.Dispose()
+            return $Path
+        }
+        catch [System.IO.IOException], [System.UnauthorizedAccessException]
+        {
+            # Taken (Windows gives access denied for a folder of that name):
+            # try the next name. Any other failure is the caller's.
+            if (-not ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path))) { throw }
+        }
+    }
+    throw ('every name from {0}{1} to {0}-100{1} is taken' -f $Stem, $Extension)
+}
+
+# Moves the file $Source to <Stem><Extension> in Directory, or, when that name
+# is taken, to <Stem>-2<Extension> up to <Stem>-100<Extension>, never over a
+# file that is there (the same names New-RunOutputFile tries). Returns the new
+# path; throws when every name is taken or the move fails for another reason.
+function Move-RunOutputFile
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$Stem,
+        [Parameter(Mandatory = $true)][string]$Extension
+    )
+    for ($N = 1; $N -le 100; $N++)
+    {
+        $Name = if ($N -eq 1) { $Stem + $Extension } else { '{0}-{1}{2}' -f $Stem, $N, $Extension }
+        $Path = Join-Path $Directory $Name
+        if ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path)) { continue }
+        try
+        {
+            [System.IO.File]::Move($Source, $Path, $false)
+            return $Path
+        }
+        catch [System.IO.IOException]
+        {
+            # Taken since the look above: try the next name. Any other failure is the caller's.
+            if (-not ([System.IO.File]::Exists($Path) -or [System.IO.Directory]::Exists($Path))) { throw }
+        }
+    }
+    throw ('every name from {0}{1} to {0}-100{1} is taken' -f $Stem, $Extension)
+}

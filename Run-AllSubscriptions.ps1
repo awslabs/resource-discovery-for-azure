@@ -1450,25 +1450,15 @@ if ($ParallelStreams -le 1)
             if ($null -eq $NewReport)
             {
                 # The run left no zip, so there is no report a later -Resume could
-                # carry: the sub is not completed. As after a failed attempt, an
-                # earlier run's completion of it ends here, so the next -Resume
-                # collects it again instead of carrying the older report.
-                if ($CompletedIds -contains $Sub.Id)
-                {
-                    $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
-                    $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Sub.Id })
-                }
-                # Not done: the write-ahead step counted this failed run, so the
-                # retry limit ends a sub that keeps leaving no zip.
+                # carry: the sub is not completed (the write-ahead step already
+                # took any earlier completion out and counted this failed run, so
+                # the retry limit ends a sub that keeps leaving no zip).
                 $FailedAttempts = Set-FailedAttemptReason -Existing $FailedAttempts -Id $Sub.Id -Name $Sub.Name -Reason 'it left no report zip, so it is collected again'
                 $StateChanged = $true
             }
             else
             {
-                if (-not ($CompletedIds -contains $Sub.Id))
-                {
-                    $CompletedIds += $Sub.Id
-                }
+                $CompletedIds += $Sub.Id
                 $CompletedReports = @(@($CompletedReports) + $NewReport)
                 $StateChanged = $true
                 $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
@@ -1557,15 +1547,8 @@ if ($ParallelStreams -le 1)
             catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
 
             $FailedSubscriptions += $Sub.Name
-            # A failed attempt ends an earlier run's completion of this sub: take
-            # it off the completed list and drop its report record, so a later
-            # -Resume collects it again instead of skipping it and carrying the
-            # older report.
-            if ($CompletedIds -contains $Sub.Id)
-            {
-                $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
-                $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Sub.Id })
-            }
+            # The write-ahead step already took any earlier completion of this
+            # sub out, so a later -Resume collects it again.
             # Persist the failure to the resume-state file so a future run with
             # -ResumeFailedOnly can target it. Use the exception message as the
             # Reason so the operator can see at a glance why each sub failed
@@ -1687,25 +1670,14 @@ else
                 if ($null -eq $NewReport)
                 {
                     # Same as the sequential branch: a run that left no zip does not
-                    # complete the sub, and ends an earlier run's completion of it.
-                    if ($CompletedIds -contains $Sub.Id)
-                    {
-                        $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
-                        $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Sub.Id })
-                    }
-                    # Not done; counted by the write-ahead step, as in the sequential branch.
+                    # complete the sub (counted by the write-ahead step).
                     $FailedAttempts = Set-FailedAttemptReason -Existing $FailedAttempts -Id $Sub.Id -Name $Sub.Name -Reason 'it left no report zip, so it is collected again'
-                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
-                }
-                elseif (-not ($CompletedIds -contains $Sub.Id))
-                {
-                    $CompletedIds += $Sub.Id
-                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
                     Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
                 }
                 else
                 {
-                    # Already recorded as completed: still save, so this run's zip replaces the earlier one.
+                    $CompletedIds += $Sub.Id
+                    $FailedAttempts = Remove-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id
                     Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
                 }
             }
@@ -1731,13 +1703,8 @@ else
                 try { $DiagLines | Out-File -FilePath $DiagFile -Append -Encoding utf8 }
                 catch { Write-Verbose ("DiagFile write failed at {0}: {1}" -f $DiagFile, $_.Exception.Message) }
                 $FailedSubscriptions += $Sub.Name
-                # Same as the sequential branch: a failed attempt takes the sub
-                # off the completed list and drops its report record.
-                if ($CompletedIds -contains $Sub.Id)
-                {
-                    $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
-                    $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Sub.Id })
-                }
+                # Same as the sequential branch: the write-ahead step already took
+                # any earlier completion out.
                 # Mirror the sequential branch: persist failure to the
                 # resume-state file so -ResumeFailedOnly works even for the
                 # single-sub-collapses-to-inline corner case.
@@ -2158,7 +2125,8 @@ else
                     # Per-stream files written by workers also carry their
                     # FailedAttempts entries. Merge by Id so the unified
                     # state file reflects every stream's failures, with the
-                    # most-recent attempt's Reason/LastFailedAt winning when
+                    # entry with the most failed runs winning (time breaks a
+                    # tie: Merge-RecoveredFailedAttempts) when
                     # the same sub appears in multiple streams (which would
                     # only happen across re-runs with different slicing).
                     if ($null -ne $Obj.FailedAttempts)

@@ -552,8 +552,9 @@ if ($Task -eq 'Processing')
         {
             $BatchStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-            Write-RdaProgress -Activity 'Metrics collection' -CurrentItem ("batch {0} ({1} call(s))" -f $RangeIdx, $BatchGroups.Count) -Index $MetricsProcessed -Total $MetricCount -BarOnly
-            Write-Verbose ("[Metrics] Batch {0}: dispatching {1} metric call(s) (processed {2}/{3})." -f $RangeIdx, $BatchGroups.Count, $MetricsProcessed, $MetricCount)
+            Write-RdaProgress -Activity 'Metrics collection' -CurrentItem ("batch {0} ({1} request(s))" -f $RangeIdx, $BatchGroups.Count) -Index $MetricsProcessed -Total $MetricCount -BarOnly
+            # Grouped requests only: the single-metric fallbacks a group may need are counted in the summary.
+            Write-Verbose ("[Metrics] Batch {0}: dispatching {1} grouped request(s) for {2} metric definition(s) (processed {3}/{4})." -f $RangeIdx, $BatchGroups.Count, $BatchDefCount, $MetricsProcessed, $MetricCount)
 
             # Each parallel item is one group of definitions.
             $BatchGroups | ForEach-Object -Parallel {

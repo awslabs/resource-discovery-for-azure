@@ -210,13 +210,13 @@ Describe 'Metrics phase diagnostics across several batches' {
 
     It 'writes the per-batch verbose lines, with the cumulative call count' {
         @($script:Run.Verbose | ForEach-Object { Hide-Seconds $_ }) | Should -Be @(
-            '[Metrics] Batch 1: dispatching 63 metric call(s) (processed 252/800).'
+            '[Metrics] Batch 1: dispatching 63 grouped request(s) for 252 metric definition(s) (processed 252/800).'
             '[Metrics] Batch 1 complete in <s>s. Cumulative diagnostics: 252 metric definition record(s) so far.'
-            '[Metrics] Batch 2: dispatching 63 metric call(s) (processed 504/800).'
+            '[Metrics] Batch 2: dispatching 63 grouped request(s) for 252 metric definition(s) (processed 504/800).'
             '[Metrics] Batch 2 complete in <s>s. Cumulative diagnostics: 504 metric definition record(s) so far.'
-            '[Metrics] Batch 3: dispatching 63 metric call(s) (processed 756/800).'
+            '[Metrics] Batch 3: dispatching 63 grouped request(s) for 252 metric definition(s) (processed 756/800).'
             '[Metrics] Batch 3 complete in <s>s. Cumulative diagnostics: 756 metric definition record(s) so far.'
-            '[Metrics] Batch 4: dispatching 11 metric call(s) (processed 800/800).'
+            '[Metrics] Batch 4: dispatching 11 grouped request(s) for 44 metric definition(s) (processed 800/800).'
             '[Metrics] Batch 4 complete in <s>s. Cumulative diagnostics: 800 metric definition record(s) so far.'
         )
     }

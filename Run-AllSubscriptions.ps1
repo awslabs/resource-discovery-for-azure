@@ -1565,9 +1565,9 @@ else
                 $Obj = Read-StreamResumeStateFile -Path $StreamFile.FullName
                 if ($null -eq $Obj -or -not $Obj.PSObject.Properties['Completed'])
                 {
-                    # Its records are not used, so none of the subscriptions it
-                    # lists counts as completed and a later -Resume collects
-                    # them (see $RunEndUnreadable below). Moved aside with a
+                    # Its records are not used, so none of this run's
+                    # subscriptions counts as completed and a later -Resume
+                    # collects them all (see $RunEndUnreadable below). Moved aside with a
                     # warning, not deleted. One that cannot be moved aside ends
                     # the run with exit 1 (below).
                     $RunEndUnreadable = $true

@@ -553,10 +553,11 @@ function Read-StreamResumeStateFile
 # A per-stream state file that a run cannot read: the startup fold of a
 # resuming run (an interrupted write can leave it cut short), or, with
 # -AtRunEnd, the end-of-run merge of a parallel run (Read-StreamResumeStateFile).
-# Its records are not used, so the subscriptions it lists are not counted as
-# completed: at startup a -Resume run collects them again, and under
-# -ResumeFailedOnly a later -Resume does; after the end-of-run merge a later
-# -Resume collects them. The file is renamed in place to
+# Its records are not used. At startup the subscriptions it lists are not
+# counted as completed: a -Resume run collects them again, and under
+# -ResumeFailedOnly a later -Resume does. After the end-of-run merge none of
+# that run's subscriptions counts as completed, and a later -Resume collects
+# them all. The file is renamed in place to
 # <name>.unreadable-<UTC time>, with -2, -3 and so on added when that name is
 # taken, and kept for inspection: that name ends neither in '.json' nor
 # matches Get-StreamResumeStateFiles, so no later run reads it

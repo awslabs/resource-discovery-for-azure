@@ -410,6 +410,8 @@ $Archive = [System.IO.Compression.ZipFile]::Open($Zip, [System.IO.Compression.Zi
 try { $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Archive, $Json, [System.IO.Path]::GetFileName($Json)) }
 finally { $Archive.Dispose() }
 $Global:Resources = @([pscustomobject]@{ id = 'stand-in' })
+# The real script keeps the count here: it releases $Global:Resources before the report.
+$Global:ResourceCount = 1
 $Global:ZipOutputFile = $Zip
 '@ | Set-Content -LiteralPath (Join-Path $script:ToolStandIn 'ResourceInventory.ps1') -Encoding utf8
 

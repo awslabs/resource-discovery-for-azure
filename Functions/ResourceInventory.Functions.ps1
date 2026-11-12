@@ -549,6 +549,7 @@ function Compress-RdaReportArchive
     $TempPath = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($DestinationPath), $TempName)
     $ArchiveStream = $null
     $Archive = $null
+    $Moved = $false
     try
     {
         $ArchiveStream = [System.IO.File]::Open($TempPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -574,6 +575,8 @@ function Compress-RdaReportArchive
         if ($Entries.Count -gt 0)
         {
             [System.IO.File]::Move($TempPath, $DestinationPath)
+            # The last step that may fail: from here on nothing may fail the call.
+            $Moved = $true
         }
     }
     finally
@@ -586,10 +589,22 @@ function Compress-RdaReportArchive
             if ($null -eq $Disposable) { continue }
             try { $Disposable.Dispose() } catch { Write-Verbose ('Closing the partial archive failed: {0}' -f $_.Exception.Message) }
         }
-        if (Test-Path -LiteralPath $TempPath)
+        # After the move there is no temporary file to remove. Before it, a failed clean-up
+        # only warns, so it never replaces the original error.
+        if (-not $Moved)
         {
-            Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
-            if (Test-Path -LiteralPath $TempPath) { Write-Warning ("Compress-RdaReportArchive: could not remove the temporary file '{0}'; delete it by hand." -f $TempPath) }
+            try
+            {
+                if (Test-Path -LiteralPath $TempPath)
+                {
+                    Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+                    if (Test-Path -LiteralPath $TempPath) { Write-Warning ("Compress-RdaReportArchive: could not remove the temporary file '{0}'; delete it by hand." -f $TempPath) }
+                }
+            }
+            catch
+            {
+                Write-Warning ("Compress-RdaReportArchive: could not check or remove the temporary file '{0}': {1}; delete it by hand if it is there." -f $TempPath, $_.Exception.Message)
+            }
         }
     }
 }

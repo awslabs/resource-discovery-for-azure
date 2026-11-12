@@ -390,6 +390,32 @@ Describe 'Compress-RdaReportArchive failure handling' {
         [string]$Warnings[0] | Should -BeLike ('*{0}*delete it by hand*' -f $Left[0].FullName)
         Test-Path -LiteralPath $Destination | Should -BeFalse
     }
+
+    # Moving the zip to the final name is the last step that can fail: once it is there,
+    # nothing after it may turn a finished zip into a failed call.
+    It 'succeeds once the zip is at the final name, even when a later temp-file check would fail' {
+        $Root = Join-Path $TestDrive 'after-move'
+        New-Item -ItemType Directory -Path $Root | Out-Null
+        Write-FixtureFile (Join-Path $Root 'a.json') (Get-JsonText -Records 20 -Seed 13)
+        $Destination = Join-Path $Root 'report.zip'
+        Mock Test-Path { throw 'stand-in: the temp-file check failed' } -ParameterFilter { "$LiteralPath" -like '*.rda-*.partial' }
+
+        $Caught = & {
+            $ErrorActionPreference = 'SilentlyContinue'
+            try
+            {
+                Compress-RdaReportArchive -Path (Join-Path $Root 'a.json') -CompressionLevel Fastest -DestinationPath $Destination -ErrorAction Stop
+                'not caught'
+            }
+            catch
+            {
+                $_.Exception.Message
+            }
+        }
+        $Caught | Should -Be 'not caught'
+        Test-Path -LiteralPath $Destination | Should -BeTrue
+        @(Get-ChildItem -LiteralPath $Root -Force -Filter '.rda-*.partial').Count | Should -Be 0
+    }
 }
 
 Describe 'Compress-RdaReportArchive with a long destination file name' {

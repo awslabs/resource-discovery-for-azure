@@ -46,6 +46,10 @@ function Variables
 {
     $Global:ResourceContainers = @()
     $Global:Resources = @()
+    # Discovered resource count for this run. $Global:Resources is released once the inventory
+    # is written, so callers read this instead; reset here so an early exit never reports the
+    # previous run's count.
+    $Global:ResourceCount = 0
     $Global:Subscriptions = ''
     $Global:ReportName = $ReportName
     $Global:Version = GetLocalVersion
@@ -684,6 +688,8 @@ Function RunInventorySetup()
     ResourceInventoryLoop
     ResourceInventoryAvd
 
+    $Global:ResourceCount = @($Global:Resources).Count
+
     if ($Obfuscate.IsPresent)
     {
         $SubLookup = @{}
@@ -1203,7 +1209,34 @@ function ExecuteInventoryProcessing()
         $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Version' -Value NotSet
         $Global:SmaResources.Version = $Global:Version
 
-        $Global:SmaResources | ConvertTo-Json -depth 100 -compress | Out-File $Global:JsonFile
+        # Write-InventoryJson removes its temporary file and throws when the write fails (out of
+        # memory on a large estate, a full disk, a value ConvertTo-Json rejects). The script runs
+        # with ErrorActionPreference 'silentlycontinue', and on a direct run no caller catches
+        # the throw, so nothing would show it: log the real cause here first, then throw it on.
+        try
+        {
+            Write-InventoryJson -InputObject $Global:SmaResources -Path $Global:JsonFile
+        }
+        catch
+        {
+            # The throw skips the release below, so free the collector data here, first, so the log
+            # line below has the memory it needs: the report step, and under the wrappers the next
+            # subscription, must not share memory with it. As in the release, the Azure context read
+            # and the handler removal let go of the rows the Azure session still holds.
+            $Global:SmaResources = $null
+            $Global:Resources = $null
+            Write-Log -Message ("Inventory write FAILED: {0} was not written: {1}" -f $Global:JsonFile, $_.Exception.Message) -Severity 'Error' -ToDebugLog
+            try
+            {
+                $null = Get-AzContext -ErrorAction Stop
+                [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.ClientFactory.RemoveHandler([Microsoft.Azure.Commands.Common.Authentication.Models.RPRegistrationDelegatingHandler])
+            }
+            catch
+            {
+                Write-Log -Message ('Azure session read or handler removal after the failed inventory write failed: {0}.' -f $_.Exception.Message) -NoConsole -ToDebugLog
+            }
+            throw
+        }
 
         Write-Log -Message ('Resource Reporting Phase Done.') -Severity 'Info'
     }
@@ -1467,6 +1500,31 @@ function ExecuteInventoryProcessing()
     ProcessMetricsResult
     ProcessResourceResult
 
+    # Nothing reads the collector output or the discovery rows after the inventory is written, and
+    # on a large estate the report step needs that memory. The count stays in $Global:ResourceCount.
+    $Global:SmaResources = $null
+    $Global:Resources = $null
+    # Setting the two globals to $null does not free the rows on its own. Az cmdlets leave their stream
+    # handlers in the shared Azure session when they return, so the collector that made the last Azure
+    # call piped into a filter (the VM or scale set size lookup) stays referenced, and with it the rows
+    # it was given. The next Az cmdlet replaces those handlers; this read is that call, made from a
+    # scope that holds no rows. The size lookup also adds a provider-registration handler to the shared
+    # client factory, which keeps the same cmdlet referenced, and the read does not always remove it, so
+    # it is removed by type; the next resource-manager cmdlet adds its own again. -ErrorAction Stop
+    # sends any failure to the catch, so it is logged and the run goes on.
+    try
+    {
+        $null = Get-AzContext -ErrorAction Stop
+        [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.ClientFactory.RemoveHandler([Microsoft.Azure.Commands.Common.Authentication.Models.RPRegistrationDelegatingHandler])
+    }
+    catch
+    {
+        Write-Log -Message ('Azure session read or handler removal after the release failed: {0}. The collector data may stay in memory until the next Azure call.' -f $_.Exception.Message) -NoConsole -ToDebugLog
+    }
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
+    [System.GC]::Collect()
+
     if (!$SkipMetrics.IsPresent)
     {
         $script:PhaseTimings['Metrics collection (Azure Monitor)'] = $MetricsPhaseTimer.Elapsed
@@ -1486,6 +1544,18 @@ function FinalizeOutputs
 {
     function ProcessSummary()
     {
+        # Set when Summary.ps1 fails: an HTML file left by a report step that failed part-way is
+        # not a report to zip.
+        $Global:HtmlReportFailed = $false
+        if (-not (Test-Path -LiteralPath $Global:JsonFile))
+        {
+            # Summary.ps1 would only fail with 'Inventory JSON not found'; say why there is no report.
+            Write-Log -Message ("No HTML report: the inventory {0} was not written. See the error above." -f $Global:JsonFile) -Severity 'Error'
+            throw ("No HTML report: the inventory {0} was not written." -f $Global:JsonFile)
+            # Under 'silentlycontinue' with no caller catching it (a direct run), the throw does not stop here.
+            return
+        }
+
         Write-Log -Message ('Creating Summary Report') -Severity 'Info'
         Write-Log -Message ('Starting Summary Report Processing Job.') -Severity 'Info'
 
@@ -1507,8 +1577,9 @@ function FinalizeOutputs
         }
         catch
         {
+            $Global:HtmlReportFailed = $true
             Write-Log -Message ("HTML report generation FAILED: {0}" -f $_.Exception.Message) -Severity 'Error'
-            Write-Log -Message ("The Inventory/Metrics/Consumption data files were still written to {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
+            Write-Log -Message ("The data files this run did write are still in {0}, but no HTML report or zip was produced for this run." -f $Global:DefaultPath) -Severity 'Error'
             throw
         }
     }
@@ -1654,6 +1725,9 @@ $Global:Runtime = Measure-Command -Expression {
     Start-Transcript -Path $Global:PowerShellTranscriptFile -UseMinimalHeader
 }
 
+# Reset, so a run whose processing step stops does not show the time of an earlier run in
+# the same session.
+$Global:ReportingRunTime = $null
 try
 {
     $Global:ReportingRunTime = Measure-Command -Expression {
@@ -1668,7 +1742,13 @@ finally
 
 FinalizeOutputs
 
-Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
+# Without the inventory or a finished HTML report there is no report to compress (the zip
+# step below then says so), so the run does not announce it.
+$ReportInputsReady = -not $Global:HtmlReportFailed -and (Test-Path -LiteralPath $Global:JsonFile) -and (Test-Path -LiteralPath $Global:HtmlFile)
+if ($ReportInputsReady)
+{
+    Write-Log -Message ("Compressing Resources Output: {0}" -f $Global:ZipOutputFile) -Severity 'Info'
+}
 
 if ($Obfuscate.IsPresent)
 {
@@ -1749,7 +1829,6 @@ if ($Obfuscate.IsPresent)
         Write-Log -Message ("  - Debug log:  {0}" -f $Global:DebugLogFile) -Severity 'Warning'
     }
     Write-Log -Message ("") -Severity 'Info'
-    Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
     Write-Log -Message ("Partners may ask about obfuscated names (e.g. 'prod_a1b2c3d4-...'). Use the dictionary file to look up the real resource name and respond.") -Severity 'Info'
     Write-Log -Message ("Delete the dictionary and transcript when no longer needed for security.") -Severity 'Warning'
 }
@@ -1802,7 +1881,6 @@ if ($Obfuscate.IsPresent)
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
-    Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 else
 {
@@ -1815,20 +1893,76 @@ else
         CompressionLevel = 'Fastest'
         DestinationPath = $Global:ZipOutputFile
     }
-    Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
 }
 
+# Only this call finishing makes the zip this run's report: a file at the path can be a
+# zip cut off part-way, or one that was there before (Compress-Archive then refuses to
+# overwrite it). -ErrorAction Stop: under 'silentlycontinue' an input Compress-Archive
+# cannot read is only a hidden error, and the zip would be made without it.
+$ZipWritten = $true
+$ZipExistedBefore = Test-Path -LiteralPath $Global:ZipOutputFile
 try
 {
-    Compress-Archive @CompressionOutput
+    if ($ReportInputsReady) { Compress-Archive @CompressionOutput -ErrorAction Stop } else { $ZipWritten = $false }
 }
 catch
 {
-    $_ | Format-List -Force
-    Write-Error ("Error Compressing Output File: {0}." -f $Global:ZipOutputFile)
-    Write-Error ("Please zip the output files manually.")
+    $ZipWritten = $false
+    # Write-Log, not Write-Error: the script's 'silentlycontinue' preference hides Write-Error.
+    Write-Log -Message ("Error Compressing Output File: {0}: {1}" -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
+    # Only this run's files: in a reused output folder the zip's '*.json' input also matches
+    # files of earlier runs, which may hold real names.
+    $ManualZipFiles = @(Resolve-Path -Path $CompressionOutput.Path -ErrorAction SilentlyContinue | ForEach-Object { $_.ProviderPath } | Where-Object { (Split-Path -Leaf $_) -like "*$($Global:CurrentDateTime)*" } | Select-Object -Unique)
+    Write-Log -Message ("Please zip the output files manually: {0}" -f ($ManualZipFiles -join ', ')) -Severity 'Error'
+    if ($Obfuscate.IsPresent)
+    {
+        Write-Log -Message ("Add only those files: the obfuscation dictionary, the transcript and the logs hold real names and stay local.") -Severity 'Error'
+    }
+    # Compress-Archive removes its own unfinished zip; this is a backstop so a cut-off zip is
+    # never left to be shared. One that was there before this step is not this step's to remove.
+    if (-not $ZipExistedBefore -and (Test-Path -LiteralPath $Global:ZipOutputFile))
+    {
+        try
+        {
+            Remove-Item -LiteralPath $Global:ZipOutputFile -Force -ErrorAction Stop
+        }
+        catch
+        {
+            Write-Log -Message ("Could not remove the unfinished zip {0}: {1}. Delete it by hand and do not share it." -f $Global:ZipOutputFile, $_.Exception.Message) -Severity 'Error'
+        }
+    }
 }
 
-Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
-Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
-Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
+if (-not $ReportInputsReady)
+{
+    Write-Log -Message ("There is no report to zip: the inventory or the HTML report was not written. See the errors above.") -Severity 'Error'
+}
+$ZipWritten = $ZipWritten -and (Test-Path -LiteralPath $Global:ZipOutputFile)
+
+if ($ZipWritten)
+{
+    if ($Obfuscate.IsPresent)
+    {
+        Write-Log -Message ('Obfuscate mode: transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
+        Write-Log -Message ("The ZIP file is safe to share with AWS or partners.") -Severity 'Success'
+    }
+    else
+    {
+        Write-Log -Message ('Transcript log excluded from zip (kept locally for debug)') -Severity 'Info'
+    }
+}
+# The times are shown as a success only when the run wrote its report.
+$TimeSeverity = if ($ZipWritten) { 'Success' } else { 'Info' }
+
+Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity $TimeSeverity
+Write-Log -Message ("Reporting Time: {0}" -f $(if ($null -ne $ReportingRunTime) { $ReportingRunTime } else { 'not measured, the processing step stopped' })) -Severity $TimeSeverity
+# A run can reach this line with no zip: when a step above failed, its throw does not stop
+# the script under 'silentlycontinue'. So name the zip only when this run wrote it.
+if ($ZipWritten)
+{
+    Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
+}
+else
+{
+    Write-Log -Message ("No report was written: {0} was not created. See the errors above, fix the cause and re-run." -f $Global:ZipOutputFile) -Severity 'Error'
+}

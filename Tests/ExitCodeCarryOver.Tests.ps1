@@ -179,7 +179,8 @@ if ((Get-RdaStandInScenario).StreamNarrationFail)
         if (([string]$args[0]) -match '^\[stream-\d+\] done: ')
         {
             # Recorded, so a test knows the line was attempted (a 0-resource run never writes it).
-            Add-Content -LiteralPath (Join-Path $env:HOME 'narration-refused.txt') -Value ([string]$args[0])
+            # One file per process: two stream workers never write the same file.
+            Add-Content -LiteralPath (Join-Path $env:HOME ('narration-refused-{0}.txt' -f $PID)) -Value ([string]$args[0])
             throw 'stand-in: the stream console line cannot be written'
         }
         Microsoft.PowerShell.Utility\Write-Host @args
@@ -1052,7 +1053,7 @@ function Get-UsageAggregates
 
     It 'two streams: a console line a stream cannot write after its subscription worked does not make it failed' {
         $Run = Invoke-CarryOverRun -Subs @($script:SubA, $script:SubB) -Streams 2 -StreamNarrationFail
-        @(Get-Content -LiteralPath (Join-Path $Run.Home 'narration-refused.txt') -ErrorAction SilentlyContinue | Sort-Object) | Should -Be @('[stream-0] done: Sub A - 1 resources', '[stream-1] done: Sub B - 1 resources') -Because 'the refused lines must be the ones a subscription that worked writes'
+        @(Get-ChildItem -LiteralPath $Run.Home -Filter 'narration-refused-*.txt' | Get-Content | Sort-Object) | Should -Be @('[stream-0] done: Sub A - 1 resources', '[stream-1] done: Sub B - 1 resources') -Because 'the refused lines must be the ones a subscription that worked writes'
         $Run.Console | Should -Not -Match 'ERROR processing' -Because $Run.Console
         $Run.Console | Should -Not -Match 'Subscriptions Failed:' -Because $Run.Console
         $Run.Console | Should -Match 'Per-subscription output verification: OK \(each of the 2 successful sub\(s\) has its zip' -Because $Run.Console

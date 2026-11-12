@@ -1,3 +1,7 @@
+# [CmdletBinding()] makes PowerShell reject a parameter name this script does not
+# declare, so a misspelled switch (for example -Obfuscte) stops before any work
+# instead of being ignored. It also supplies the -Debug switch read further down.
+[CmdletBinding()]
 param ($TenantID,
     $Appid,
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', ErrorMessage = 'Invalid SubscriptionID; must be a GUID')]
@@ -7,7 +11,6 @@ param ($TenantID,
     [string]$ResourceGroup,
     [string[]]$Service,
     [string]$ObfuscationDictionary,
-    [switch]$Debug,
     [switch]$SkipMetrics,
     [switch]$SkipConsumption,
     [switch]$DeviceLogin,
@@ -36,9 +39,12 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 }
 . $CommonFunctionsFile
 
-if ($Debug.IsPresent) { $DebugPreference = 'Continue' }
+# -Debug:$false is bound too, so read the value, not only whether it was passed.
+$DebugMode = $PSBoundParameters.ContainsKey('Debug') -and [bool]$PSBoundParameters['Debug']
 
-if ($Debug.IsPresent) { $ErrorActionPreference = "Continue" }Else { $ErrorActionPreference = "silentlycontinue" }
+if ($DebugMode) { $DebugPreference = 'Continue' }
+
+if ($DebugMode) { $ErrorActionPreference = "Continue" }Else { $ErrorActionPreference = "silentlycontinue" }
 
 Write-Debug ('Debugging Mode: On. ErrorActionPreference was set to "Continue", every error will be presented.')
 

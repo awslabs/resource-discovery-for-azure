@@ -17,13 +17,37 @@ Per subscription, the collector:
 
 - Sets the time window to the **last 31 days, ending at the start of yesterday**
   (`ReportedStartTime = today − 31 days`, `ReportedEndTime = yesterday`, both
-  floored to midnight).
+  floored to midnight), where today is the UTC date of the run, so every host
+  collects the same days for the same moment.
 - Requests **`Daily`** aggregation granularity with **`ShowDetails = $true`**
   (so per-resource instance data is included).
 - Pages through the results using the API's **`ContinuationToken`** until there
   are no more pages.
 - Writes each page to the CSV as it goes (`Export-Csv -Append`), so rows are
   flushed incrementally rather than held in memory to the end.
+
+### Up-front consumption data check
+
+Before any inventory or metrics work, both entry points check that every
+subscription in the run (every one the up-front role check found readable;
+the others are skipped) returns at least one usage row with a quantity above
+zero for this same window, and stop with exit code 1 if one does not, unless
+the up-front role check confirmed the usage permission for it (it then passes
+with a warning and an empty consumption sheet). The window is worked out
+once per run (`Get-ConsumptionWindow` in `Functions/Common.Functions.ps1`)
+and both the check and the phase use that one value: a direct run computes it
+before the check, and `Run-AllSubscriptions.ps1` computes it before its check
+and passes it to every `ResourceInventory.ps1` it starts
+(`-ConsumptionWindowStart` / `-ConsumptionWindowEnd`). So a subscription
+collected after midnight, hours after the check, still collects the window
+that was checked. For a direct `-ResourceGroup` run, the check counts only
+the usage rows of that resource group, by the same test the phase uses to
+keep rows (`Test-ConsumptionResourceUriInResourceGroup`). The check calls the
+API that `Get-UsageAggregates` wraps, with the same window and options and the
+subscription in the request path, up to 8 subscriptions at a time, so it
+switches no Azure context. See
+[Consumption data check](../README.md#consumption-data-check-up-front) in the
+README.
 
 ### Authentication pre-check
 
@@ -60,8 +84,8 @@ five are derived from the `InstanceData` JSON on each record.
 | `MeterSubCategory` | usage record | Meter sub-grouping, e.g. `Dv2 Series`. |
 | `Quantity` | usage record | **Amount of usage** in the meter's unit (not a cost). |
 | `Unit` | usage record | Unit for `Quantity`, e.g. `1 Hour`, `10000 GB`. |
-| `UsageStartTime` | usage record | Start of the aggregation interval. |
-| `UsageEndTime` | usage record | End of the aggregation interval. |
+| `UsageStartTime` | usage record | Start of the aggregation interval, written as `M/d/yyyy h:mm:ss tt` with a plain space before `AM`/`PM` (e.g. `3/15/2024 12:00:00 AM`) on every host. |
+| `UsageEndTime` | usage record | End of the aggregation interval, in the same format. |
 | `ResourceId` | `InstanceData.Microsoft.Resources.resourceUri` | ARM resource URI the usage is attributed to. Under `-Obfuscate`, identifying segments are masked but the ARM path *structure* is preserved (see below). |
 | `ResourceLocation` | `InstanceData.Microsoft.Resources.location` | Location of the resource. |
 | `ConsumptionMeter` | `InstanceData.Microsoft.Resources.additionalInfo.ConsumptionMeter` | Meter identifier from the resource's additional info (may be empty). |

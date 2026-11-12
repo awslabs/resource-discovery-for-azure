@@ -16,7 +16,13 @@ param ($TenantID,
     $ConcurrencyLimit = 6,
     $MetricsLookbackDays = 31,
     $ReportName = 'ResourcesReport',
-    $OutputDirectory)
+    $OutputDirectory,
+    # Internal, set by Run-AllSubscriptions.ps1 (with -RunAllSubs): the
+    # consumption window its up-front check queried, as 'yyyy-MM-dd' dates, so
+    # this run collects the same window even after midnight. When absent (or
+    # not valid) the run computes the window itself.
+    [string]$ConsumptionWindowStart,
+    [string]$ConsumptionWindowEnd)
 
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
 if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
@@ -681,8 +687,110 @@ Function RunInventorySetup()
     CheckCliRequirements
     CheckPowerShell
     GetSubscriptionsData
+
+    # One consumption window per run, used by the up-front consumption data
+    # check below and by the consumption phase (GetResorceConsumption), so a
+    # run that crosses midnight still collects the window it checked. Under
+    # -RunAllSubs the wrapper passes the window its own check used.
+    $script:ConsumptionWindow = ConvertFrom-ConsumptionWindowArgument -Start $ConsumptionWindowStart -End $ConsumptionWindowEnd
+    if ($null -eq $script:ConsumptionWindow)
+    {
+        if (-not [string]::IsNullOrEmpty($ConsumptionWindowStart) -or -not [string]::IsNullOrEmpty($ConsumptionWindowEnd))
+        {
+            Write-Log -Message ("Ignoring -ConsumptionWindowStart '{0}' / -ConsumptionWindowEnd '{1}': both must be yyyy-MM-dd dates, start not after end. Using this run's own consumption window." -f $ConsumptionWindowStart, $ConsumptionWindowEnd) -Severity 'Warning'
+        }
+        $script:ConsumptionWindow = Get-ConsumptionWindow
+    }
+
+    # Direct runs check two things up front, before any inventory, collector or
+    # metrics work (both in Functions/Common.Functions.ps1). Under -RunAllSubs
+    # the wrapper has already checked every subscription, so neither is repeated.
+    #
+    # 1. The identity's roles, with or without -SkipConsumption
+    #    (Test-SubscriptionRoleAccessAll). Resource Graph returns 0 rows rather
+    #    than an error for a subscription the identity cannot read, so without
+    #    this check such a run is exempted from the consumption check
+    #    (0 resources) and finishes with an empty report. With -ResourceGroup
+    #    the read verdict is for that resource group, because Reader on only
+    #    that resource group is enough for such a run. -ResourceGroup without
+    #    -SubscriptionID is refused by ResourceInventoryLoop, so it is not
+    #    checked here. When consumption is requested the usage permission is
+    #    printed too, for information. A subscription that is not readable is
+    #    skipped: listed with the reason right after the check and again at
+    #    the end of the run, left out of the consumption check, and its
+    #    resources are left out of the inventory. When none is readable (for
+    #    example the one -SubscriptionID names) the run stops with exit 1.
+    # 2. Consumption: unless -SkipConsumption, every in-scope subscription must
+    #    return usage values (Invoke-ConsumptionDataCheck) for the run's
+    #    window. With -ResourceGroup only that resource group's usage rows
+    #    count, the rows the consumption phase keeps for such a run. The role
+    #    check records are passed in: a subscription with no usage above zero
+    #    passes with a warning (NoUsage, listed again at the end of the run)
+    #    only when both role-check answers grant the usage permission at the
+    #    subscription or above. On a refusal the role check's usage verdict is
+    #    printed with the fix.
+    if (-not $RunAllSubs.IsPresent)
+    {
+        $AccessProbed = @()
+        $ConsumptionCheckScope = if (![string]::IsNullOrEmpty($SubscriptionID))
+        {
+            $Match = @($Global:Subscriptions | Where-Object { $_.id -eq $SubscriptionID })
+            if ($Match.Count -gt 0) { $Match } else { @([pscustomobject]@{ Id = $SubscriptionID; Name = $SubscriptionID }) }
+        }
+        else
+        {
+            @($Global:Subscriptions)
+        }
+
+        if (@($ConsumptionCheckScope).Count -gt 0 -and ([string]::IsNullOrEmpty($ResourceGroup) -or ![string]::IsNullOrEmpty($SubscriptionID)))
+        {
+            if ([string]::IsNullOrEmpty($ResourceGroup))
+            {
+                Write-Host ("Verifying subscription access up front for {0} subscription(s)..." -f @($ConsumptionCheckScope).Count) -ForegroundColor Cyan
+            }
+            else
+            {
+                Write-Host ("Verifying access to resource group '{0}' up front..." -f $ResourceGroup) -ForegroundColor Cyan
+            }
+            $AccessProbed = @(Test-SubscriptionRoleAccessAll -Subscriptions $ConsumptionCheckScope -ResourceGroup $ResourceGroup -IncludeUsage:(-not $SkipConsumption.IsPresent))
+            $AccessDecision = Resolve-AccessPreflight -Probed $AccessProbed
+            Write-AccessPreflightReport -Decision $AccessDecision -ScopeCount @($ConsumptionCheckScope).Count -ResourceGroup $ResourceGroup
+            if ($AccessDecision.ShouldBlock)
+            {
+                exit 1
+            }
+            if ($AccessDecision.Inaccessible.Count -gt 0)
+            {
+                $script:AccessSkipped = $AccessDecision
+                $ConsumptionCheckScope = @($ConsumptionCheckScope | Where-Object { $AccessDecision.InaccessibleIds -notcontains [string]$_.Id })
+                $Global:Subscriptions = @($Global:Subscriptions | Where-Object { $AccessDecision.InaccessibleIds -notcontains [string]$_.Id })
+            }
+        }
+
+        if (-not $SkipConsumption.IsPresent)
+        {
+            $ConsumptionCheck = Invoke-ConsumptionDataCheck -Subscriptions $ConsumptionCheckScope -RoleCheck $AccessProbed -Window $script:ConsumptionWindow -ResourceGroup $ResourceGroup
+            Write-ConsumptionDataCheckReport -Result $ConsumptionCheck
+            Write-UsageRoleReport -ConsumptionResult $ConsumptionCheck -RoleCheck $AccessProbed
+            if ($ConsumptionCheck.ShouldBlock)
+            {
+                exit 1
+            }
+            $script:ConsumptionCheckResult = $ConsumptionCheck
+        }
+    }
+
     ResourceInventoryLoop
     ResourceInventoryAvd
+
+    # A run over every visible subscription queries Resource Graph tenant-wide,
+    # which also returns whatever a skipped subscription's identity can partly
+    # read; leave those resources out, so a skipped subscription is not half
+    # reported.
+    if ($null -ne $script:AccessSkipped)
+    {
+        $Global:Resources = @($Global:Resources | Where-Object { $script:AccessSkipped.InaccessibleIds -notcontains [string]$_.subscriptionId })
+    }
 
     if ($Obfuscate.IsPresent)
     {
@@ -1211,12 +1319,27 @@ function ExecuteInventoryProcessing()
     function GetResorceConsumption()
     {
         $DebugPreference = "SilentlyContinue"
+        # A usage row leaves out the InstanceData parts Azure has no value for
+        # (additionalInfo, or some of its keys), and the row loop reads them as
+        # properties that may be absent. Strict mode is off for this phase only, so
+        # a run started from a shell with Set-StrictMode -Version Latest writes such
+        # a row with its empty defaults instead of stopping the subscription's pull.
+        Set-StrictMode -Off
 
         [System.Threading.Thread]::CurrentThread.CurrentUICulture = "en-US";
         [System.Threading.Thread]::CurrentThread.CurrentCulture = "en-US";
 
-        $ReportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
-        $ReportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
+        # UsageStartTime / UsageEndTime are written in this format with the
+        # invariant culture, so the text is the same on every host. The en-US
+        # culture's own time pattern comes from the host's culture data: with
+        # ICU (on Linux, for example) it can have U+202F, not a space, before AM/PM.
+        $UsageDateFormat = 'M/d/yyyy h:mm:ss tt'
+        $InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
+
+        # The run's window (RunInventorySetup): the one the up-front
+        # consumption data check queried, or under -RunAllSubs the wrapper's.
+        $ReportedStartTime = $script:ConsumptionWindow.Start
+        $ReportedEndTime = $script:ConsumptionWindow.End
 
         if (-not (Test-DataPlaneAuthReady -Phase 'Consumption'))
         {
@@ -1331,10 +1454,18 @@ function ExecuteInventoryProcessing()
 
                         if (![string]::IsNullOrEmpty($ResourceGroup))
                         {
-                            if (!$InstanceInfo.'Microsoft.Resources'.resourceUri.toLower().Contains("/" + $ResourceGroup.toLower() + "/"))
+                            # Same test the up-front consumption data check counts rows by.
+                            if (-not (Test-ConsumptionResourceUriInResourceGroup -ResourceUri $InstanceInfo.'Microsoft.Resources'.resourceUri -ResourceGroup $ResourceGroup))
                             {
                                 continue;
                             }
+                        }
+
+                        # The clock value as Get-UsageAggregates returned it, no time-zone conversion.
+                        foreach ($DateField in @('UsageStartTime', 'UsageEndTime'))
+                        {
+                            $DateValue = $UsageDataExport[$Item].$DateField
+                            if ($DateValue -is [datetime]) { $UsageDataExport[$Item].$DateField = $DateValue.ToString($UsageDateFormat, $InvariantCulture) }
                         }
 
                         $UsageDataExport[$Item] | Add-Member -MemberType NoteProperty -Name ResourceId -Value NotSet
@@ -1832,3 +1963,9 @@ catch
 Write-Log -Message ("Execution Time: {0}" -f $Runtime) -Severity 'Success'
 Write-Log -Message ("Reporting Time: {0}" -f $ReportingRunTime) -Severity 'Success'
 Write-Log -Message ("Reporting Data File: {0}" -f $Global:ZipOutputFile) -Severity 'Success'
+
+# Direct runs only (the wrapper prints its own): subscriptions the up-front
+# consumption data check passed with no usage values, and subscriptions the
+# up-front role check skipped.
+Write-NoUsageSummary -ConsumptionResult $script:ConsumptionCheckResult
+Write-SkippedSubscriptionSummary -Decision $script:AccessSkipped

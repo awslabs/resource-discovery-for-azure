@@ -60,9 +60,14 @@ For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-w
 Before running the script, ensure your Azure user account has the following roles assigned:
 
 - **✅ Reader Role** - Access to view Azure resources
-- **✅ Billing Reader Role** - Access to billing and cost data
+- **✅ Billing Reader Role** - Access to billing data
 - **✅ Monitoring Reader Role** - Access to Azure Monitor metrics
-- **✅ Cost Management Reader Role** - Access to cost management data
+
+Reader (or any role that can read every resource type) is needed **on each subscription, or above it**. A custom role that leaves out reading some resource types (for example `*/read` with the not-action `Microsoft.Compute/*/read`) is not enough on its own and stops the run. Reader on only some resource groups stops a whole-subscription run; for one resource group, run `ResourceInventory.ps1` with `-SubscriptionID` and `-ResourceGroup` (see [Targeting a single subscription or resource group](#targeting-a-single-subscription-or-resource-group)).
+
+Consumption (usage) data needs the permission `Microsoft.Commerce/UsageAggregates/read` on every subscription in the run, granted at the subscription or above (a role on a resource group does not return usage). The built-in **Reader** and **Billing Reader** roles include it. **Cost Management Reader does not**, so it is not enough for consumption data on its own.
+
+Before any other work, the run checks the signed-in identity's roles on every subscription, then (when consumption is requested) that usage values come back, and stops with exit code 1 if either fails (see [Subscription access check](#subscription-access-check-up-front) and [Consumption data check](#consumption-data-check-up-front)).
 
 ### Environment Options
 
@@ -212,10 +217,12 @@ The wrapper always covers the whole tenant. To scope a run to **one** subscripti
 ./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012"
 ```
 
-**Scan a specific resource group:**
+**Scan a specific resource group** (`-ResourceGroup` needs `-SubscriptionID`):
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -ResourceGroup "MyResourceGroup"
+./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012" -ResourceGroup "MyResourceGroup"
 ```
+
+Direct runs check Reader access up front too (see [Subscription access check](#subscription-access-check-up-front)). With `-ResourceGroup`, Reader on that one resource group is enough, and the [consumption data check](#consumption-data-check-up-front) looks for usage values of that resource group.
 
 ### Running Across All Subscriptions
 
@@ -247,23 +254,40 @@ The wrapper prints the count of excluded subscriptions and a per-state breakdown
 
 #### Subscription access check (up-front)
 
-Before doing any inventory work, `Run-AllSubscriptions.ps1` verifies that the signed-in identity can actually read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity has no role on — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions (and, for consumption data, it can even attribute one subscription's billing to another).
+Before doing any inventory work, `Run-AllSubscriptions.ps1` and a direct run of `ResourceInventory.ps1` check that the signed-in identity's roles let it read every in-scope subscription. This matters because Azure Resource Graph returns **zero rows rather than an authorization error** for a subscription the identity cannot read — so a missing Reader assignment is otherwise invisible until the finished report turns out to be silently missing subscriptions.
 
-The check makes one cheap control-plane call per subscription (`az group list`) to classify it as readable, no-access, or inconclusive (a transient/throttled probe is retried before it is accepted).
+For each subscription the check uses two answers: the identity's own role assignments (including roles given through groups) with their role definitions, and Azure's report of the identity's effective permissions there. A subscription passes when both show read access, or when the identity cannot see its role assignments (it has no `Microsoft.Authorization` read) and Azure reports read access. With any other result the subscription is not readable, including when the two answers disagree: role changes can take a few minutes to reach every Azure service, so after changing roles wait about 5 minutes before re-running. A direct run with `-SubscriptionID` and `-ResourceGroup` checks that resource group instead, so Reader on that resource group is enough. The check runs with or without `-SkipConsumption`; when consumption is requested it also prints whether the roles include the usage permission, which the [consumption data check](#consumption-data-check-up-front) uses for subscriptions that return no usage values.
 
-By default, if **any** in-scope subscription is not readable, the wrapper lists the offending subscriptions (name, id, and reason) and **stops before doing any work**, so you can grant the missing Reader role and re-run:
+A subscription that is not readable is **skipped**: right after the check the run lists each one (name, id, the roles it found, and the reason) with the fix, and collects the other subscriptions. The skipped subscriptions are listed again at the end of the run, because the report does not contain them. Skipping does not change the exit code. This applies to `Run-AllSubscriptions.ps1` and to a direct run of `ResourceInventory.ps1` over every visible subscription. When **no** checked subscription is readable, for example the one a direct run names with `-SubscriptionID`, the run lists them with the fix and **stops before doing any work** with exit code 1 (for `-Resume`, see below).
 
-```powershell
-./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012"
-```
+`-AllowPartialAccess` is still accepted, so existing command lines keep working, but skipping is now the default and the switch changes nothing.
 
-If you *intentionally* have access to only a subset of the tenant, pass `-AllowPartialAccess` to skip the unreadable subscriptions and inventory the rest instead of stopping:
+On `-Resume`, only the subscriptions that still need processing are checked. When none of them is readable but the resume state records other subscriptions in the run as completed, `-Resume` does not stop: it skips and lists the unreadable ones as above and finishes the run with nothing left to collect. That run uses one stream whatever `-ParallelStreams` is, so the completed subscriptions are skipped, not collected again; its `Parallelism:` line says so. When it clears the resume state it also deletes the per-stream state files an interrupted parallel run left, so the next `-Resume` starts fresh. When no subscription in the run is recorded as completed, `-Resume` stops like any other run, and the fix ends in running `-Resume` again: a run without `-Resume` checks the same subscriptions, and when the identity has no read role on them it stops the same way. A run without `-Resume` stops whenever none of the subscriptions it checks is readable. A subscription skipped because its check could not finish, or because the two answers disagree (usually right after a role change), stays on the retry list (`FailedAttempts`) as a failed run, also when the run stops: the resume state is kept, `-Resume` and `-ResumeFailedOnly` check it again, and the retry limit ends its retries if it keeps failing. One skipped because the identity has no read role is not put on the retry list. If a skipped subscription is on the retry list, the end-of-run `Pending Retries` lines name it with its reason and the fix to apply before `-ResumeFailedOnly` can retry it. The check runs once, before subscriptions are split across parallel streams, so it applies to both sequential and parallel runs. Role assignments at a management group or the tenant root count.
 
-```powershell
-./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -AllowPartialAccess
-```
+Read access means one role that can read **every** resource type. Azure Resource Graph leaves out, without an error, the resources of any type the identity cannot read, so a role whose not-actions remove reads of some resource types (a not-action that, with `*` standing for any characters, can match an action ending in `/read`, such as `*/read`, `Microsoft.Compute/*`, `Microsoft.Comp*`, `Microsoft.Compute/*/r*` or `Microsoft.Compute/virtualMachines/read`, but not `Microsoft.Compute/*/delete` or `*/write`) does not count, and the subscription is not readable, with a reason such as `role 'Custom reader' at subscription excludes 'Microsoft.Compute/*/read'; the inventory would miss those resources`. Not-actions confined to `Microsoft.Authorization`, `Microsoft.Commerce`, `Microsoft.Consumption` or `Microsoft.Billing` are allowed, because the inventory reads no resources of those namespaces; the text before the first `*` must name the namespace and a `/`, so `Microsoft.Authorization/*` is allowed but `Microsoft.Auth*`, which can also match other namespaces, is not. Each role is judged on its own, as Azure does, so Reader next to such a custom role passes. Two narrower roles that only together cover every resource type do not count either; add Reader instead. Such a subscription is skipped like any other that is not readable.
 
-On `-Resume`, only the subscriptions that still need processing are probed. The check runs once, before subscriptions are split across parallel streams, so it applies to both sequential and parallel runs.
+The list says what to do for each cause: grant Reader (no read access, or a resource group that is not found), re-run (the check could not finish, for example persistent throttling or a role assignment list longer than 1000 pages), or wait 5 minutes and re-run (the two answers disagree, usually right after a role change).
+
+#### Consumption data check (up-front)
+
+Consumption (usage) data is what prices the business case: it shows whether a machine ran 4 hours or 400. Azure's usage API returns **no error and zero rows** to an identity that lacks `Microsoft.Commerce/UsageAggregates/read`, so without a check a missing permission only shows up as an empty consumption sheet in the finished report.
+
+Whenever consumption is requested (`-SkipConsumption` not passed), `Run-AllSubscriptions.ps1` and a direct run of `ResourceInventory.ps1` both check every subscription the run will process (the readable ones; skipped subscriptions are not checked), before any inventory or metrics work. A subscription passes when the same query the consumption phase runs (daily usage for the last 31 days, ending at the start of yesterday in UTC) returns at least one usage row with a quantity above zero. The window is worked out once per run and the consumption phase collects that same window, even for a subscription collected after midnight. A direct run with `-ResourceGroup` checks that resource group: only usage rows whose resource is in it count (the rows its consumption sheet keeps), and the resource group is not checked when Resource Graph shows no resources in it. Throttling, timeouts and server errors are retried with a short backoff; a permission error or a rejected request is not retried.
+
+A subscription that holds resources but returns no usage above zero (no rows, or only zero quantities) **passes with a yellow warning** (outcome `NoUsage`) when the role check confirmed `Microsoft.Commerce/UsageAggregates/read` for it at the subscription or above by both of its answers: the identity's role assignments and Azure's effective permissions. The warning names the role and scope, the window, the typical causes (a new subscription, only free resources such as virtual networks or network security groups, or paused resources), and that the subscription's consumption sheet will be empty. These subscriptions are listed again at the end of the run. The exit code is not changed.
+
+The run lists every failing subscription (name, id, outcome and the window queried) with the fix, and **stops with exit code 1**, when any subscription:
+
+- returns no usage above zero and the usage permission was not confirmed by both answers (for example role assignments not visible to the identity, the two answers disagreeing, or the permission granted only on a resource group);
+- returns a permission error (`Denied`), or an error that persists after the retries (`Error`).
+
+To inventory without consumption data, re-run with `-SkipConsumption`. The check reads at most 50 pages of usage per subscription; if none of them has a quantity above zero it is treated as only zero quantities, and the output says only the first 50 pages were read. When that subscription passes as `NoUsage`, the warning says only that the first 50 pages held no usage above zero, not that its consumption sheet will be empty: the consumption phase reads every page.
+
+A subscription with no resources at all in Resource Graph is not checked, because there is nothing to price, and the output says so.
+
+On `-Resume` and `-ResumeFailedOnly`, only the subscriptions the run will process are checked. When `Run-AllSubscriptions.ps1` runs `ResourceInventory.ps1` for each subscription, the check is not repeated.
+
+Both up-front checks run up to 8 subscriptions at a time and print one line per subscription, in subscription order. Every Azure call names its subscription, so the checks never switch the Azure context. Per subscription, the role check makes 2 Azure calls (the role assignment list and Azure's effective permissions; a `-ResourceGroup` run with consumption also asks for the subscription's permissions), and each role definition is read once per run. The consumption data check calls the usage API that the consumption phase's `Get-UsageAggregates` wraps, with the same window and options, once per page until a usage value above zero comes back (usually one call), plus one Resource Graph query per 1,000 subscriptions for the resource counts.
 
 #### Resuming an interrupted run
 
@@ -304,7 +328,7 @@ When you run with `-ParallelStreams`, several things change in the output:
 
 - The wrapper's own narration (which subscription a stream is starting, which one it finished) is prefixed with `[stream-N]`. The inner script's `Write-Host` and `Write-Log` output is **not** prefixed and will interleave across streams in the transcript. Use the per-stream summary at the end of the run, or the per-stream failures log, to disambiguate.
 - Each stream writes its own failure log to `InventoryReports/RunAllSubscriptions_failures_<timestamp>_stream-<N>.log`. At the end of the run, the wrapper merges those into a single combined failure log so you only have one file to read.
-- Each stream tracks its own progress in a separate resume-state file. When the run finishes, those are merged into the main resume-state file. This means `-Resume` works the same way regardless of whether the previous run was sequential or parallel — but only if the previous run reached the post-aggregation step. If you Ctrl+C a parallel run mid-stream, the per-stream resume files are still on disk; running `-Resume` on the next attempt will read them and skip the subs each stream had already completed.
+- Each stream tracks its own progress in a separate resume-state file. When the run finishes, those are merged into the main resume-state file. This means `-Resume` works the same way regardless of whether the previous run was sequential or parallel — but only if the previous run reached the post-aggregation step. If you Ctrl+C a parallel run mid-stream, the per-stream resume files are still on disk; running `-Resume` on the next attempt will read them and skip the subs each stream had already completed. A per-stream file that cannot be read (for example one cut short when the session ended) is not used: the run prints a warning naming it, renames it in place to `<name>.unreadable-<UTC time>`, with `-2`, `-3` and so on added when that name is taken (kept for inspection; no later run reads it, and neither the wrapper's zips nor a zip step that takes `*.json` files picks it up), collects the subscriptions it listed again (under `-ResumeFailedOnly`, which retries only the retry list, a later `-Resume` collects them), and, when the run reaches its end, says whether the resume state was cleared or kept instead of `Resume state cleared (clean run).` The end-of-run merge of a parallel run does the same with a per-stream file it cannot read (a later `-Resume` collects its subscriptions). A file that cannot be moved aside is left alone and named with the command that removes it: at the start the run stops there with exit 1, before it collects anything; found by the end-of-run merge, the run ends with exit 1 in place of 0 and 3-5 (exit 2 keeps its code). If a resume state file cannot be removed at the end of a run that clears the state, the run names it in a warning and does not print `Resume state cleared (clean run).`; when a per-stream state file is left, the main resume state file is kept as well, so the next `-Resume` reads the same state again.
 
 Authentication only happens once. The wrapper saves the parent process's Az PowerShell context to a file and each stream loads it, so you don't get prompted to sign in again for each parallel worker. The wrapper deletes that snapshot file when the run ends, including if you cancel with Ctrl+C or a stream crashes during startup.
 
@@ -440,7 +464,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
-| `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Skip cost/billing data collection and the up-front [consumption data check](#consumption-data-check-up-front) | False | `-SkipConsumption` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
 | `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
 
@@ -504,12 +528,12 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `Resume` | Switch | Skip subscriptions already completed in a prior run. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. | False | `-Resume` |
 | `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
 | `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
-| `AllowPartialAccess` | Switch | Change the up-front access check from hard-stop to skip-and-continue. By default the wrapper verifies read access to every in-scope subscription before any work and **stops** if any is unreadable (see [Subscription access check](#subscription-access-check-up-front)). With this switch, unreadable subscriptions are skipped (and listed) and the run proceeds with the accessible ones. | False | `-AllowPartialAccess` |
+| `AllowPartialAccess` | Switch | Accepted so existing command lines keep working; it changes nothing. Skipping unreadable subscriptions (listed at the start and the end of the run) and collecting the rest is now the default (see [Subscription access check](#subscription-access-check-up-front)). | False | `-AllowPartialAccess` |
 | `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
-| `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection and the up-front [consumption data check](#consumption-data-check-up-front). | False | `-SkipConsumption` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
 
 ## Troubleshooting
@@ -530,14 +554,23 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Tenant-domain-style `-TenantID` (e.g. `contoso.onmicrosoft.com`) is resolved via Microsoft's public OIDC discovery endpoint, no sign-in needed. Pass the tenant GUID directly if discovery fails.
 
 **Subscription returned 0 resources:**
-- Almost always a permission gap: the signed-in identity does not have Reader on that specific subscription. The wrapper prints the exact `az graph query` acid-test command to confirm.
-- Less commonly, the subscription is genuinely empty.
+- Both scripts stop up front when the identity's roles do not let it read a subscription (see [Subscription access check](#subscription-access-check-up-front)), so a subscription that passed that check and returned 0 resources is genuinely empty; the wrapper labels it that way at the end of the run.
 - Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
 
-**Run stops immediately with "not authorized to read consumption/billing data":**
-- `Run-AllSubscriptions.ps1` verifies consumption (billing) access up front whenever consumption is requested (i.e. `-SkipConsumption` was **not** passed). If the signed-in identity can't read consumption data, the run **hard-fails immediately** rather than producing reports silently missing the billing data you asked for.
-- Fix: grant the identity **Cost Management Reader** (or **Billing Reader** on the billing scope), then re-run — or re-run with `-SkipConsumption` to inventory without billing data.
-- Note: this is a genuine authorization denial. A transient/token issue (Conditional Access, expired token, throttling) is **not** treated as a hard fail here — it warns and continues, and per-subscription consumption health is still reported at the end of the run.
+**"subscription(s) are NOT readable by the signed-in identity" (those subscriptions are skipped; the run stops only when none is readable):**
+- `no role grants read access (roles visible: ...)`: none of the listed roles can read resources at the subscription (for example Reader on one resource group only, or Billing Reader only). Grant Reader at the subscription, or for one resource group run `ResourceInventory.ps1 -SubscriptionID ... -ResourceGroup ...`.
+- `no read access (role assignments not visible to this identity)`: the identity cannot see its role assignments and Azure reports no read access. Grant Reader at the subscription.
+- `role assignments show ..., but Azure reports ...`: the two answers disagree, usually right after a role change. Wait about 5 minutes and re-run.
+- `role check inconclusive after retries`: throttling or a network error persisted, or the identity's role assignment list was longer than 1000 pages; re-run.
+- `role '...' at ... excludes '...'; the inventory would miss those resources`: the role reads resources except some resource types, which Resource Graph would leave out without an error. Grant Reader at the subscription (Reader beside the custom role is enough).
+
+**Run stops immediately with "Consumption data was requested (no -SkipConsumption), but ... returned no usage values":**
+- Whenever consumption is requested, `Run-AllSubscriptions.ps1` and a direct run of `ResourceInventory.ps1` check that every subscription in the run returns usage values before doing any other work (see [Consumption data check](#consumption-data-check-up-front)). If one does not, the run lists each failing subscription and **stops with exit code 1** rather than producing a report without consumption data.
+- Each failing subscription shows one of these outcomes: `NoRows` (the query succeeded but returned no usage rows; for a `-ResourceGroup` run, none for that resource group), `NoPositiveQuantity` (rows came back, none with a quantity above zero, or none in the first 50 pages), `Denied` (the query was refused for lack of permission), or `Error` (any other failure that persisted after retries).
+- `NoRows` and `NoPositiveQuantity` stop the run only when the role check did not confirm the usage permission by both of its answers. A subscription whose roles and Azure's effective permissions both include it passes with a yellow `NoUsage` warning instead (see [Consumption data check](#consumption-data-check-up-front)): typically a new subscription, one with only free resources, or one whose resources are paused. Its consumption sheet is empty.
+- Fix: give the signed-in identity `Microsoft.Commerce/UsageAggregates/read` on each listed subscription, at the subscription or above. The built-in **Reader** and **Billing Reader** roles include it; **Cost Management Reader does not**. Under "Usage permission found by the role check" the run says per subscription whether its roles include it.
+- If the identity already has it, the subscription may be partner-managed (CSP) without cost visibility for this identity, or on an offer the legacy usage API (`Get-UsageAggregates`) does not serve.
+- Or re-run with `-SkipConsumption` to inventory without consumption data.
 
 **Consumption sheet empty across many subs:**
 - Usually a broken `Az` PowerShell module install (manifest present, bundled MSAL/Azure.Core assemblies missing or version-mismatched).
@@ -578,13 +611,15 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 | Code | Meaning |
 |---|---|
 | `0` | Clean run — no failures of any kind. |
-| `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
+| `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start), or, found at the end of a run, a per-stream resume state file that cannot be read or moved aside (below). This includes the consumption data check stopping the run because a subscription returned no usage values (see [Consumption data check](#consumption-data-check-up-front)), and a per-stream resume state file that cannot be read and cannot be moved aside: at the start of `-Resume` or `-ResumeFailedOnly` the run stops before it collects anything, and found by the end-of-run merge the run ends with exit 1 in place of 0 and 3-5. |
 | `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |
 
 Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
+
+A direct run of `ResourceInventory.ps1` also ends with exit code `1` when the consumption data check stops it.
 
 ### Important Notes
 

@@ -19,16 +19,12 @@ param (
     [switch]$ResumeFailedOnly,
     [switch]$IncludeDisabled,
 
-    # By DEFAULT the wrapper verifies control-plane read access to EVERY in-scope
-    # subscription up front (one cheap native ARM resource-group read per sub)
-    # and HARD-STOPS
-    # before doing any work if the signed-in identity cannot read one or more of
-    # them - so an auth/permission gap is surfaced and fixed up front instead of
-    # producing a report silently missing subscriptions (and risking the
-    # consumption cross-attribution class of bug). Pass -AllowPartialAccess to
-    # override that gate: the inaccessible subscriptions are SKIPPED (listed
-    # loudly in the summary) and the run proceeds with the accessible ones. Use
-    # this only when you intentionally have Reader on a subset of the tenant.
+    # Accepted so existing command lines keep working; it changes nothing.
+    # Skipping is the default: the wrapper checks up front that the signed-in
+    # identity can read every in-scope subscription (its role assignments and
+    # Azure's effective permissions), SKIPS each one it cannot read (listed
+    # with the reason right after the check and again at the end of the run)
+    # and collects the rest. When none is readable the run stops with exit 1.
     [switch]$AllowPartialAccess,
 
     # DEPRECATED / no-op: the aggregate "main" HTML summary (run-wide totals, a
@@ -734,6 +730,18 @@ $FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
 # end-of-run merge still owns per-stream cleanup. Safe on non-interrupted runs: a
 # cleanly-finished parallel run deletes its per-stream files, so this finds none.
 # Runs at startup before any stream is launched, so it cannot race live streams.
+# A file that cannot be read is moved aside with a warning
+# (Move-UnreadableStreamStateFile) and its records are not used; only the files
+# read here are deleted when the run clears the state.
+$FoldedStreamFiles = @()
+$UnreadableStreamFiles = @()
+# Per-stream files the end-of-run merge could not read and could not move
+# aside: the run ends with exit 1 in place of 0 and 3-5.
+$StreamStateNotMoved = @()
+# Per-stream files the end-of-run merge read but kept: their records did not
+# reach the resume state on disk, or they could not be removed. They keep the
+# resume state, so the next -Resume folds them in again.
+$LeftStreamFiles = @()
 if ($Resume -or $ResumeFailedOnly)
 {
     $StrandedStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
@@ -741,19 +749,30 @@ if ($Resume -or $ResumeFailedOnly)
     {
         $StrandedCompleted = @()
         $StrandedFailed = @()
+        # A file that cannot be read (it cannot be parsed, parses to nothing,
+        # is not an object with a Completed list, or is not in the shape
+        # Write-StreamState writes: Read-StreamResumeStateFile) is moved aside
+        # (Move-UnreadableStreamStateFile); when one cannot be moved aside the
+        # run stops after this loop with exit 1, before any record is saved.
+        $UnreadableNotMoved = @()
         foreach ($StreamFile in $StrandedStreamFiles)
         {
-            try
+            $Obj = Read-StreamResumeStateFile -Path $StreamFile.FullName
+            if ($null -eq $Obj -or -not $Obj.PSObject.Properties['Completed'])
             {
-                $Obj = Get-Content -Path $StreamFile.FullName -Raw | ConvertFrom-Json
-                if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
-                if ($null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts) }
+                Write-Verbose ("Could not read stranded stream resume file {0}" -f $StreamFile.FullName)
+                $Unreadable = Move-UnreadableStreamStateFile -File $StreamFile -ResumeFailedOnly:$ResumeFailedOnly
+                if ($Unreadable.NotMoved) { $UnreadableNotMoved += $Unreadable }
+                else { $UnreadableStreamFiles = @(@($UnreadableStreamFiles | Where-Object { $null -ne $_ }) + $Unreadable) }
+                continue
             }
-            catch
-            {
-                Write-Verbose ("Could not read stranded stream resume file {0}: {1}" -f $StreamFile.FullName, $_.Exception.Message)
-            }
+            $FoldedStreamFiles = @(@($FoldedStreamFiles | Where-Object { $null -ne $_ }) + $StreamFile)
+            if ($null -ne $Obj.Completed) { $StrandedCompleted += @($Obj.Completed) }
+            # An older file has no FailedAttempts list (read under strict mode too).
+            # Its null entries ([null] is written for an empty list) are no failure.
+            if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts) { $StrandedFailed += @($Obj.FailedAttempts | Where-Object { $null -ne $_ }) }
         }
+        if ($UnreadableNotMoved.Count -gt 0) { Stop-WrongShapeStateNotMoved -Files $UnreadableNotMoved -ResumeFailedOnly:$ResumeFailedOnly }
         if ($StrandedCompleted.Count -gt 0)
         {
             $CompletedIds = @($CompletedIds + $StrandedCompleted | Sort-Object -Unique)
@@ -825,97 +844,95 @@ if ($ResumeFailedOnly)
 }
 
 # ---------------------------------------------------------------------------
-# Up-front access gate. Before ANY per-subscription work, verify the signed-in
-# identity can actually read every in-scope subscription. Azure Resource Graph
-# returns 0 rows (not a 403) for a subscription the identity has no role on, so a
-# permission gap is otherwise invisible until the report comes back silently
-# missing subscriptions - and can feed the consumption cross-attribution class of
-# bug. Catch it here instead. By default any inaccessible subscription HARD-STOPS
-# the run so the operator fixes access first; -AllowPartialAccess overrides that
-# to skip the inaccessible ones and continue. On -Resume only the subscriptions
-# this run will actually process (not already-completed ones) are probed. Runs
-# once in the parent, before the sequential/parallel split, so it gates both.
+# Up-front role check. Before ANY per-subscription work, verify from the
+# signed-in identity's roles that it can read every in-scope subscription
+# (Test-SubscriptionRoleAccessAll in Functions/Common.Functions.ps1: its role
+# assignments and Azure's caller-permissions answer, combined). Azure Resource
+# Graph returns 0 rows (not a 403) for a subscription the identity cannot read,
+# so a permission gap is otherwise invisible until the report comes back
+# silently missing subscriptions. A subscription that fails is skipped: it is
+# listed with the reason and the fix right after the check, and again at the
+# end of the run (Write-SkippedSubscriptionSummary). When none of the checked
+# subscriptions is readable the run stops with exit 1. -AllowPartialAccess is
+# accepted and changes nothing. On -Resume only the subscriptions this run will
+# actually process (not already-completed ones) are checked; when the resume
+# state records some subscriptions in scope as completed, the run does not
+# stop even if none of the checked ones is readable: it skips them as above
+# and finishes with nothing left to collect, with one stream (see
+# $NothingLeftToCollect below). A subscription skipped because its check could
+# not finish, or because the two answers disagree, also stays on the retry list
+# (Add-RoleCheckRetryAttempts). Runs once in the parent, before
+# the sequential/parallel split, so it gates both. The records
+# are kept for the end-of-run 0-resource labels.
+$AccessProbed = @()
+$AccessDecision = $null
 $ScopeForProbe = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }) } else { @($Subscriptions) }
 if ($ScopeForProbe.Count -gt 0)
 {
     Write-Host ("Verifying subscription access up front for {0} subscription(s)..." -f $ScopeForProbe.Count) -ForegroundColor Cyan
-    $AccessProbed = Test-SubscriptionAccessAll -Subscriptions $ScopeForProbe
-    $AccessDecision = Resolve-AccessPreflight -Probed $AccessProbed -AllowPartialAccess:$AllowPartialAccess
+    $AccessProbed = @(Test-SubscriptionRoleAccessAll -Subscriptions $ScopeForProbe -IncludeUsage:(-not $SkipConsumption))
+    # The subscriptions left out of the check are the completed ones (-Resume only).
+    $AccessDecision = Resolve-AccessPreflight -Probed $AccessProbed -CompletedCount (@($Subscriptions).Count - $ScopeForProbe.Count)
+    Write-AccessPreflightReport -Decision $AccessDecision -ScopeCount $ScopeForProbe.Count -Resume:$Resume
+    # A subscription skipped because the check could not finish, or because the
+    # two answers disagree while a role change takes effect, stays on the retry
+    # list as a failed run, also when the run stops here, so the state is kept
+    # and the retry limit ends its retries (Add-RoleCheckRetryAttempts).
+    $RoleCheckRetry = Add-RoleCheckRetryAttempts -FailedAttempts $FailedAttempts -CompletedIds $CompletedIds -Decision $AccessDecision
+    if ($RoleCheckRetry.Added.Count -gt 0)
+    {
+        $FailedAttempts = $RoleCheckRetry.FailedAttempts
+        $CompletedIds = $RoleCheckRetry.CompletedIds
+        Update-ResumeStateRetryList -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+    }
+    if ($AccessDecision.ShouldBlock)
+    {
+        Exit-Wrapper -Code 1
+    }
     if ($AccessDecision.Inaccessible.Count -gt 0)
     {
-        Write-Host ("  {0} subscription(s) are NOT readable by the signed-in identity:" -f $AccessDecision.Inaccessible.Count) -ForegroundColor Red
-        foreach ($NA in $AccessDecision.Inaccessible)
-        {
-            $Label = if ($NA.State -eq 'Unknown') { 'access probe inconclusive after retries' } else { 'no role on the subscription' }
-            Write-Host ("    - {0} ({1}) - {2}" -f $NA.Name, $NA.Id, $Label) -ForegroundColor Red
-        }
-        if ($AccessDecision.ShouldBlock)
-        {
-            Write-Host "  Stopping before any work. Grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
-            Write-Host "  (Or pass -AllowPartialAccess to skip them and inventory only the accessible subscriptions.)" -ForegroundColor Red
-            Exit-Wrapper -Code 1
-        }
-        Write-Host "  -AllowPartialAccess set: skipping the above and continuing with the accessible subscription(s)." -ForegroundColor Yellow
         $Subscriptions = @($Subscriptions | Where-Object { $AccessDecision.InaccessibleIds -notcontains $_.Id })
-        if ($Subscriptions.Count -eq 0)
-        {
-            Write-Host "No accessible subscriptions remain in scope; nothing to process." -ForegroundColor Yellow
-            Exit-Wrapper -Code 1
-        }
-    }
-    else
-    {
-        Write-Host ("  Access verified: all {0} in-scope subscription(s) are readable." -f $ScopeForProbe.Count) -ForegroundColor Green
     }
 }
 
 # ---------------------------------------------------------------------------
-# Up-front consumption (billing) access gate. Consumption was REQUESTED unless
-# -SkipConsumption was passed. If the signed-in identity is not authorized to
-# read consumption data, every subscription's consumption phase would fail and
-# the run would produce reports silently missing the billing data the operator
-# explicitly asked for. That is a HARD failure - fail fast, before spending
-# time on inventory and metrics, rather than hand back an incomplete report.
+# Up-front consumption data check. Consumption was REQUESTED unless
+# -SkipConsumption was passed, and a run without usage values cannot price the
+# business case, so before any inventory or metrics work every subscription
+# this run will process must return at least one usage row with a quantity
+# above zero for the billing phase's own window (Invoke-ConsumptionDataCheck in
+# Functions/Common.Functions.ps1). Zero rows, all-zero rows, a permission
+# error, or an error that persists after retries stops the run with exit 1,
+# listing every failing subscription and the fix. Subscriptions with no
+# resources in Resource Graph are not checked (nothing to price).
 #
-# Runs AFTER the access gate above, so $Subscriptions[0] is already known to be
-# control-plane-readable (inaccessible subs have either hard-stopped the run or,
-# under -AllowPartialAccess, been removed from $Subscriptions) - a 403 here is
-# therefore a genuine BILLING-RBAC denial, not just "no role on that sub".
-# consumption/billing RBAC is usually uniform across a tenant, so we probe the
-# FIRST subscription as the access signal. We hard-fail ONLY on a clear
-# authorization denial; a transient/token error (Conditional Access, expired
-# token, throttling) is NOT treated as a hard failure here - that is the
-# recoverable class the per-subscription consumption phase already handles and
-# reports. Operators who genuinely have mixed per-subscription billing access
-# can use -SkipConsumption.
-if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
+# Runs AFTER the role check above, so a failure here is about consumption
+# data, not about reading the subscription; on a refusal the role check's usage
+# verdict for each failing subscription is printed with the fix
+# (Write-UsageRoleReport). The role check records are passed in: a
+# subscription that returns no usage above zero passes with a warning
+# (outcome NoUsage, listed again in the summary) only when its role
+# assignments AND Azure's caller permissions both grant the usage permission
+# at the subscription or above; otherwise it stops the run as above.
+# Subscriptions the role check skipped are not checked. On -Resume only the
+# subscriptions this run will process are checked.
+#
+# The window is computed once here and passed to every ResourceInventory.ps1
+# this run starts (-ConsumptionWindowStart/-ConsumptionWindowEnd in
+# $InventoryPassthrough and the parallel workers' arguments), so a
+# subscription collected after midnight still collects the window checked
+# here.
+$ConsumptionWindow = Get-ConsumptionWindow
+$ConsumptionCheck = $null
+$ConsumptionCheckScope = if ($Resume) { @($Subscriptions | Where-Object { -not ($CompletedIds -contains $_.Id) }) } else { @($Subscriptions) }
+if (-not $SkipConsumption -and $ConsumptionCheckScope.Count -gt 0)
 {
-    $ConsumptionProbeSub = $Subscriptions[0]
-    Write-Host ("Verifying consumption (billing) access using subscription '{0}'..." -f $ConsumptionProbeSub.Name) -ForegroundColor Cyan
-    $ConsumptionAccess = Test-ConsumptionAccess -SubscriptionId $ConsumptionProbeSub.Id
-    if ($ConsumptionAccess.Outcome -eq 'Denied')
+    $ConsumptionCheck = Invoke-ConsumptionDataCheck -Subscriptions $ConsumptionCheckScope -RoleCheck $AccessProbed -Window $ConsumptionWindow
+    Write-ConsumptionDataCheckReport -Result $ConsumptionCheck
+    Write-UsageRoleReport -ConsumptionResult $ConsumptionCheck -RoleCheck $AccessProbed
+    if ($ConsumptionCheck.ShouldBlock)
     {
-        Write-Host ""
-        Write-Host "ERROR: Consumption data was requested (no -SkipConsumption), but the signed-in identity is not authorized to read consumption/billing data." -ForegroundColor Red
-        Write-Host ("Probed subscription: {0}" -f $ConsumptionProbeSub.Name) -ForegroundColor Red
-        if (-not [string]::IsNullOrWhiteSpace($ConsumptionAccess.Detail))
-        {
-            Write-Host ("Reason: {0}" -f $ConsumptionAccess.Detail) -ForegroundColor Red
-        }
-        Write-Host "Grant this identity 'Cost Management Reader' (or 'Billing Reader' on the billing scope), or re-run with -SkipConsumption to inventory without billing data." -ForegroundColor Yellow
         Exit-Wrapper -Code 1
-    }
-    elseif ($ConsumptionAccess.Outcome -eq 'Unavailable')
-    {
-        Write-Host "WARNING: Could not verify consumption access up front (a transient/token issue, not an authorization denial). Continuing; per-subscription consumption health is reported at the end of the run." -ForegroundColor Yellow
-        if (-not [string]::IsNullOrWhiteSpace($ConsumptionAccess.Detail))
-        {
-            Write-Host ("  Probe error (why it could not be verified): {0}" -f $ConsumptionAccess.Detail) -ForegroundColor DarkYellow
-        }
-    }
-    else
-    {
-        Write-Host "Consumption access confirmed." -ForegroundColor Green
     }
 }
 
@@ -940,7 +957,24 @@ $RamLabel = if ($AutoTune.RamGB -gt 0) { '{0} GB RAM' -f $AutoTune.RamGB } else 
 $StreamsSrc = if ($StreamsAuto) { 'auto' } else { 'explicit' }
 $ConcurrencySrc = if ($ConcurrencyAuto) { 'auto' } else { 'explicit' }
 Write-Host ("Host: {0} vCPU / {1}." -f $AutoTune.VCpu, $RamLabel) -ForegroundColor DarkGray
-Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
+# On -Resume with nothing left to collect (the role check skipped every
+# subscription left to check, and the others were completed by an earlier
+# run), use one stream: the sequential loop skips the completed subscriptions,
+# while the parallel streams and the one-subscription path would collect them
+# again. When this run clears the resume state, it also deletes the per-stream
+# state files an interrupted parallel run left (see the clean-up below).
+$NothingLeftToCollect = $Resume -and $null -ne $AccessDecision -and $AccessDecision.ReadableCount -eq 0 -and $AccessDecision.CompletedCount -gt 0
+if ($NothingLeftToCollect -and $ParallelStreams -gt 1)
+{
+    $StreamsAsked = if ($StreamsAuto) { 'the {0} chosen automatically' -f $ParallelStreams } else { 'the {0} passed' -f $ParallelStreams }
+    Write-Host ("Parallelism: -ParallelStreams 1 (nothing is left to collect, so one stream instead of {0}), -ConcurrencyLimit {1} ({2})." -f $StreamsAsked, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
+    $ParallelStreams = 1
+    $StreamsSrc = 'nothing left to collect'
+}
+else
+{
+    Write-Host ("Parallelism: -ParallelStreams {0} ({1}), -ConcurrencyLimit {2} ({3}). Pass either flag to override." -f $ParallelStreams, $StreamsSrc, $ConcurrencyLimit, $ConcurrencySrc) -ForegroundColor DarkGray
+}
 
 # Build passthrough hashtable for optional switches
 $InventoryPassthrough = @{}
@@ -954,6 +988,10 @@ if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 # behavior is unchanged for runs that don't pass it.
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
 if ($PSBoundParameters.ContainsKey('Debug')) { $InventoryPassthrough['Debug'] = $true }
+# The consumption window of the up-front check above, for every subscription.
+$ConsumptionWindowArgs = ConvertTo-ConsumptionWindowArgument -Window $ConsumptionWindow
+$InventoryPassthrough['ConsumptionWindowStart'] = $ConsumptionWindowArgs.ConsumptionWindowStart
+$InventoryPassthrough['ConsumptionWindowEnd'] = $ConsumptionWindowArgs.ConsumptionWindowEnd
 
 # Loop through each subscription and run ResourceInventory
 $SkippedCount = 0
@@ -1341,6 +1379,8 @@ else
                     SubscriptionIds    = $SliceIds
                     SubscriptionNames  = $SliceNames
                     ConcurrencyLimit   = $ConcurrencyLimit
+                    ConsumptionWindowStart = $ConsumptionWindowArgs.ConsumptionWindowStart
+                    ConsumptionWindowEnd   = $ConsumptionWindowArgs.ConsumptionWindowEnd
                 }
                 if ($Resume) { $WorkerArgs.Resume = $true }
                 if ($ResumeFailedOnly) { $WorkerArgs.ResumeFailedOnly = $true }
@@ -1518,30 +1558,36 @@ else
             $AllStreamFiles = @(Get-StreamResumeStateFiles -InventoryRoot $InventoryRoot -Tenant $TenantID)
             $AllCompletedFromStreams = @()
             $AllFailedFromStreams = @()
+            $ReadStreamFiles = @()
             foreach ($StreamFile in $AllStreamFiles)
             {
-                $PerStreamFile = $StreamFile.FullName
-                try
+                $Obj = Read-StreamResumeStateFile -Path $StreamFile.FullName
+                if ($null -eq $Obj -or -not $Obj.PSObject.Properties['Completed'])
                 {
-                    $Obj = Get-Content -Path $PerStreamFile -Raw | ConvertFrom-Json
-                    if ($null -ne $Obj.Completed)
-                    {
-                        $AllCompletedFromStreams += @($Obj.Completed)
-                    }
-                    # Per-stream files written by workers also carry their
-                    # FailedAttempts entries. Merge by Id so the unified
-                    # state file reflects every stream's failures, with the
-                    # most-recent attempt's Reason/LastFailedAt winning when
-                    # the same sub appears in multiple streams (which would
-                    # only happen across re-runs with different slicing).
-                    if ($null -ne $Obj.FailedAttempts)
-                    {
-                        $AllFailedFromStreams += @($Obj.FailedAttempts)
-                    }
+                    # Its records are not used, so none of the subscriptions it
+                    # lists counts as completed and a later -Resume collects
+                    # them. Moved aside with a warning, not deleted. One that
+                    # cannot be moved aside ends the run with exit 1 (below).
+                    $Unreadable = Move-UnreadableStreamStateFile -File $StreamFile -AtRunEnd
+                    $UnreadableStreamFiles = @(@($UnreadableStreamFiles | Where-Object { $null -ne $_ }) + $Unreadable)
+                    if ($Unreadable.NotMoved) { $StreamStateNotMoved += $Unreadable }
+                    continue
                 }
-                catch
+                $ReadStreamFiles += $StreamFile
+                if ($null -ne $Obj.Completed)
                 {
-                    Write-Verbose ("Could not read stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message)
+                    $AllCompletedFromStreams += @($Obj.Completed)
+                }
+                # Per-stream files written by workers also carry their
+                # FailedAttempts entries. Merge by Id so the unified
+                # state file reflects every stream's failures, with the
+                # most-recent attempt's Reason/LastFailedAt winning when
+                # the same sub appears in multiple streams (which would
+                # only happen across re-runs with different slicing).
+                # An older file has no FailedAttempts list.
+                if ($Obj.PSObject.Properties['FailedAttempts'] -and $null -ne $Obj.FailedAttempts)
+                {
+                    $AllFailedFromStreams += @($Obj.FailedAttempts | Where-Object { $null -ne $_ })
                 }
             }
             if ($AllCompletedFromStreams.Count -gt 0)
@@ -1551,20 +1597,56 @@ else
             # Reconcile failed attempts from all streams against the unified list.
             # See Merge-FailedAttempts for the recency/completion rules.
             $FailedAttempts = Merge-FailedAttempts -ExistingFailedAttempts $FailedAttempts -StreamFailedAttempts $AllFailedFromStreams -CompletedIds $CompletedIds
+            $StreamStateSaved = $true
             if ($AllCompletedFromStreams.Count -gt 0 -or $AllFailedFromStreams.Count -gt 0)
             {
                 Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts
+                # Read back: Save-CompletedSubscriptionIds only warns when its
+                # write fails, and the per-stream files may then hold the only
+                # copy of their records.
+                # Whole entries are compared (id, attempts, time, reason), and
+                # the completed list as a set, so an older file that only shares
+                # the ids does not count as saved.
+                # (A time is compared as UTC: ConvertFrom-Json reads it back as a date.)
+                $EntryText = {
+                    param($E)
+                    $When = if ($E.PSObject.Properties['LastFailedAt']) { $E.LastFailedAt } else { $null }
+                    $WhenText = try { if ($null -eq $When -or [string]$When -eq '') { '' } else { ([datetime]$When).ToUniversalTime().ToString('o') } } catch { [string]$When }
+                    '{0}|{1}|{2}|{3}' -f [string]$E.Id, [string]$(if ($E.PSObject.Properties['Attempts']) { $E.Attempts }), $WhenText, [string]$(if ($E.PSObject.Properties['Reason']) { $E.Reason })
+                }
+                $SavedIds = @(Get-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID | Sort-Object -Unique)
+                $SavedEntries = @(Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID | Where-Object { $null -ne $_ } | ForEach-Object { & $EntryText $_ } | Sort-Object)
+                $WantIds = @($CompletedIds | Sort-Object -Unique)
+                $WantEntries = @($FailedAttempts | Where-Object { $null -ne $_ } | ForEach-Object { & $EntryText $_ } | Sort-Object)
+                $StreamStateSaved = (($SavedIds -join "`n") -ceq ($WantIds -join "`n")) -and (($SavedEntries -join "`n") -ceq ($WantEntries -join "`n"))
             }
             # Also delete per-stream resume files now that the unified file holds
             # the truth - this prevents drift if a future run uses a different
-            # stream count. Reuses the same on-disk discovery ($AllStreamFiles)
-            # as the merge loop above, so every file that was just merged is also
-            # the one that gets cleaned up here - regardless of this run's
-            # -ParallelStreams value.
-            foreach ($StreamFile in $AllStreamFiles)
+            # stream count. Only the files the merge loop above read are
+            # deleted, whatever this run's -ParallelStreams value, and only once
+            # the resume state on disk holds their records; one it could not
+            # read was moved aside (or, when it could not be, left alone). A
+            # file kept, or one that cannot be removed, keeps the resume state.
+            if (-not $StreamStateSaved)
             {
-                $PerStreamFile = $StreamFile.FullName
-                try { Remove-Item -Path $PerStreamFile -Force } catch { Write-Verbose ("Could not remove stream resume file {0}: {1}" -f $PerStreamFile, $_.Exception.Message) }
+                if ($ReadStreamFiles.Count -gt 0)
+                {
+                    Write-Host ("WARNING: The resume state file {0} does not hold every record of this run's per-stream files, so they are kept for the next run: {1}" -f $ResumeStateFile, (@($ReadStreamFiles | ForEach-Object { $_.FullName }) -join ', ')) -ForegroundColor Yellow
+                    $LeftStreamFiles += @($ReadStreamFiles | ForEach-Object { $_.FullName })
+                }
+            }
+            else
+            {
+                foreach ($StreamFile in $ReadStreamFiles)
+                {
+                    $PerStreamFile = $StreamFile.FullName
+                    try { Remove-Item -LiteralPath $PerStreamFile -Force -ErrorAction Stop }
+                    catch
+                    {
+                        Write-Host ("WARNING: Could not remove the per-stream resume state file {0}: {1}. Its records are saved; this run keeps the resume state. Remove it before the next run." -f $PerStreamFile, $_.Exception.Message) -ForegroundColor Yellow
+                        $LeftStreamFiles += $PerStreamFile
+                    }
+                }
             }
         }
         finally
@@ -1676,6 +1758,12 @@ if ($ExpectedZipCount -gt 0 -and (Test-Path -Path $InventoryRoot -PathType Conta
         {
             Write-Host ("Wrapper Transcript:      {0}" -f $WrapperTranscriptFile) -ForegroundColor Yellow
         }
+        # A per-stream state file the end-of-run merge could not move aside is
+        # named here too, with what to do; exit 2 keeps its code.
+        if ($StreamStateNotMoved.Count -gt 0)
+        {
+            Stop-WrongShapeStateNotMoved -Files $StreamStateNotMoved -AfterCollection -NoExit -ResumeFailedOnly:$ResumeFailedOnly
+        }
         Exit-Wrapper -Code 2
     }
     Write-Host ("Per-subscription output verification: OK ({0} zip(s) match {0} successful sub(s))" -f $ActualZipCount) -ForegroundColor Green
@@ -1760,18 +1848,35 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $LeftStreamFiles.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
     {
-        Remove-Item -Path $ResumeStateFile -Force
-        Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        # A run with one stream (a sequential run, or a -Resume run with
+        # nothing left to collect) does not run the parallel merge, which
+        # deletes the per-stream state files an interrupted parallel run left.
+        # Those files were folded into the state at startup; delete them the
+        # same way, or every later -Resume or -ResumeFailedOnly would fold
+        # their records in again. (After a parallel merge they are gone
+        # already.) Only files that were read are deleted; one that could not
+        # be read was moved aside and is kept. Each removal is checked
+        # (Remove-ResumeStateFiles): a run that leaves a file never says it
+        # cleared the state.
+        $StreamFilesToRemove = @($FoldedStreamFiles | Where-Object { $null -ne $_ -and (Test-Path -LiteralPath $_.FullName) } | ForEach-Object { $_.FullName })
+        $StateFilesLeft = @(Remove-ResumeStateFiles -StreamFiles $StreamFilesToRemove -StateFile $ResumeStateFile)
+        if ($StateFilesLeft.Count -eq 0 -and @($UnreadableStreamFiles | Where-Object { $null -ne $_ }).Count -eq 0)
+        {
+            Write-Host "Resume state cleared (clean run)." -ForegroundColor Green
+        }
     }
     catch
     {
         Write-Host ("WARNING: Could not remove resume state file {0}: $_" -f $ResumeStateFile) -ForegroundColor Yellow
     }
 }
+# A run that could not read a per-stream state file is not a clean run: say
+# whether the state was cleared or kept, and where that file went.
+Write-UnreadableStreamStateSummary -Unreadable $UnreadableStreamFiles -StateKept (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)
 
 # Final summary
 $Elapsed = (Get-Date) - $RunStartTime
@@ -1798,16 +1903,19 @@ if ($Resume)
     Write-Host ("Subscriptions Skipped:   {0} (already completed)" -f $SkippedCount) -ForegroundColor Green
 }
 Write-Host ("Subscriptions Processed: {0}" -f ($Subscriptions.Count - $SkippedCount)) -ForegroundColor Green
+# Subscriptions the up-front role check skipped (not readable), listed again
+# so a report without them is not taken for a complete one.
+Write-SkippedSubscriptionSummary -Decision $AccessDecision
 
 # Surface the per-subscription resource-count result so the user does not have
-# to scan individual transcripts to find subs that came back empty. Empty subs
-# are shown distinctly because they almost always indicate a permission gap;
-# treating them as "successful" in the summary is misleading.
+# to scan individual transcripts to find subs that came back empty.
 $EmptySubs = @($SubResourceCounts | Where-Object { $_.Count -eq 0 })
 $NonEmptySubs = @($SubResourceCounts | Where-Object { $_.Count -gt 0 })
 # Initialised here (not only inside the 0-resource branch below) so the
 # run-summary finalization can read them unconditionally even when there
-# were no empty subscriptions to classify.
+# were no empty subscriptions to classify. $NoAccessSubs stays empty: a
+# subscription the identity cannot read is skipped by the up-front role check
+# and never reaches this point.
 $NoAccessSubs = @()
 $GenuinelyEmptySubs = @()
 $UnknownSubs = @()
@@ -1818,51 +1926,34 @@ if ($SubResourceCounts.Count -gt 0)
 }
 if ($EmptySubs.Count -gt 0)
 {
-    # A sub that returned 0 resources is either a permission gap (no role on the
-    # sub) or genuinely empty. Probe each one to label it precisely so the user
-    # knows whether to fix access or ignore it. The probe is one cheap ARM call
-    # per empty sub (only empties, so no cost on normal runs).
-    $NoAccessSubs = @()
-    $GenuinelyEmptySubs = @()
-    $UnknownSubs = @()
-    foreach ($e in $EmptySubs)
-    {
-        switch (Get-SubscriptionAccessState -SubscriptionId $e.Id)
-        {
-            'NoAccess' { $NoAccessSubs += $e }
-            'Empty' { $GenuinelyEmptySubs += $e }
-            default { $UnknownSubs += $e }
-        }
-    }
+    # Every subscription this run processed passed the up-front role check, so
+    # one that returned 0 resources is genuinely empty. Any the role check did
+    # not cover are listed as undetermined rather than guessed at.
+    $EmptySplit = Split-EmptySubscriptionsByRoleCheck -EmptySubscriptions $EmptySubs -RoleCheck $AccessProbed
+    $GenuinelyEmptySubs = @($EmptySplit.Empty)
+    $UnknownSubs = @($EmptySplit.Undetermined)
 
     Write-Host ""
     Write-Host ("Subscriptions with 0 resources: {0}" -f $EmptySubs.Count) -ForegroundColor Yellow
 
-    if ($NoAccessSubs.Count -gt 0)
-    {
-        Write-Host ("  NO ACCESS ({0}) - the signed-in identity has no role on these subscriptions:" -f $NoAccessSubs.Count) -ForegroundColor Red
-        foreach ($e in $NoAccessSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Red }
-        Write-Host "    Fix: grant the identity Reader on these subscriptions, then re-run." -ForegroundColor Red
-    }
     if ($GenuinelyEmptySubs.Count -gt 0)
     {
-        Write-Host ("  GENUINELY EMPTY ({0}) - access confirmed, the subscription has no resources:" -f $GenuinelyEmptySubs.Count) -ForegroundColor Yellow
+        Write-Host ("  GENUINELY EMPTY ({0}) - the up-front role check found read access; the subscription has no resources:" -f $GenuinelyEmptySubs.Count) -ForegroundColor Yellow
         foreach ($e in $GenuinelyEmptySubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
         Write-Host "    No action needed - these are expected to be empty in the report." -ForegroundColor DarkGray
     }
     if ($UnknownSubs.Count -gt 0)
     {
-        Write-Host ("  UNDETERMINED ({0}) - access probe was inconclusive (transient error / throttling):" -f $UnknownSubs.Count) -ForegroundColor Yellow
+        Write-Host ("  UNDETERMINED ({0}) - not covered by this run's up-front role check:" -f $UnknownSubs.Count) -ForegroundColor Yellow
         foreach ($e in $UnknownSubs) { Write-Host ("    - {0} ({1})" -f $e.Name, $e.Id) -ForegroundColor Yellow }
-        Write-Host "    Verify manually (PowerShell): (Invoke-AzRestMethod -Method GET -Path '/subscriptions/<id>/resourcegroups?api-version=2021-04-01').StatusCode" -ForegroundColor Yellow
+        Write-Host "    Re-run for these subscriptions so the role check covers them." -ForegroundColor Yellow
     }
 
-    # Persist the per-subscription access verdict to the diagnostic log so it
+    # Persist the per-subscription verdict to the diagnostic log so it
     # outlives the console/transcript and can be attached to a ticket or e-mail.
-    # This is the durable record behind the on-screen labels above: which
-    # 0-resource subs are a permission gap (fix: grant Reader, re-run -Resume)
-    # vs genuinely empty (no action). Reuses the run's $DiagFile if one already
-    # exists (e.g. from a failure), otherwise creates one.
+    # This is the durable record behind the on-screen labels above. Reuses the
+    # run's $DiagFile if one already exists (e.g. from a failure), otherwise
+    # creates one.
     if ($null -eq $DiagFile)
     {
         $DiagFile = Join-Path $InventoryRoot ("RunAllSubscriptions_diagnostics_{0}_{1}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff'), [guid]::NewGuid().ToString().Substring(0, 4))
@@ -1870,17 +1961,13 @@ if ($EmptySubs.Count -gt 0)
     $EmptyDiag = @()
     $EmptyDiag += "==== Subscriptions with 0 resources - access verdict ===="
     $EmptyDiag += "Timestamp: $(Get-Date -Format 'o')"
-    foreach ($e in $NoAccessSubs)
-    {
-        $EmptyDiag += ("NO_ACCESS {0} ({1}) - identity has no role on the subscription; grant Reader and re-run with -Resume" -f $e.Name, $e.Id)
-    }
     foreach ($e in $GenuinelyEmptySubs)
     {
-        $EmptyDiag += ("EMPTY {0} ({1}) - access confirmed, no resources; no action needed" -f $e.Name, $e.Id)
+        $EmptyDiag += ("EMPTY {0} ({1}) - read access found by the up-front role check, no resources; no action needed" -f $e.Name, $e.Id)
     }
     foreach ($e in $UnknownSubs)
     {
-        $EmptyDiag += ("UNDETERMINED   {0} ({1}) - access probe inconclusive; verify (PowerShell): (Invoke-AzRestMethod -Method GET -Path '/subscriptions/{1}/resourcegroups?api-version=2021-04-01').StatusCode" -f $e.Name, $e.Id)
+        $EmptyDiag += ("UNDETERMINED   {0} ({1}) - not covered by this run's up-front role check; re-run for it" -f $e.Name, $e.Id)
     }
     $EmptyDiag += ""
     try
@@ -1936,6 +2023,11 @@ if ($ConsumptionFailures.Count -gt 0)
     Write-Host "  Note: the consumption sheet in the output report may be empty or incomplete for these subscriptions." -ForegroundColor Yellow
     Write-Host ""
 }
+
+# Subscriptions the up-front consumption data check passed with no usage
+# values (outcome NoUsage): repeated here so their empty consumption sheet is
+# not mistaken for a collection failure.
+Write-NoUsageSummary -ConsumptionResult $ConsumptionCheck
 
 # Surface metrics-phase auth health. Mirrors the consumption block above:
 # metrics were requested (no -SkipMetrics) but skipped because no usable Azure
@@ -2004,11 +2096,14 @@ if ($FailedSubscriptions.Count -gt 0)
 }
 elseif ($FailedAttempts.Count -gt 0)
 {
-    # No new failures this run, but the resume-state file still has lingering
-    # FailedAttempts from a prior run that have not yet been retried. Surface
-    # them so the operator does not lose track of historical failures simply
-    # because the most recent run was clean.
-    Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
+    # No new failures this run, but the retry list still holds subscriptions:
+    # lingering FailedAttempts from a prior run that have not yet been retried,
+    # or ones this run's role check skipped for a cause that can pass on a
+    # later run. Surface them so the operator does not lose track of them
+    # simply because the most recent run was clean.
+    Write-Host ("Pending Retries:         {0} subscription(s) on the retry list (FailedAttempts)" -f $FailedAttempts.Count) -ForegroundColor Yellow
+    # Any of them the role check skipped as not readable, with the fix.
+    Write-PendingRetrySkippedSummary -FailedAttempts $FailedAttempts -Decision $AccessDecision
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
@@ -2167,6 +2262,14 @@ if (@($Global:CollectorFailures).Count -gt 0)
     Write-Host "=========================================================" -ForegroundColor Red
 }
 
+# A per-stream state file the end-of-run merge could not move aside: the run
+# above is finished; the stop says what to do, and the exit code is set below
+# (exit 1 in place of 0 and 3-5; exit 2 keeps its code).
+if ($StreamStateNotMoved.Count -gt 0)
+{
+    Stop-WrongShapeStateNotMoved -Files $StreamStateNotMoved -AfterCollection -NoExit -ResumeFailedOnly:$ResumeFailedOnly
+}
+
 # Stop the wrapper transcript on the normal-completion path. Error paths take
 # Exit-Wrapper which does the same.
 if ($WrapperTranscriptStarted)
@@ -2179,6 +2282,13 @@ if ($WrapperTranscriptStarted)
 $AuthSkipped = $AuthSkippedPhases.Count -gt 0
 $CollectorsFailed = @($Global:CollectorFailures).Count -gt 0
 $WrapperExitCode = Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed
+# A per-stream state file the merge could not move aside stops the next run at
+# its start: exit 1, in place of 0 and 3-5, so a caller acts on it. Exit 2
+# keeps its code; the stop above names the file either way.
+if ($StreamStateNotMoved.Count -gt 0 -and $WrapperExitCode -ne 2)
+{
+    exit 1
+}
 if ($WrapperExitCode -ne 0)
 {
     exit $WrapperExitCode

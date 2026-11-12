@@ -783,7 +783,7 @@ if ($StatePutAsideOnly)
 }
 if ($ResumeFailedOnly -and $StatePutAsideOnly)
 {
-    Write-Host ("ERROR: An earlier run could not save the resume state and put it aside as {0}, so -ResumeFailedOnly cannot tell which subscriptions are owed. Nothing was collected (exit 2). Run again with -Resume, or without either switch: it collects every subscription." -f ($StatePutAside -join ', ')) -ForegroundColor Red
+    Write-Host ("ERROR: An earlier run could not save the resume state and put it aside as {0}, so -ResumeFailedOnly cannot tell which subscriptions are owed. Nothing was collected (exit 2). Run again with -Resume, or without either switch: it skips no subscription as done." -f ($StatePutAside -join ', ')) -ForegroundColor Red
     Exit-Wrapper -Code 2
 }
 # Per-stream resume state files the end-of-run merge read and saved but could
@@ -998,7 +998,7 @@ if ($Resume)
     }
     elseif ($RecollectIds.Count -eq 0)
     {
-        if ($StatePutAsideOnly) { Write-Host ("Resume mode: an earlier run could not save the resume state (put aside as {0}); processing all subscriptions." -f ($StatePutAside -join ', ')) -ForegroundColor Cyan }
+        if ($StatePutAsideOnly) { Write-Host ("Resume mode: an earlier run could not save the resume state (put aside as {0}); no subscription is skipped as done." -f ($StatePutAside -join ', ')) -ForegroundColor Cyan }
         elseif (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf) { Write-Host "Resume mode: no completed subscriptions to skip; processing all subscriptions." -ForegroundColor Cyan }
         else { Write-Host "Resume mode: no previous state found; processing all subscriptions." -ForegroundColor Cyan }
     }
@@ -1363,6 +1363,29 @@ foreach ($StaleSummary in @(Get-ChildItem -LiteralPath $InventoryRoot -Filter '.
     catch { Write-Host ("WARNING: Could not remove the stream summary {0} an earlier run left: {1}. It is not read; remove it when you can." -f $StaleSummary.FullName, $_.Exception.Message) -ForegroundColor Yellow }
 }
 
+# Fail-safe rule, before anything is collected: a run without -Resume or
+# -ResumeFailedOnly collects again subscriptions an earlier run completed, so
+# their earlier completions are taken out of the saved resume state first (and
+# read back). Whatever then happens to this run (a failed save, a cut-off, a
+# stream that leaves no record), no later -Resume skips one of them on an older
+# result: each counts done again only when this run saves its new result. A
+# state that cannot be saved so stops the run here (exit 1).
+if (-not ($Resume -or $ResumeFailedOnly))
+{
+    $Redo = @($Subscriptions | Where-Object { $null -ne $_ -and $CompletedIds -contains [string]$_.Id } | ForEach-Object { [string]$_.Id })
+    if ($Redo.Count -gt 0)
+    {
+        $CompletedIds = @($CompletedIds | Where-Object { $Redo -notcontains [string]$_ })
+        $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and $Redo -notcontains [string]$_.Id })
+        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
+        if (-not (Test-ResumeStateSaved -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports))
+        {
+            Write-Host ("ERROR: The resume state file {0} could not be written without the earlier completions of the {1} subscription(s) this run collects again. Free disk space or fix the folder, then run again. Nothing was collected (exit 1)." -f $ResumeStateFile, $Redo.Count) -ForegroundColor Red
+            Exit-Wrapper -Code 1
+        }
+    }
+}
+
 if ($ParallelStreams -le 1)
 {
     # === SEQUENTIAL PATH (default) ============================================
@@ -1443,8 +1466,11 @@ if ($ParallelStreams -le 1)
                 {
                     $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
                     $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Sub.Id })
-                    $StateChanged = $true
                 }
+                # Not done, so one more failed run: the retry limit ends a sub
+                # that keeps leaving no zip.
+                $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id -Name $Sub.Name -Reason 'it left no report zip, so it is collected again'
+                $StateChanged = $true
             }
             else
             {
@@ -1664,8 +1690,10 @@ else
                     {
                         $CompletedIds = @($CompletedIds | Where-Object { $_ -ne $Sub.Id })
                         $CompletedReports = @($CompletedReports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $Sub.Id })
-                        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
                     }
+                    # Not done, so one more failed run, as in the sequential branch.
+                    $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $Sub.Id -Name $Sub.Name -Reason 'it left no report zip, so it is collected again'
+                    Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports
                 }
                 elseif (-not ($CompletedIds -contains $Sub.Id))
                 {
@@ -1978,6 +2006,8 @@ else
                 if ($StreamSummary.NoReport)
                 {
                     $StreamNoReportIds += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [string]$_.Id })
+                    # Not done, so one more failed run (fail-safe rule, below).
+                    $StreamUnproven += @($StreamSummary.NoReport | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.Id) } | ForEach-Object { [pscustomobject]@{ Id = [string]$_.Id; StreamId = $S.StreamId; Reason = 'it left no report zip, so it is collected again' } })
                 }
 
                 # The subs this stream says it completed: each must also be in its

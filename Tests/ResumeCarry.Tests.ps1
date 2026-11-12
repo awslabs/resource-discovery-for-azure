@@ -690,6 +690,33 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         Remove-Variable -Name RdaCarryTestFailIds, RdaCarryTestNoZipIds, RdaCarryTestHome -Scope Global -ErrorAction SilentlyContinue
     }
 
+    It 'a run without -Resume takes the earlier completions of the subs it collects again out of the saved state before it collects (<Case>)' -ForEach @(
+        @{ Case = 'saved'; SaveFails = $false }
+        @{ Case = 'the save does not reach the disk'; SaveFails = $true }
+    ) {
+        (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a')
+        $Top = @([System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null).EndBlock.Statements)
+        $Redo = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '-not ($Resume -or $ResumeFailedOnly)' -and $_.Extent.Text.Contains('$Redo = ') })
+        $Redo.Count | Should -Be 1
+        $Split = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ParallelStreams -le 1' })
+        $Redo[0].Extent.StartOffset | Should -BeLessThan $Split[0].Extent.StartOffset
+        $S = script:Read-State -Path $script:State
+        if ($SaveFails) { Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' } -MockWith { throw 'stand-in: disk full' } }
+        $Block = [scriptblock]::Create("param(`$Subscriptions, `$CompletedIds, `$FailedAttempts, `$CompletedReports, `$ResumeStateFile, `$TenantID)`n`$Resume = `$false; `$ResumeFailedOnly = `$false`nfunction Exit-Wrapper { param([int]`$Code) throw ('Exit-Wrapper ' + `$Code) }`n" + $Redo[0].Extent.Text)
+        if ($SaveFails)
+        {
+            { & $Block @($script:A, $script:B) $S.Completed @() $S.Reports $script:State 't' 6>$null } | Should -Throw 'Exit-Wrapper 1'
+            (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a') -Because 'nothing was collected, so the old state still holds'
+        }
+        else
+        {
+            & $Block @($script:A, $script:B) $S.Completed @() $S.Reports $script:State 't' 6>$null
+            $After = script:Read-State -Path $script:State
+            $After.Completed | Should -BeNullOrEmpty -Because 'a cut-off from here on leaves no older completion of sub-a for a -Resume to skip on'
+            $After.Reports | Should -BeNullOrEmpty
+        }
+    }
+
     It 'sequential: a run without -Resume fails sub-a, and the next -Resume collects it again' {
         $Global:RdaCarryTestFailIds = @('sub-a')
         $S = script:Read-State -Path $script:State
@@ -779,7 +806,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
 
         $After2.Completed | Should -BeNullOrEmpty -Because 'the latest run of sub-a left no report'
         $After2.Reports | Should -BeNullOrEmpty
-        $After2.Failed | Should -BeNullOrEmpty -Because 'a run that left no zip is not recorded as a failed attempt'
+        $After2.Failed | Should -Be @('sub-a') -Because 'a run that left no zip is one more failed run, so the retry limit ends a sub that keeps leaving none'
         $Post2.ExitCode | Should -Be 2 -Because 'the run that left no zip still ends at the output verification, as before'
         ($Post2.Text -join "`n") | Should -Match 'ERROR: Per-subscription output verification failed'
         @($R.Run.SkippedSubscriptions | ForEach-Object Id) | Should -BeNullOrEmpty -Because 'the -Resume run must not skip a subscription whose latest run left no report'
@@ -815,7 +842,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
 
         $After2.Completed | Should -Be @('sub-b') -Because 'the latest run of sub-a left no report'
         @($After2.Reports | ForEach-Object Id) | Should -Be @('sub-b')
-        $After2.Failed | Should -BeNullOrEmpty
+        $After2.Failed | Should -Be @('sub-a') -Because 'one more failed run'
         @($Summary.Completed) | Should -Be @('sub-b') -Because 'the stream does not count sub-a as completed either'
         @($Summary.NoReport | ForEach-Object Id) | Should -Be @('sub-a')
         @($Agg.SubResourceCounts | ForEach-Object Id) | Should -Be @('sub-a', 'sub-b') -Because 'sub-a still counts as collected this run, so the verification still sees its zip missing'
@@ -833,7 +860,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
 
         $After2.Completed | Should -BeNullOrEmpty -Because 'the latest run of sub-a left no report'
         $After2.Reports | Should -BeNullOrEmpty
-        $After2.Failed | Should -BeNullOrEmpty
+        $After2.Failed | Should -Be @('sub-a') -Because 'one more failed run'
         @($R.Run.SkippedSubscriptions | ForEach-Object Id) | Should -BeNullOrEmpty -Because 'the -Resume run must not skip a subscription whose latest run left no report'
         @($R.Run.SubResourceCounts | ForEach-Object Id) | Should -Be @('sub-a', 'sub-b')
     }
@@ -1353,7 +1380,7 @@ Describe 'A -Resume run on a state file written before CompletedReports existed'
         # -Resume: no state, so it skips nothing and says why.
         $Start = @(& $script:StartupBlock $script:Root 't' $script:State $true 6>&1)
         $Lines = @($Start | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { [string]$_.MessageData } | Where-Object { $_ -like 'Resume mode:*' })
-        $Lines | Should -Be @(('Resume mode: an earlier run could not save the resume state (put aside as {0}); processing all subscriptions.' -f $Mark))
+        $Lines | Should -Be @(('Resume mode: an earlier run could not save the resume state (put aside as {0}); no subscription is skipped as done.' -f $Mark))
         # A clean run that clears a state saved since removes the mark.
         Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @('sub-a') -FailedAttempts @() -Reports @()
         $IsClean = @($Top | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$RunClean' })

@@ -750,7 +750,7 @@ function CreateResourceJobs
     }
 
     It 'shows why the zip failed and does not report it on a direct run' {
-        $R = @(Invoke-InventoryRun -Name 'zip-fail-direct' -Runs @('function Compress-Archive { throw ''stand-in: no space left on device'' }') -Direct)
+        $R = @(Invoke-InventoryRun -Name 'zip-fail-direct' -Runs @('function Compress-RdaReportArchive { throw ''stand-in: no space left on device'' }') -Direct)
 
         $Output = [string]$R[0].Output
         $Output | Should -Match 'Error Compressing Output File: .*ResourcesReport_test\.zip: stand-in: no space left on device' -Because "the cause is shown, not hidden by 'silentlycontinue'. Output:`n$Output"
@@ -763,20 +763,23 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Add only those files' -Because 'that warning is for -Obfuscate runs'
     }
 
-    It 'removes a zip the failed zip step left cut off and does not report it' {
-        $Stub = 'function Compress-Archive { param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw ''stand-in: stopped part-way'' }'
+    It 'leaves a zip the failed zip step did not finish alone and does not report it' {
+        $Stub = 'function Compress-RdaReportArchive { [CmdletBinding()] param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw ''stand-in: stopped part-way'' }'
         $R = @(Invoke-InventoryRun -Name 'zip-cut-direct' -Runs @($Stub) -Direct)
 
         $Output = [string]$R[0].Output
-        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a cut-off zip must not be left to be shared'
+        # Compress-RdaReportArchive puts its zip at the final name only as its last step, so a
+        # file there after a failure is never this call's: it is not removed and not named.
+        $R[0].Files | Should -Contain 'ResourcesReport_test.zip' -Because 'the zip step removes nothing it did not write'
         $Output | Should -Not -Match 'Reporting Data File' -Because "Output:`n$Output"
+        $Output | Should -Not -Match 'safe to share'
         $Output | Should -Match 'No report was written'
     }
 
     It 'names only this run''s files in the manual-zip advice when the output folder holds an earlier run' {
         $Stub = @(
             'Set-Content -LiteralPath ($Global:DefaultPath + ''Inventory_ResourcesReport_earlier.json'') -Value ''{}'''
-            'function Compress-Archive { throw ''stand-in: no space left on device'' }'
+            'function Compress-RdaReportArchive { throw ''stand-in: no space left on device'' }'
         ) -join [Environment]::NewLine
         $R = @(Invoke-InventoryRun -Name 'zip-fail-reused-folder' -Runs @($Stub) -Direct)
 
@@ -787,7 +790,7 @@ function CreateResourceJobs
     }
 
     It 'does not name a zip that was already at the path as the report of this run' {
-        # Compress-Archive refuses to overwrite it, so it is not this run's report.
+        # Compress-RdaReportArchive refuses to overwrite it, so it is not this run's report.
         $R = @(Invoke-InventoryRun -Name 'zip-exists-direct' -Runs @('Set-Content -LiteralPath ($Global:DefaultPath + ''ResourcesReport_test.zip'') -Value ''older file''') -Direct)
 
         $Output = [string]$R[0].Output
@@ -797,9 +800,9 @@ function CreateResourceJobs
         $R[0].Files | Should -Contain 'ResourcesReport_test.zip' -Because 'a zip that was there before is not removed'
     }
 
-    It 'says so when the unfinished zip cannot be removed' {
+    It 'does not try to remove a file at the zip path after a failed zip step' {
         $Stub = @'
-function Compress-Archive { param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw 'stand-in: stopped part-way' }
+function Compress-RdaReportArchive { [CmdletBinding()] param($Path, $CompressionLevel, $DestinationPath) [System.IO.File]::WriteAllBytes($DestinationPath, [byte[]](80, 75, 3, 4)); throw 'stand-in: stopped part-way' }
 function Remove-Item
 {
     [CmdletBinding()]
@@ -811,7 +814,9 @@ function Remove-Item
         $R = @(Invoke-InventoryRun -Name 'zip-locked-direct' -Runs @($Stub) -Direct)
 
         $Output = [string]$R[0].Output
-        $Output | Should -Match 'Could not remove the unfinished zip .*ResourcesReport_test\.zip: stand-in: file is locked' -Because "Output:`n$Output"
+        $Output | Should -Not -Match 'stand-in: file is locked' -Because "the step never removes the file at the zip path. Output:`n$Output"
+        $Output | Should -Not -Match 'Could not remove the unfinished zip'
+        $R[0].Files | Should -Contain 'ResourcesReport_test.zip'
         $Output | Should -Not -Match 'Reporting Data File'
         $Output | Should -Match 'No report was written'
     }
@@ -833,9 +838,9 @@ function Remove-Item
         @{ Case = 'zip left behind'; Write = $true }
         @{ Case = 'no zip'; Write = $false }
     ) {
-        # Compress-Archive reports an input it cannot read with a non-terminating error and goes on.
+        # A stand-in that reports an input it cannot read with a non-terminating error and goes on.
         $Stub = @(
-            'function Compress-Archive'
+            'function Compress-RdaReportArchive'
             '{'
             '    [CmdletBinding()]'
             '    param($Path, $CompressionLevel, $DestinationPath)'
@@ -849,12 +854,14 @@ function Remove-Item
         $Output | Should -Match 'Error Compressing Output File: .*stand-in: cannot read' -Because "the error is not hidden. Output:`n$Output"
         $Output | Should -Not -Match 'Reporting Data File'
         $Output | Should -Match 'No report was written'
-        $R[0].Files | Should -Not -Contain 'ResourcesReport_test.zip' -Because 'a zip made without one of its files is removed'
+        # A file at the zip path after a failed step is not this call's: left alone, never named.
+        ($R[0].Files -contains 'ResourcesReport_test.zip') | Should -Be $Write -Because 'the zip step removes nothing it did not write'
+        $Output | Should -Not -Match 'safe to share'
     }
 
     It 'says the zip is safe to share under -Obfuscate only when the zip was written (<Case>)' -ForEach @(
         @{ Case = 'zip written'; Stub = '$Obfuscate = [switch]$true'; Expect = $true }
-        @{ Case = 'zip step failed'; Stub = '$Obfuscate = [switch]$true' + [Environment]::NewLine + 'function Compress-Archive { throw ''stand-in: no space left on device'' }'; Expect = $false }
+        @{ Case = 'zip step failed'; Stub = '$Obfuscate = [switch]$true' + [Environment]::NewLine + 'function Compress-RdaReportArchive { throw ''stand-in: no space left on device'' }'; Expect = $false }
         @{ Case = 'inventory write failed'; Stub = '$Obfuscate = [switch]$true' + [Environment]::NewLine + 'function Write-InventoryJson { param($InputObject, $Path) throw ''stand-in: out of memory while writing'' }'; Expect = $false }
     ) {
         $R = @(Invoke-InventoryRun -Name ('obfuscate-notice-{0}' -f ($Case -replace ' ', '-')) -Runs @($Stub) -Direct)

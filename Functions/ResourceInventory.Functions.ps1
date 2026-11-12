@@ -445,3 +445,166 @@ function Write-InventoryJson
         }
     }
 }
+
+# Zips the report files with the same entries Compress-Archive -Path produces
+# (same path resolution, entry names and order), but streams each file into a
+# NEW archive. Compress-Archive opens its archive in ZipArchiveMode.Update,
+# which keeps every entry's uncompressed bytes in memory until the archive is
+# closed, so a large set of metrics JSON files can exhaust memory.
+# ZipArchiveMode.Create with CreateEntryFromFile copies each file from disk
+# into the archive in chunks.
+# The archive is built under a temporary name (.rda-<guid>.partial) in the
+# destination folder and moved into place only once complete, so a failure
+# never leaves a partial zip at the final name. The temporary name does not end
+# in .zip, so the wrapper's *.zip sweep of the output folders never picks one
+# up. Like Compress-Archive without -Force, an existing destination is an error
+# and is left untouched.
+function Compress-RdaReportArchive
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestinationPath,
+
+        [ValidateSet('Optimal', 'NoCompression', 'Fastest')]
+        [string]$CompressionLevel = 'Optimal'
+    )
+
+    # Any failure must reach the caller, whatever its own error preference.
+    $ErrorActionPreference = 'Stop'
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.ZipFile
+
+    $DestinationPath = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($DestinationPath)
+    if (Test-Path -LiteralPath $DestinationPath -PathType Leaf)
+    {
+        throw [System.IO.IOException]::new(('The archive file {0} already exists.' -f $DestinationPath))
+    }
+
+    $SeenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($Item in $Path)
+    {
+        if (-not $SeenPaths.Add($Item))
+        {
+            throw [System.IO.IOException]::new(("The input to the Path parameter contains a duplicate path '{0}'." -f $Item))
+        }
+    }
+
+    # Wildcards are expanded by Resolve-Path, as in Compress-Archive, so hidden
+    # files and matching directories are treated the same way.
+    $SourceFiles = [System.Collections.Generic.List[string]]::new()
+    $SourceDirs = [System.Collections.Generic.List[string]]::new()
+    foreach ($Item in $Path)
+    {
+        foreach ($Resolved in @(Resolve-Path -Path $Item -ErrorAction Stop))
+        {
+            $FullPath = $Resolved.ProviderPath
+            if (-not ([System.IO.File]::Exists($FullPath) -or [System.IO.Directory]::Exists($FullPath)))
+            {
+                throw [System.IO.IOException]::new(("The path '{0}' either does not exist or is not a valid file system path." -f $FullPath))
+            }
+            if (Test-Path -LiteralPath $FullPath -PathType Leaf) { $SourceFiles.Add($FullPath) } else { $SourceDirs.Add($FullPath) }
+        }
+    }
+
+    # Directory contents come first, named relative to the directory's parent
+    # exactly as Compress-Archive 1.2 names them, with empty folders as their
+    # own entries; then the files, by file name.
+    $Entries = [System.Collections.Generic.List[object]]::new()
+    foreach ($SourceDir in $SourceDirs)
+    {
+        $ParentPath = ([System.IO.DirectoryInfo]::new($SourceDir)).Parent.FullName
+        $Prefix = if ($ParentPath.Length -eq 3) { $ParentPath } else { $ParentPath + [System.IO.Path]::DirectorySeparatorChar }
+        # -ErrorAction Stop: a folder it cannot list stops the zip, as in Compress-Archive,
+        # so a zip is never made without that folder's files.
+        foreach ($Child in @(Get-ChildItem -LiteralPath $SourceDir -Recurse -ErrorAction Stop))
+        {
+            $IsDirectory = $Child -is [System.IO.DirectoryInfo]
+            if ($IsDirectory -and $Child.GetFiles().Count -ne 0) { continue }
+            $ChildPath = if ($IsDirectory) { $Child.FullName + [System.IO.Path]::DirectorySeparatorChar } else { $Child.FullName }
+            $Index = $ChildPath.IndexOf($Prefix, [System.StringComparison]::OrdinalIgnoreCase)
+            $RelativePath = $ChildPath.Replace($ChildPath.Substring($Index, $Prefix.Length), '').Trim()
+            $Entries.Add([pscustomobject]@{
+                    Source      = $Child.FullName
+                    Name        = $RelativePath.Replace([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                    IsDirectory = $IsDirectory
+                })
+        }
+    }
+    foreach ($SourceFile in $SourceFiles)
+    {
+        $Entries.Add([pscustomobject]@{ Source = $SourceFile; Name = [System.IO.Path]::GetFileName($SourceFile); IsDirectory = $false })
+    }
+
+    $Level = [System.IO.Compression.CompressionLevel]$CompressionLevel
+    # The temporary name has a fixed length (45 characters) that does not
+    # depend on the destination name, so any final name the file system
+    # accepts also works here.
+    $TempName = '.rda-{0}.partial' -f [guid]::NewGuid().ToString('N')
+    $TempPath = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($DestinationPath), $TempName)
+    $ArchiveStream = $null
+    $Archive = $null
+    $Moved = $false
+    try
+    {
+        $ArchiveStream = [System.IO.File]::Open($TempPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $Archive = [System.IO.Compression.ZipArchive]::new($ArchiveStream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+
+        foreach ($Entry in $Entries)
+        {
+            if ($Entry.IsDirectory)
+            {
+                $null = $Archive.CreateEntry($Entry.Name, $Level)
+            }
+            else
+            {
+                $null = [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Archive, $Entry.Source, $Entry.Name, $Level)
+            }
+        }
+
+        # Disposing the archive writes the central directory.
+        $Archive.Dispose()
+        $ArchiveStream.Dispose()
+
+        # As with Compress-Archive, an archive with no entries is not kept.
+        if ($Entries.Count -gt 0)
+        {
+            [System.IO.File]::Move($TempPath, $DestinationPath)
+            # The last step that may fail: from here on nothing may fail the call.
+            $Moved = $true
+        }
+    }
+    finally
+    {
+        # Closing twice is harmless after success. After a failure the partial
+        # archive is deleted, so an error while closing it must not replace the
+        # original error.
+        foreach ($Disposable in @($Archive, $ArchiveStream))
+        {
+            if ($null -eq $Disposable) { continue }
+            try { $Disposable.Dispose() } catch { Write-Verbose ('Closing the partial archive failed: {0}' -f $_.Exception.Message) }
+        }
+        # After the move there is no temporary file to remove. Before it, a failed clean-up
+        # only warns, so it never replaces the original error.
+        if (-not $Moved)
+        {
+            try
+            {
+                if (Test-Path -LiteralPath $TempPath)
+                {
+                    Remove-Item -LiteralPath $TempPath -Force -ErrorAction SilentlyContinue
+                    if (Test-Path -LiteralPath $TempPath) { Write-Warning ("Compress-RdaReportArchive: could not remove the temporary file '{0}'; delete it by hand." -f $TempPath) }
+                }
+            }
+            catch
+            {
+                Write-Warning ("Compress-RdaReportArchive: could not check or remove the temporary file '{0}': {1}; delete it by hand if it is there." -f $TempPath, $_.Exception.Message)
+            }
+        }
+    }
+}

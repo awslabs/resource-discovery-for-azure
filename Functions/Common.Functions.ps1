@@ -1485,7 +1485,11 @@ function Get-ConsumptionRowResourceUri
     if ([string]::IsNullOrWhiteSpace([string]$InstanceData)) { return $null }
     try { $Info = [string]$InstanceData | ConvertFrom-Json -ErrorAction Stop }
     catch { return $null }
-    $Uri = $Info.'Microsoft.Resources'.resourceUri
+    # Read each level only when it is there: under Set-StrictMode a missing property stops the caller.
+    if ($null -eq $Info -or $null -eq $Info.PSObject.Properties['Microsoft.Resources']) { return $null }
+    $Resources = $Info.'Microsoft.Resources'
+    if ($null -eq $Resources -or $null -eq $Resources.PSObject.Properties['resourceUri']) { return $null }
+    $Uri = $Resources.resourceUri
     if ($Uri -isnot [string]) { return $null }
     return $Uri
 }

@@ -677,6 +677,21 @@ Describe 'Resource group runs (-ResourceGroup)' {
         Get-ConsumptionRowResourceUri -InstanceData (@{ 'Microsoft.Resources' = @{ resourceUri = $script:InRg } } | ConvertTo-Json -Compress) | Should -Be $script:InRg
     }
 
+    It 'reads nothing, without an error, from InstanceData that lacks the URI under Set-StrictMode (<Case>)' -TestCases @(
+        @{ Case = 'empty object'; Raw = '{}' }
+        @{ Case = 'no URI property'; Raw = '{"Microsoft.Resources": {}}' }
+        @{ Case = 'a JSON number'; Raw = '5' }
+        @{ Case = 'a JSON array'; Raw = '[]' }
+        @{ Case = 'resources not an object'; Raw = '{"Microsoft.Resources": "x"}' }
+    ) {
+        param($Case, $Raw)
+        # A caller's shell can run with strict mode on, which a missing property read stops on.
+        & {
+            Set-StrictMode -Version Latest
+            Get-ConsumptionRowResourceUri -InstanceData $Raw | Should -BeNullOrEmpty
+        }
+    }
+
     It 'does not pass on usage rows of other resource groups' {
         Mock Get-UsageAggregatesPage { New-RgUsagePage -Rows @(@{ Uri = $script:OtherRg; Quantity = 5 }, @{ Uri = $null; Raw = 'not json'; Quantity = 7 }) }
         $Probe = Invoke-ConsumptionValueProbe -SubscriptionId 'sub-a' -Window $script:Window -ResourceGroup 'rg-one'

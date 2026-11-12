@@ -740,7 +740,7 @@ function Remove-ResumeStateFiles
 # retry list as a failed run (Add-FailedAttempt, so the run count goes up) and
 # taken off the completed list, so the resume state is kept and -Resume and
 # -ResumeFailedOnly check it again, as for any failed subscription: it stays on
-# the list, with its run count and reason, until a later check passes. A
+# the list, with its run count and reason, until a later run collects it. A
 # subscription skipped for a missing role is not added: it needs Reader first. Pure; the caller persists. Returns
 # { FailedAttempts; CompletedIds; Added }.
 function Add-RoleCheckRetryAttempts

@@ -214,7 +214,7 @@ The wrapper always covers the whole tenant. To scope a run to **one** subscripti
 
 **Scan a specific resource group:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -ResourceGroup "MyResourceGroup"
+./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012" -ResourceGroup "MyResourceGroup"
 ```
 
 ### Running Across All Subscriptions
@@ -432,7 +432,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | `ReportName` | String | **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
 | `TenantID` | String | Target specific Azure tenant | `-TenantID "12345678-1234-1234-1234-123456789012"` |
 | `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
-| `ResourceGroup` | String | Scan specific resource group only | `-ResourceGroup "Production-RG"` |
+| `ResourceGroup` | String | Scan specific resource group only; requires `SubscriptionID` | `-ResourceGroup "Production-RG"` |
 | `OutputDirectory` | String | Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
 
 ### Performance Parameters

@@ -555,7 +555,10 @@ Describe 'Write-InventoryJson' {
     It 'names a temporary file the build before this one left for a final name of any kind (<Name>)' -ForEach @(
         @{ Name = 'custom.json' }
         @{ Name = 'Inventory_Old.json' }
+        # A report name may hold a line break on Linux and macOS, and the old build used the whole name.
+        @{ Name = "Inventory_Old`nline.json" }
     ) {
+        if ($IsWindows -and $Name.Contains("`n")) { Set-ItResult -Skipped -Because 'Windows file names cannot hold a line break'; return }
         $Dir = New-WriterCaseDir
         $Old = Join-Path $Dir ('{0}.{1}.tmp' -f $Name, [guid]::NewGuid().ToString('N'))
         [System.IO.File]::WriteAllText($Old, 'keep')
@@ -920,7 +923,10 @@ Describe 'Write-InventoryJson' {
 
 Describe 'ResourceInventory.ps1 start-up loads Write-InventoryJson' {
 
-    It 'defines Write-InventoryJson after the start-up load statements run in a fresh pwsh' {
+    It 'defines Write-InventoryJson after the start-up load statements run in a fresh pwsh (<Case>)' -ForEach @(
+        @{ Case = 'the repo folder'; Bracketed = $false }
+        @{ Case = 'a copy in a folder whose name holds [ and ]'; Bracketed = $true }
+    ) {
         # The top-level statements before the first '$Debug.IsPresent' check are the
         # functions-file loads. Run them in a child pwsh with $PSScriptRoot set to the repo.
         $Tokens = $null
@@ -935,9 +941,17 @@ Describe 'ResourceInventory.ps1 start-up loads Write-InventoryJson' {
         $Load.Count | Should -BeGreaterThan 0
 
         $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $Root = $script:RepoRoot
+        if ($Bracketed)
+        {
+            # -Path reads [ and ] as a pattern, so the checks must read the paths literally.
+            $Root = Join-Path $script:TmpRoot ('br[1]x_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $null = New-Item -ItemType Directory -Path (Join-Path $Root 'Functions')
+            Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot 'Functions') -File | ForEach-Object { [System.IO.File]::Copy($_.FullName, (Join-Path (Join-Path $Root 'Functions') $_.Name)) }
+        }
         $ChildFile = Join-Path $script:TmpRoot ('startup_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
         Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
-            ('$RepoRoot = {0}' -f (& $Q $script:RepoRoot))
+            ('$RepoRoot = {0}' -f (& $Q $Root))
             (($Load -join [Environment]::NewLine) -replace '\$PSScriptRoot', '$RepoRoot')
             'Write-Output (''HAS_WRITER='' + [bool](Get-Command -Name ''Write-InventoryJson'' -CommandType Function -ErrorAction SilentlyContinue))'
         )
@@ -946,6 +960,96 @@ Describe 'ResourceInventory.ps1 start-up loads Write-InventoryJson' {
 
         $LASTEXITCODE | Should -Be 0 -Because ($Output -join [Environment]::NewLine)
         $Output | Should -Contain 'HAS_WRITER=True'
+    }
+
+    It 'stops with exit 1 and names the file when InventoryJson.Functions.ps1 is missing (<Case>)' -ForEach @(
+        @{ Case = 'default settings'; Prelude = '' }
+        # A caller's strict mode and Stop preference reach the script's start-up lines.
+        @{ Case = 'strict mode Latest and errors set to Stop'; Prelude = 'Set-StrictMode -Version Latest; $ErrorActionPreference = ''Stop''' }
+    ) {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$null, [ref]$null)
+        $Load = @()
+        $FoundEnd = $false
+        foreach ($Statement in $Ast.EndBlock.Statements)
+        {
+            # The debug-mode setup ends the functions-file loads: an 'if ($Debug.IsPresent)' check, or a '$DebugMode = ...' line.
+            if ($Statement.Extent.Text -match '^\s*(\$DebugMode\s*=|if\s*\(\s*\$Debug(Mode\b|\.IsPresent))') { $FoundEnd = $true; break }
+            $Load += $Statement.Extent.Text
+        }
+        # Without the end marker $Load would hold the whole script, and the child would run past the loads.
+        $FoundEnd | Should -BeTrue -Because 'the start-up loads must end at the debug-mode setup'
+        # A copy of the Functions folder without the writer's file.
+        $Root = Join-Path $script:TmpRoot ('nowriter_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $null = New-Item -ItemType Directory -Path (Join-Path $Root 'Functions')
+        Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot 'Functions') -File | Where-Object { $_.Name -ne 'InventoryJson.Functions.ps1' } | ForEach-Object { [System.IO.File]::Copy($_.FullName, (Join-Path (Join-Path $Root 'Functions') $_.Name)) }
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('startup_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            $Prelude
+            ('$RepoRoot = {0}' -f (& $Q $Root))
+            (($Load -join [Environment]::NewLine) -replace '\$PSScriptRoot', '$RepoRoot')
+            'Write-Output ''REACHED_END'''
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        $LASTEXITCODE | Should -Be 1 -Because ($Output -join [Environment]::NewLine)
+        $Output | Should -Not -Contain 'REACHED_END'
+        ($Output -join "`n") | Should -Match ('ERROR: Required functions file not found: .*' + [regex]::Escape('InventoryJson.Functions.ps1'))
+        ($Output -join "`n") | Should -Match "Ensure the 'Functions' folder ships alongside this script\."
+    }
+
+    It 'checks for InventoryJson.Functions.ps1 through Write-Log, with no Write-Host of its own' {
+        # Common.Functions.ps1 (Write-Log) is loaded before this check, so it adds no
+        # PSAvoidUsingWriteHost finding to the script.
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$null, [ref]$null)
+        $Check = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -match '\$InventoryJsonFunctionsFile' })
+        $Check.Count | Should -Be 1
+        $Commands = @($Check[0].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        $Commands | Should -Not -Contain 'Write-Host'
+        $Commands | Should -Contain 'Write-Log'
+    }
+
+    It 'lets Write-Log run before setup under strict mode Latest and errors set to Stop (<Severity>, debug log <ToDebugLog>)' -ForEach @(
+        @{ Severity = 'Error'; ToDebugLog = $false }
+        @{ Severity = 'Info'; ToDebugLog = $true }
+    ) {
+        # Before setup neither $Global:ErrorLogFile nor $Global:DebugLogFile exists.
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('writelog_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            'Set-StrictMode -Version Latest; $ErrorActionPreference = ''Stop'''
+            ('. {0}' -f (& $Q $script:CommonFunctions))
+            ('Write-Log -Message ''early line'' -Severity {0}{1}' -f $Severity, $(if ($ToDebugLog) { ' -ToDebugLog' } else { '' }))
+            'Write-Output ''AFTER_LOG'''
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+        $LASTEXITCODE | Should -Be 0 -Because ($Output -join [Environment]::NewLine)
+        $Output | Should -Contain 'early line'
+        $Output | Should -Contain 'AFTER_LOG'
+    }
+}
+
+Describe 'ResourceInventory.ps1 inventory folder' {
+
+    It 'takes the folder the run names its temporary inventory file in from $DefaultPath, keeping a root (<Case>)' -ForEach @(
+        @{ Case = 'a file-system root'; Root = $true }
+        @{ Case = 'a folder below the root'; Root = $false }
+    ) {
+        # The run's own Write-Log lines name the write's temporary file in this folder, and the
+        # writer puts it beside the inventory, in the folder of $DefaultPath + the inventory's name.
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$null, [ref]$null)
+        $Assign = @($Ast.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $Node.Left.Extent.Text -eq '$InventoryFolder' }, $true))
+        $Assign.Count | Should -Be 1
+        # As ResourceInventory.ps1 builds it: the resolved folder plus one separator.
+        $Folder = if ($Root) { [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()) } else { [System.IO.Path]::GetTempPath() }
+        $DefaultPath = (Resolve-Path -LiteralPath $Folder).Path + [System.IO.Path]::DirectorySeparatorChar
+        $Expected = [System.IO.Path]::GetDirectoryName($DefaultPath + 'Inventory_ResourcesReport_test.json')
+        $InventoryFolder = & ([scriptblock]::Create($Assign[0].Right.Extent.Text))
+        $InventoryFolder | Should -Be $Expected
+        (Join-Path $InventoryFolder 'rda-write-x.tmp') | Should -Be ([System.IO.Path]::Combine($Expected, 'rda-write-x.tmp'))
+        { $null = [System.IO.Directory]::EnumerateFiles($InventoryFolder, '*.tmp') } | Should -Not -Throw
     }
 }
 
@@ -1035,20 +1139,25 @@ function CreateResourceJobs
 
     It 'names a leftover temporary inventory file itself in the debug log, once, whatever the stream settings (<Case>)' -ForEach @(
         @{ Case = 'good write'; Writer = ''; Form = 'rda-write-{0}.tmp' }
+        # Information action Stop from right before the write (the collector stand-in sets it last).
+        @{ Case = 'information action Stop'; Writer = ''; Form = 'rda-write-{0}.tmp'; Settings = 'function CreateResourceJobs { $Global:SmaResources = New-Object PSObject; $Global:SmaResources | Add-Member -MemberType NoteProperty -Name ''Disks'' -Value @($Global:Resources | Where-Object { $_.type -eq ''microsoft.compute/disks'' } | ForEach-Object { [ordered]@{ Name = $_.name } }); $Global:PSDefaultParameterValues[''*:InformationAction''] = ''Stop'' }' }
         @{ Case = 'failed write'; Writer = 'function Write-InventoryJson { param($InputObject, $Path) throw ''stand-in: out of memory while writing'' }'; Form = 'rda-write-{0}.tmp' }
         @{ Case = 'older build name'; Writer = ''; Form = 'Inventory_ResourcesReport_old.json.{0}.tmp' }
+        @{ Case = 'older build name with a line break'; Writer = ''; Form = "Inventory_Resources`nReport_old.json.{0}.tmp" }
     ) {
-        # Every stream is silenced, so only the run's own Write-Log lines can name the file.
-        $Name = 'leftover-named-{0}' -f $Case.Split(' ')[0]
+        if ($IsWindows -and $Form.Contains("`n")) { Set-ItResult -Skipped -Because 'Windows file names cannot hold a line break'; return }
+        # Each case silences every stream, or sets the Stop information action right before the write,
+        # so only the run's own Write-Log lines can name the file.
+        $Name = 'leftover-named-{0}' -f ($Case -replace ' ', '-')
         $Left = $Form -f [guid]::NewGuid().ToString('N')
         $Stub = @(
-            '$WarningPreference = ''Ignore''; $InformationPreference = ''Ignore''; $PSDefaultParameterValues[''*:WarningAction''] = ''Ignore''; $PSDefaultParameterValues[''*:InformationAction''] = ''Ignore'''
+            $(if ($Settings) { $Settings } else { '$WarningPreference = ''Ignore''; $InformationPreference = ''Ignore''; $PSDefaultParameterValues[''*:WarningAction''] = ''Ignore''; $PSDefaultParameterValues[''*:InformationAction''] = ''Ignore''' })
             ('[System.IO.File]::WriteAllText(($Global:DefaultPath + ''{0}''), ''keep'')' -f $Left)
             $Writer
         ) -join [Environment]::NewLine
         $R = @(Invoke-InventoryRun -Name $Name -Runs @($Stub) -Direct)
 
-        # The debug log is the record (silencing -InformationAction also silences the console).
+        # The debug log is the record: the console line may be silenced or stopped.
         $DebugLog = Join-Path (Join-Path (Join-Path $script:TmpRoot $Name) 'run0') 'DebugLog_ResourcesReport_test.log'
         @([regex]::Matches((Get-Content -LiteralPath $DebugLog -Raw), [regex]::Escape($Left) + "' is a temporary file")).Count | Should -Be 1 -Because "Output:`n$([string]$R[0].Output)"
         $R[0].Files | Should -Contain $Left -Because 'it may be another run''s, so it is never removed'
@@ -1071,12 +1180,13 @@ function CreateResourceJobs
     It 'names this write''s temporary file again after a failed write when it is still there or the folder cannot be read (<Case>)' -ForEach @(
         @{ Case = 'still there'; Lock = $false }
         @{ Case = 'folder unreadable'; Lock = $true }
+        @{ Case = 'still there, information action Stop'; Lock = $false; Settings = 'function CreateResourceJobs { $Global:SmaResources = New-Object PSObject; $Global:SmaResources | Add-Member -MemberType NoteProperty -Name ''Disks'' -Value @($Global:Resources | Where-Object { $_.type -eq ''microsoft.compute/disks'' } | ForEach-Object { [ordered]@{ Name = $_.name } }); $Global:PSDefaultParameterValues[''*:InformationAction''] = ''Stop'' }' }
     ) {
         if ($Lock -and ($IsWindows -or ((& id -u) -eq '0'))) { Set-ItResult -Skipped -Because 'folder modes do not deny access here'; return }
-        $Name = 'temp-left-{0}' -f $Case.Split(' ')[0]
+        $Name = 'temp-left-{0}' -f ($Case -replace '[ ,]+', '-')
         $Body = if ($Lock) { '[System.IO.File]::SetUnixFileMode((Split-Path -Parent $Path), [System.IO.UnixFileMode]''UserWrite, UserExecute'')' } else { '[System.IO.File]::WriteAllText((Join-Path (Split-Path -Parent $Path) $TempName), ''part'')' }
         $Stub = @(
-            '$WarningPreference = ''Ignore''; $InformationPreference = ''Ignore''; $PSDefaultParameterValues[''*:WarningAction''] = ''Ignore''; $PSDefaultParameterValues[''*:InformationAction''] = ''Ignore'''
+            $(if ($Settings) { $Settings } else { '$WarningPreference = ''Ignore''; $InformationPreference = ''Ignore''; $PSDefaultParameterValues[''*:WarningAction''] = ''Ignore''; $PSDefaultParameterValues[''*:InformationAction''] = ''Ignore''' })
             ('function Write-InventoryJson {{ param($InputObject, $Path, $TempName) {0}; throw ''stand-in: out of memory while writing'' }}' -f $Body)
         ) -join [Environment]::NewLine
         try { $R = @(Invoke-InventoryRun -Name $Name -Runs @($Stub) -Direct) }

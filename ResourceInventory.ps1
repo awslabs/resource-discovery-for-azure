@@ -19,7 +19,7 @@ param ($TenantID,
     $OutputDirectory)
 
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -28,7 +28,7 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 . $FunctionsFile
 
 $CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
-if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $CommonFunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -37,10 +37,11 @@ if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
 . $CommonFunctionsFile
 
 $InventoryJsonFunctionsFile = Join-Path $PSScriptRoot 'Functions/InventoryJson.Functions.ps1'
-if (-not (Test-Path -Path $InventoryJsonFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $InventoryJsonFunctionsFile -PathType Leaf))
 {
-    Write-Host "ERROR: Required functions file not found: $InventoryJsonFunctionsFile" -ForegroundColor Red
-    Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
+    # Common.Functions.ps1 is loaded by now, so the run's own Write-Log prints these lines.
+    Write-Log -Message "ERROR: Required functions file not found: $InventoryJsonFunctionsFile" -Severity 'Error'
+    Write-Log -Message "Ensure the 'Functions' folder ships alongside this script." -Severity 'Warning'
     exit 1
 }
 . $InventoryJsonFunctionsFile
@@ -1231,12 +1232,13 @@ function ExecuteInventoryProcessing()
         # After a failed write: that path again when the file is still there or the folder cannot
         # be read.
         # The provider path: .NET reads a PowerShell drive name (an -OutputDirectory on a PSDrive) as a folder name.
-        $InventoryFolder = Split-Path -Parent $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Global:JsonFile)
+        # (The inventory file is $DefaultPath + its name, so its folder is $DefaultPath; a root such as / or D:\ keeps its separator.)
+        $InventoryFolder = [System.IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DefaultPath))
         $InventoryTempName = 'rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')
         $InventoryTempPath = Join-Path $InventoryFolder $InventoryTempName
         try
         {
-            foreach ($Leftover in @([System.IO.Directory]::EnumerateFiles($InventoryFolder, '*.tmp') | Where-Object { [System.IO.Path]::GetFileName($_) -cmatch '^(rda-write-[0-9a-f]{32}|.+\.json\.[0-9a-f]{32})\.tmp$' } | Sort-Object))
+            foreach ($Leftover in @([System.IO.Directory]::EnumerateFiles($InventoryFolder, '*.tmp') | Where-Object { [System.IO.Path]::GetFileName($_) -cmatch '(?s)^(rda-write-[0-9a-f]{32}|.+\.json\.[0-9a-f]{32})\.tmp\z' } | Sort-Object))
             {
                 Write-Log -Message ("'{0}' is a temporary file of an inventory write that was stopped, or of one another run is writing now; delete it once no other run is writing to this folder." -f $Leftover) -Severity 'Warning' -ToDebugLog
             }

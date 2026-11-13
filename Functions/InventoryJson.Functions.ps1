@@ -27,10 +27,10 @@
 # stopped write left, or one another run is writing into the same folder now, named so the
 # operator can delete it. It is never removed here, as it may be another run's.
 # -TempName (optional) names the temporary file, a name only (it always goes in the destination
-# folder): 'rda-write-<32 hex>.tmp', in that exact case, never the final file's name. A caller that must
-# name the file to delete whatever the caller's stream preferences (ResourceInventory.ps1 logs it
-# before the write) passes its own path; warnings can be silenced by a preference, a default
-# parameter value or -WarningAction, so a caller never relies on them for that.
+# folder): 'rda-write-<32 hex>.tmp', in that exact case, never the final file's name. A caller that
+# must name the file to delete whatever its stream settings chooses the name, passes it here and
+# logs the path it gives (ResourceInventory.ps1 does, before the write): this function's warnings
+# can be silenced, so a caller never relies on them for that.
 # Anything but a [pscustomobject] is refused before anything is written. Its PSObject
 # properties are not collectors: a dictionary (hashtable, [ordered]) has Keys, Count,
 # IsReadOnly and so on, a string has Length, an array has Count, so each would be written
@@ -78,7 +78,7 @@ function Write-InventoryJson
         {
             if ([System.IO.Directory]::Exists($Folder))
             {
-                foreach ($Leftover in @([System.IO.Directory]::EnumerateFiles($Folder, '*.tmp') | Where-Object { [System.IO.Path]::GetFileName($_) -cmatch '^(rda-write-[0-9a-f]{32}|.+\.json\.[0-9a-f]{32})\.tmp$' } | Sort-Object))
+                foreach ($Leftover in @([System.IO.Directory]::EnumerateFiles($Folder, '*.tmp') | Where-Object { [System.IO.Path]::GetFileName($_) -cmatch '(?s)^(rda-write-[0-9a-f]{32}|.+\.json\.[0-9a-f]{32})\.tmp\z' } | Sort-Object))
                 {
                     Write-Warning ("Write-InventoryJson: '{0}' is a temporary file of an inventory write that was stopped, or of one another run is writing now; delete it once no other run is writing to this folder." -f $Leftover)
                 }

@@ -375,15 +375,12 @@ function Merge-RecoveryData
     #    error). Consumption ResourceUris keep the ARM path structure for
     #    categorisation. A ResourceUri that matches an inventory id exactly
     #    takes that resource's whole masked path from the run's ResourceIdMap;
-    #    for any other ResourceUri, each subscription, resource group and name
-    #    part is looked up in the run's shared dictionaries by the full
-    #    ResourceUri, then in the consumption file's own cache by the real
-    #    value, and only on a miss gets a token minted for that run's
-    #    consumption file. So a replaced
-    #    consumption file categorises correctly, but its tokens can differ
-    #    from the gap run's, and a resource that is not in the inventory can
-    #    carry subscription and resource group tokens different from the
-    #    inventory's for the same real values. If the chosen
+    #    any other ResourceUri gets the tokens the run's own consumption
+    #    masking gives it (how they relate to the inventory's tokens is that
+    #    code's rule, in ResourceInventory.ps1, not this merge's). So a
+    #    replaced consumption file categorises correctly, and its tokens match
+    #    the gap run's only when the recovery run was seeded with the gap
+    #    bundle's dictionary. If the chosen
     #    source has none, write a canonical empty file so the bundle is
     #    structurally complete. --------------------------------------------------
     $ConsumptionSource = 'gap'

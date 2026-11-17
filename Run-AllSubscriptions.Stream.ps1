@@ -50,7 +50,11 @@ param (
     [switch] $Obfuscate,
     [switch] $SkipMetrics,
     [switch] $SkipConsumption,
-    [int]    $ConcurrencyLimit = 6
+    [int]    $ConcurrencyLimit = 6,
+    # The parent's consumption window ('yyyy-MM-dd'), forwarded to every
+    # ResourceInventory.ps1 so each collects the window the parent checked.
+    [string] $ConsumptionWindowStart,
+    [string] $ConsumptionWindowEnd
 )
 
 # ---------------------------------------------------------------------------
@@ -167,6 +171,8 @@ if ($Obfuscate) { $InventoryPassthrough['Obfuscate'] = $true }
 if ($SkipMetrics) { $InventoryPassthrough['SkipMetrics'] = $true }
 if ($SkipConsumption) { $InventoryPassthrough['SkipConsumption'] = $true }
 $InventoryPassthrough['ConcurrencyLimit'] = $ConcurrencyLimit
+if (-not [string]::IsNullOrEmpty($ConsumptionWindowStart)) { $InventoryPassthrough['ConsumptionWindowStart'] = $ConsumptionWindowStart }
+if (-not [string]::IsNullOrEmpty($ConsumptionWindowEnd)) { $InventoryPassthrough['ConsumptionWindowEnd'] = $ConsumptionWindowEnd }
 
 # ---- Per-sub iteration -------------------------------------------------------
 #

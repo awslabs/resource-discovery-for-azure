@@ -205,7 +205,8 @@ BeforeAll {
 function CheckVersion { }
 function CheckCliRequirements { }
 function CheckPowerShell { }
-function GetSubscriptionsData { }
+# One subscription, as sign-in finds for a direct run (the up-front checks need one).
+function GetSubscriptionsData { $Global:Subscriptions = @([pscustomobject]@{ id = $DocsGuid; Name = 'Placeholder subscription' }) }
 function ResourceInventoryLoop
 {
     $Global:Resources += @(
@@ -229,6 +230,8 @@ function CreateResourceJobs
 }
 function GetResorceConsumption { }
 function Get-AzContext { }
+# The up-front role check of a direct run: no subscription is reported unreadable.
+function Test-SubscriptionRoleAccessAll { }
 '@
 
     # Summary.ps1 stand-in that also records whether the collector data is still held

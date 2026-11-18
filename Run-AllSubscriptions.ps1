@@ -900,14 +900,14 @@ if ($ScopeForProbe.Count -gt 0)
 
 # ---------------------------------------------------------------------------
 # Up-front consumption data check. Consumption was REQUESTED unless
-# -SkipConsumption was passed, and a run without usage values cannot price the
+# -SkipConsumption was passed, and a run without usage values has no usage data for the
 # business case, so before any inventory or metrics work every subscription
 # this run will process must return at least one usage row with a quantity
 # above zero for the billing phase's own window (Invoke-ConsumptionDataCheck in
 # Functions/Common.Functions.ps1). Zero rows, all-zero rows, a permission
 # error, or an error that persists after retries stops the run with exit 1,
 # listing every failing subscription and the fix. Subscriptions with no
-# resources in Resource Graph are not checked (nothing to price).
+# resources in Resource Graph are not checked (no usage to read).
 #
 # Runs AFTER the role check above, so a failure here is about consumption
 # data, not about reading the subscription; on a refusal the role check's usage

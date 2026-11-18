@@ -722,7 +722,7 @@ Describe 'Resource group runs (-ResourceGroup)' {
         $Result = Invoke-ConsumptionDataCheck -Subscriptions @([pscustomobject]@{ Id = 'sub-a'; Name = 'Alpha' }) -Window $script:Window -ResourceGroup 'RG-One'
         ($script:Payloads[0] | ConvertFrom-Json).query | Should -Be "resources | where resourceGroup == 'rg-one' | summarize ResourceCount = count() by subscriptionId"
         $Result.Results[0].Outcome | Should -Be 'Exempt'
-        $Result.Results[0].Detail | Should -Be "no resources in resource group 'RG-One' in Resource Graph; not checked (nothing to price)"
+        $Result.Results[0].Detail | Should -Be "no resources in resource group 'RG-One' in Resource Graph; not checked (no usage to read)"
         $Result.ShouldBlock | Should -BeFalse
         Should -Invoke Get-UsageAggregatesPage -Times 0 -Exactly
     }

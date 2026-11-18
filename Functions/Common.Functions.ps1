@@ -1211,7 +1211,7 @@ function Split-EmptySubscriptionsByRoleCheck
 }
 
 # ---- Consumption data check -------------------------------------------------
-# Consumption (usage) rows are what price a business case: they show whether a
+# Consumption (usage) rows show whether a
 # machine ran 4 hours or 400. A run without them is not useful, so when
 # consumption is requested (no -SkipConsumption) both entry points refuse to
 # start unless every in-scope subscription returns at least one usage row with
@@ -1398,7 +1398,7 @@ function Invoke-ConsumptionCallWithRetry
 }
 
 # Resource counts per subscription from Resource Graph, used to exempt
-# subscriptions that hold no resources (nothing to price). With
+# subscriptions that hold no resources (no usage to read). With
 # -ResourceGroup only that resource group's resources are counted, matched the
 # way the inventory's own query matches it (lower-cased name, '=='). Resource
 # Graph returns no row for a subscription with zero resources, so every id in
@@ -1656,7 +1656,7 @@ function Get-ConsumptionCheckVerdict
     $InRg = if ([string]::IsNullOrEmpty($ResourceGroup)) { '' } else { " in resource group '{0}'" -f $ResourceGroup }
     if ($null -ne $ResourceCount -and [int]$ResourceCount -eq 0)
     {
-        return [pscustomobject]@{ Outcome = 'Exempt'; Passed = $true; Detail = ('no resources{0} in Resource Graph; not checked (nothing to price)' -f $InRg) }
+        return [pscustomobject]@{ Outcome = 'Exempt'; Passed = $true; Detail = ('no resources{0} in Resource Graph; not checked (no usage to read)' -f $InRg) }
     }
     if ($null -eq $Probe)
     {
@@ -1872,7 +1872,7 @@ function Write-ConsumptionDataCheckReport
     $NoUsageEmpty = @($NoUsage | Where-Object { -not $_.PageCapReached })
     if ($Result.Exempt.Count -gt 0)
     {
-        Write-Host ('  {0} subscription(s) have no resources{1} in Resource Graph and were not checked (nothing to price).' -f $Result.Exempt.Count, $InRg) -ForegroundColor DarkGray
+        Write-Host ('  {0} subscription(s) have no resources{1} in Resource Graph and were not checked (no usage to read).' -f $Result.Exempt.Count, $InRg) -ForegroundColor DarkGray
     }
     if (-not $Result.ShouldBlock)
     {
@@ -1895,7 +1895,7 @@ function Write-ConsumptionDataCheckReport
     $CappedText = if ($FailedCapped.Count -gt 0) { ' ({0} of them: none above zero in the first {1} page(s) read; later pages were not checked)' -f $FailedCapped.Count, $FailedCapped[0].PagesRead } else { '' }
     Write-Host ''
     Write-Host ('ERROR: Consumption data was requested (no -SkipConsumption), but {0} of {1} checked subscription(s) returned no usage values{2} for {3}{4}.' -f $Result.Failed.Count, $Checked.Count, $ForRg, $WindowText, $CappedText) -ForegroundColor Red
-    Write-Host 'Without consumption the business case cannot be priced, so the run stops before any inventory or metrics work.' -ForegroundColor Red
+    Write-Host 'Without consumption the report has no usage data, so the run stops before any inventory or metrics work.' -ForegroundColor Red
     foreach ($Fail in $Result.Failed)
     {
         Write-Host ('  - {0} ({1}): {2} - {3}; window {4}' -f $Fail.Name, $Fail.Id, $Fail.Outcome, $Fail.Detail, $WindowText) -ForegroundColor Red

@@ -373,6 +373,14 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on `-Obfuscate` runs only** |
 | `ResourcesReport_(date).zip` | All files compressed |
 
+A Consumption file starts like this (made-up test data). The full sample, with a VM, a managed disk, a storage account and a SQL database, is [docs/samples/Consumption_ResourcesReport_sample.csv](docs/samples/Consumption_ResourcesReport_sample.csv). The columns are explained in [Consumption data](docs/consumption-data.md).
+
+```csv
+"InstanceData","MeterCategory","MeterId","MeterName","MeterRegion","MeterSubCategory","Quantity","Unit","UsageStartTime","UsageEndTime","ResourceId","ResourceLocation","ConsumptionMeter","ReservationId","ReservationOrderId"
+"{""Microsoft.Resources"":{""ResourceUri"":""/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/virtualmachines/vm-app-01"",""Location"":""westeurope"",""additionalInfo"":{""ConsumptionMeter"":"""",""ImageType"":""canonical"",""AHB"":"""",""vCores"":0,""VCPUs"":8,""ServiceType"":""standard_e8s_v5"",""ResourceCategory"":"""",""Edition"":"""",""LicenseType"":"""",""HostLicenseType"":"""",""OS"":"""",""IsVM"":"""",""NumberOfCores"":0,""NumberOfLogicalProcessors"":0,""SLO"":"""",""ServerSku"":"""",""ServerEdition"":"""",""IsHAEnabled"":""""}}}","Virtual Machines","c3a4f13b-6b0f-5154-a116-65e9ed24daa3","E8s_v5","EU West","Dsv5 Series","20.45","1 Hour","10/1/2026 12:00:00 AM","10/2/2026 12:00:00 AM","/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/virtualmachines/vm-app-01","westeurope",,,
+"{""Microsoft.Resources"":{""ResourceUri"":""/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1"",""Location"":""westeurope"",""additionalInfo"":{""ConsumptionMeter"":"""",""ImageType"":"""",""AHB"":"""",""vCores"":0,""VCPUs"":0,""ServiceType"":"""",""ResourceCategory"":"""",""Edition"":"""",""LicenseType"":"""",""HostLicenseType"":"""",""OS"":"""",""IsVM"":"""",""NumberOfCores"":0,""NumberOfLogicalProcessors"":0,""SLO"":"""",""ServerSku"":"""",""ServerEdition"":"""",""IsHAEnabled"":""""}}}","Storage","bf07323a-2702-5ff8-9802-27a9778ba970","P10 LRS Disk","EU West","Premium SSD Managed Disks","0.0522","1/Month","10/1/2026 12:00:00 AM","10/2/2026 12:00:00 AM","/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1","westeurope",,,
+```
+
 ### File Delivery
 
 1. **Locate the output:** Check the `InventoryReports` folder

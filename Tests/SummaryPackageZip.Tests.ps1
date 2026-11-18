@@ -1562,7 +1562,7 @@ Describe 'Extension/Summary.ps1 reads a consumption file in a folder with bracke
         [System.IO.File]::ReadAllText($Html) | Should -Match 'VM billing-coverage check'
     }
 
-    It 'counts a VM whose state is transient or empty as running in the VM billing check, as pricing does' {
+    It 'counts a VM whose state is transient or empty as running in the VM billing check' {
         $Dir = Join-Path $script:TmpRoot 'vm-states'
         [void][System.IO.Directory]::CreateDirectory($Dir)
         $Json = Join-Path $Dir 'Inventory_vms.json'

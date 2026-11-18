@@ -172,7 +172,7 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Literal
     $VmRecords = if ($Inventory.PSObject.Properties.Name -contains 'VirtualMachines') { $Inventory.VirtualMachines } else { $null }
     if ($VmRecords)
     {
-        # As pricing reads PowerState: 'running' or 'transient' is on, and so is
+        # A VM is on when PowerState is 'running' or 'transient', and so is
         # an empty state.
         $RunningVmCount = @($VmRecords | Where-Object { $State = if ($_.PSObject.Properties.Name -contains 'PowerState') { [string]$_.PowerState } else { '' }; [string]::IsNullOrWhiteSpace($State) -or $State -match 'running|transient' }).Count
     }

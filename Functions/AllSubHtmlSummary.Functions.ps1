@@ -388,7 +388,7 @@ function Clear-RdaLeftover
 }
 
 # Stops (throws) before anything is extracted from the zip $Path when it is
-# outside the limits downstream accepts a report zip within: more than 2000
+# outside the report zip limits: more than 2000
 # entries, an entry over 16 GB, over 32 GB in all, an entry or the whole
 # packed more than 100 to 1, or an entry path that is rooted or holds '..'.
 # Reads only the zip's directory.
@@ -888,8 +888,8 @@ function Invoke-RdaAllSubHtmlSummaryFromZip
             throw ("New-RdaAllSubHtmlSummaryFromZip: -PackageZip would write {0}, which is -InputZip. Choose another -OutputDirectory." -f $PlannedPackage)
         }
     }
-    # Checked before anything is created or extracted, as downstream checks a
-    # report zip.
+    # Checked against the report zip limits before anything is created or
+    # extracted.
     Assert-RdaZipWithinLimit -Path $ZipItem.FullName
 
     if ([string]::IsNullOrWhiteSpace($HtmlFile))

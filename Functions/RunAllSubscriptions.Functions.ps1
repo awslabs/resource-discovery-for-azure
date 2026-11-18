@@ -428,7 +428,7 @@ function Invoke-PreFlightChecks
 #
 # That endpoint is anonymous (no sign-in required) and returns a JSON document
 # whose "issuer" field embeds the tenant GUID. Resolving up front means every
-# downstream call (Connect-AzAccount, Get-AzSubscription, the resume state filename, the
+# later call (Connect-AzAccount, Get-AzSubscription, the resume state filename, the
 # auth gate) operates on a stable identifier even if Azure later renames the
 # domain.
 function Resolve-TenantId

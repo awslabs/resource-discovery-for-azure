@@ -364,7 +364,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).csv` | Azure usage (billing) data: one row per meter and resource, with quantity, unit and usage dates. It holds no cost amounts (see [Consumption data](docs/consumption-data.md)) |
+| `Consumption_ResourcesReport_(date).csv` | The file holds Azure usage only: one row per meter and resource, with quantity, unit and usage dates. It has no prices or cost amounts. (see [Consumption data](docs/consumption-data.md)) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |

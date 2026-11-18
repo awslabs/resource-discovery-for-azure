@@ -508,7 +508,7 @@ function ConvertTo-RdaBundleLink
 #
 # Steps 2 and 3 of the wrapper's bundle step: put a copy of each listed report
 # folder's html in <BundleStage>/HTML<stamp>/ (the folder name with its leading
-# 'ResourcesReport' swapped for 'HTML'; html only, so nothing is ingested twice;
+# 'ResourcesReport' swapped for 'HTML'; html only, so nothing is copied twice;
 # a *_revealed* report is never copied), then write <BundleStage>/MainSummary.html
 # from -MainSummaryFile with its hrefs pointed at those folders and every link
 # whose folder or html was not staged turned into muted text. The caller picks the

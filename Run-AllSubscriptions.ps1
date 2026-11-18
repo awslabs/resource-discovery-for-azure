@@ -2080,7 +2080,7 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
         #    'ResourcesReport' replaced by 'HTML'). These bundle folders carry
         #    ONLY the report HTML, so the HTML prefix tells them apart from the
         #    sibling ResourcesReport_<stamp>.zip data archives, and nothing is
-        #    double-ingested. The summary's hrefs are rewritten to match
+        #    copied twice. The summary's hrefs are rewritten to match
         #    (href="ResourcesReport... -> href="HTML...), which also points each
         #    row's Folder link at its HTML<stamp>/ folder; a link whose folder
         #    or html was not staged becomes muted text. Scoped to THIS run by

@@ -364,7 +364,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
+| `Consumption_ResourcesReport_(date).csv` | Azure usage (billing) data: one row per meter and resource, with quantity, unit and usage dates. It holds no cost amounts (see [Consumption data](docs/consumption-data.md)) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
@@ -440,7 +440,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
-| `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Skip usage (billing) data collection | False | `-SkipConsumption` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
 | `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
 
@@ -450,7 +450,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 metrics only. Lowering it (e.g. 31 → 14 or 7) reduces both run time and memory
 use, which helps on large estates that time out or hit out-of-memory errors
 during the metrics phase. It does **not** change which resources are found, and
-it does **not** affect cost/consumption data (that phase uses its own fixed
+it does **not** affect consumption (usage) data (that phase uses its own fixed
 window).
 
 The tradeoff is right-sizing accuracy: a shorter window samples fewer
@@ -509,7 +509,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
-| `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Forwarded. Skip usage (billing) data collection. | False | `-SkipConsumption` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
 
 ## Troubleshooting

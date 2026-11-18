@@ -184,9 +184,9 @@ You might get more than one authentication request due to different collector pr
 
 ### Advanced Usage Examples
 
-For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it inventories the whole tenant and forwards the common options (`-SkipConsumption`, `-SkipMetrics`, `-ConcurrencyLimit`, `-Obfuscate`, `-DeviceLogin`), so they behave exactly as they would on the inner script:
+For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it inventories the whole tenant and forwards these options (`-SkipConsumption`, `-SkipMetrics`, `-ConcurrencyLimit`, `-Obfuscate`, `-DeviceLogin`), so they behave exactly as they would on the inner script:
 
-**Skip consumption (billing) data:**
+**Skip consumption (billing) data** (not for a normal run; see [When to use `-SkipConsumption`](#when-to-use--skipconsumption)):
 ```powershell
 ./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -SkipConsumption
 ```
@@ -381,6 +381,20 @@ A Consumption file starts like this (made-up test data). The full sample, with a
 "{""Microsoft.Resources"":{""ResourceUri"":""/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1"",""Location"":""westeurope"",""additionalInfo"":{""ConsumptionMeter"":"""",""ImageType"":"""",""AHB"":"""",""vCores"":0,""VCPUs"":0,""ServiceType"":"""",""ResourceCategory"":"""",""Edition"":"""",""LicenseType"":"""",""HostLicenseType"":"""",""OS"":"""",""IsVM"":"""",""NumberOfCores"":0,""NumberOfLogicalProcessors"":0,""SLO"":"""",""ServerSku"":"""",""ServerEdition"":"""",""IsHAEnabled"":""""}}}","Storage","bf07323a-2702-5ff8-9802-27a9778ba970","P10 LRS Disk","EU West","Premium SSD Managed Disks","0.0522","1/Month","10/1/2026 12:00:00 AM","10/2/2026 12:00:00 AM","/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1","westeurope",,,
 ```
 
+#### When to use `-SkipConsumption`
+
+Do not use `-SkipConsumption` for a normal run. A normal run needs the usage data.
+
+Use it only:
+
+- to troubleshoot a run, or
+- to collect certain services or metrics again, when you already have the usage data for that period.
+
+What you lose with `-SkipConsumption`:
+
+- The run reads no usage data. The `Consumption_*.csv` file holds only its header row, so the report has no usage rows.
+- `Run-AllSubscriptions.ps1` skips its up-front check that the signed-in identity can read usage data.
+
 ### File Delivery
 
 1. **Locate the output:** Check the `InventoryReports` folder
@@ -448,7 +462,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
-| `SkipConsumption` | Switch | Skip usage (billing) data collection | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Skip usage (billing) data collection. Not for a normal run: use it only to troubleshoot, or to collect certain services or metrics again when you already have the usage data for that period. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption). | False | `-SkipConsumption` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
 | `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
 
@@ -517,7 +531,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
-| `SkipConsumption` | Switch | Forwarded. Skip usage (billing) data collection. | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Forwarded. Skip usage (billing) data collection, and skip the up-front check of usage data access. Not for a normal run: use it only to troubleshoot, or to collect certain services or metrics again when you already have the usage data for that period. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption). | False | `-SkipConsumption` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
 
 ## Troubleshooting
@@ -543,8 +557,8 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
 
 **Run stops immediately with "not authorized to read consumption/billing data":**
-- `Run-AllSubscriptions.ps1` verifies consumption (billing) access up front whenever consumption is requested (i.e. `-SkipConsumption` was **not** passed). If the signed-in identity can't read consumption data, the run **hard-fails immediately** rather than producing reports silently missing the billing data you asked for.
-- Fix: grant the identity **Cost Management Reader** (or **Billing Reader** on the billing scope), then re-run — or re-run with `-SkipConsumption` to inventory without billing data.
+- `Run-AllSubscriptions.ps1` verifies consumption (billing) access up front whenever consumption is requested (i.e. `-SkipConsumption` was **not** passed). If the signed-in identity can't read consumption data, the run **hard-fails immediately** rather than producing reports silently missing the usage data you asked for.
+- Fix: grant the identity **Cost Management Reader** (or **Billing Reader** on the billing scope), then re-run. Do not use `-SkipConsumption` to get past this check on a normal run: the report then has no usage rows. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption).
 - Note: this is a genuine authorization denial. A transient/token issue (Conditional Access, expired token, throttling) is **not** treated as a hard fail here — it warns and continues, and per-subscription consumption health is still reported at the end of the run.
 
 **Consumption sheet empty across many subs:**
@@ -559,7 +573,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 
 **Performance Issues:**
 - Reduce `ConcurrencyLimit` if experiencing timeouts
-- Use `SkipConsumption` to speed up execution. This is not recommended, as it greatly reduces the usefulness of the report.
+- Do not use `SkipConsumption` to speed up a normal run: the report then has no usage rows. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption).
 - Consider targeting specific subscriptions or resource groups
 - For tenants with many subscriptions, use `-ParallelStreams` (see the Cloud Shell sizing table above).
 

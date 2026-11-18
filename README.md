@@ -60,9 +60,10 @@ For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-w
 Before running the script, ensure your Azure user account has the following roles assigned:
 
 - **✅ Reader Role** - Access to view Azure resources
-- **✅ Billing Reader Role** - Access to billing and cost data
+- **✅ Billing Reader Role** - Access to billing data
 - **✅ Monitoring Reader Role** - Access to Azure Monitor metrics
-- **✅ Cost Management Reader Role** - Access to cost management data
+
+Consumption (usage) data needs the permission `Microsoft.Commerce/UsageAggregates/read` on every subscription in the run, granted at the subscription or above (a role on a resource group does not return usage). The built-in **Reader** and **Billing Reader** roles include it. **Cost Management Reader does not**, so it is not enough for consumption data on its own.
 
 ### Environment Options
 
@@ -558,7 +559,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 
 **Run stops immediately with "not authorized to read consumption/billing data":**
 - `Run-AllSubscriptions.ps1` verifies consumption (billing) access up front whenever consumption is requested (i.e. `-SkipConsumption` was **not** passed). If the signed-in identity can't read consumption data, the run **hard-fails immediately** rather than producing reports silently missing the usage data you asked for.
-- Fix: grant the identity **Cost Management Reader** (or **Billing Reader** on the billing scope), then re-run. Do not use `-SkipConsumption` to get past this check on a normal run: the report then has no usage rows. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption).
+- Fix: grant the identity **Reader** or **Billing Reader** on each subscription (or above), then re-run. **Cost Management Reader** does not include the usage permission `Microsoft.Commerce/UsageAggregates/read`, so it is not enough. Do not use `-SkipConsumption` to get past this check on a normal run: the report then has no usage rows. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption).
 - Note: this is a genuine authorization denial. A transient/token issue (Conditional Access, expired token, throttling) is **not** treated as a hard fail here — it warns and continues, and per-subscription consumption health is still reported at the end of the run.
 
 **Consumption sheet empty across many subs:**

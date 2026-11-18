@@ -364,7 +364,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
+| `Consumption_ResourcesReport_(date).csv` | The file holds Azure usage only: one row per meter and resource, with quantity, unit and usage dates. It has no prices or cost amounts. (see [Consumption data](docs/consumption-data.md)) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
@@ -372,6 +372,14 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `DebugLog_<ReportName>_(date).log` | Consolidated **local** debug log — per-collector heartbeat + metrics diagnostics. Never added to the zip (may contain real names/exception text) |
 | `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on `-Obfuscate` runs only** |
 | `ResourcesReport_(date).zip` | All files compressed |
+
+A Consumption file starts like this (made-up test data). The full sample, with a VM, a managed disk, a storage account and a SQL database, is [docs/samples/Consumption_ResourcesReport_sample.csv](docs/samples/Consumption_ResourcesReport_sample.csv). The columns are explained in [Consumption data](docs/consumption-data.md).
+
+```csv
+"InstanceData","MeterCategory","MeterId","MeterName","MeterRegion","MeterSubCategory","Quantity","Unit","UsageStartTime","UsageEndTime","ResourceId","ResourceLocation","ConsumptionMeter","ReservationId","ReservationOrderId"
+"{""Microsoft.Resources"":{""ResourceUri"":""/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/virtualmachines/vm-app-01"",""Location"":""westeurope"",""additionalInfo"":{""ConsumptionMeter"":"""",""ImageType"":""canonical"",""AHB"":"""",""vCores"":0,""VCPUs"":8,""ServiceType"":""standard_e8s_v5"",""ResourceCategory"":"""",""Edition"":"""",""LicenseType"":"""",""HostLicenseType"":"""",""OS"":"""",""IsVM"":"""",""NumberOfCores"":0,""NumberOfLogicalProcessors"":0,""SLO"":"""",""ServerSku"":"""",""ServerEdition"":"""",""IsHAEnabled"":""""}}}","Virtual Machines","c3a4f13b-6b0f-5154-a116-65e9ed24daa3","E8s_v5","EU West","Dsv5 Series","20.45","1 Hour","10/1/2026 12:00:00 AM","10/2/2026 12:00:00 AM","/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/virtualmachines/vm-app-01","westeurope",,,
+"{""Microsoft.Resources"":{""ResourceUri"":""/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1"",""Location"":""westeurope"",""additionalInfo"":{""ConsumptionMeter"":"""",""ImageType"":"""",""AHB"":"""",""vCores"":0,""VCPUs"":0,""ServiceType"":"""",""ResourceCategory"":"""",""Edition"":"""",""LicenseType"":"""",""HostLicenseType"":"""",""OS"":"""",""IsVM"":"""",""NumberOfCores"":0,""NumberOfLogicalProcessors"":0,""SLO"":"""",""ServerSku"":"""",""ServerEdition"":"""",""IsHAEnabled"":""""}}}","Storage","bf07323a-2702-5ff8-9802-27a9778ba970","P10 LRS Disk","EU West","Premium SSD Managed Disks","0.0522","1/Month","10/1/2026 12:00:00 AM","10/2/2026 12:00:00 AM","/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1","westeurope",,,
+```
 
 ### File Delivery
 
@@ -440,7 +448,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
-| `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Skip usage (billing) data collection | False | `-SkipConsumption` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
 | `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
 
@@ -450,7 +458,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 metrics only. Lowering it (e.g. 31 → 14 or 7) reduces both run time and memory
 use, which helps on large estates that time out or hit out-of-memory errors
 during the metrics phase. It does **not** change which resources are found, and
-it does **not** affect cost/consumption data (that phase uses its own fixed
+it does **not** affect consumption (usage) data (that phase uses its own fixed
 window).
 
 The tradeoff is right-sizing accuracy: a shorter window samples fewer
@@ -509,7 +517,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
-| `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Forwarded. Skip usage (billing) data collection. | False | `-SkipConsumption` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
 
 ## Troubleshooting

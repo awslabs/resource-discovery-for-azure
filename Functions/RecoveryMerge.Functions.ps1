@@ -405,6 +405,7 @@ function Merge-RecoveryData
     #    via the seeded ResourceIdMap, so a recovery run seeded with the gap
     #    dictionary yields metrics tokens that match the merged inventory. Write a
     #    canonical empty file only if the chosen source has none.
+    $OutMetricsFiles = [System.Collections.Generic.List[string]]::new()
     if ($RecoverMetrics)
     {
         $RecoveryMetricsFiles = @(Get-ChildItem -Path $RecoveryBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
@@ -419,6 +420,7 @@ function Merge-RecoveryData
             $Suffix = $MetricsFile.BaseName -replace ('^Metrics_' + [regex]::Escape($RecoveryBase)), ''
             $RebasedName = 'Metrics_' + $BundleBase + $Suffix + '.json'
             Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $RebasedName) -Force
+            $OutMetricsFiles.Add((Join-Path $OutputPath $RebasedName))
         }
         $MetricsSource = 'recovery'
         # Advisory: the regenerated HTML does not render metrics (Summary.ps1
@@ -436,11 +438,13 @@ function Merge-RecoveryData
             foreach ($MetricsFile in $GapMetricsFiles)
             {
                 Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $MetricsFile.Name) -Force
+                $OutMetricsFiles.Add((Join-Path $OutputPath $MetricsFile.Name))
             }
         }
         else
         {
             @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -FilePath $OutMetricsFile -Encoding utf8
+            $OutMetricsFiles.Add($OutMetricsFile)
         }
         $MetricsSource = 'gap'
     }
@@ -489,13 +493,12 @@ function Merge-RecoveryData
     $ReportVersion = if ($GapInventory.PSObject.Properties.Name -contains 'Version') { $GapInventory.Version } else { $null }
     & $SummaryScript -JsonFile $OutInventoryFile -HtmlFile $OutHtmlFile -Title 'Azure Resource Inventory' -Version $ReportVersion -ConsumptionFile $OutConsumptionFile | Out-Null
 
-    # -- Re-zip, mirroring ResourceInventory.ps1's packaging filter: HTML +
-    #    Consumption CSV + every *.json EXCEPT the local-only dictionary/Full/
-    #    Heartbeat/ErrorLog files. The dictionary is deliberately NOT zipped. ---
-    $ZipJsonFiles = Get-ChildItem -Path $OutputPath -Filter '*.json' |
-        Where-Object { $_.Name -notlike 'ObfuscationDictionary_*' -and $_.Name -notlike 'Full_*' -and $_.Name -notlike 'Heartbeat_*' -and $_.Name -notlike 'ErrorLog_*' } |
-        Select-Object -ExpandProperty FullName
-    $ZipPaths = @($OutHtmlFile, $OutConsumptionFile) + $ZipJsonFiles
+    # -- Re-zip only the files this call wrote: HTML + consumption CSV + merged
+    #    inventory + metrics. An existing -OutputPath can hold another bundle's
+    #    files (another report's inventory, or an earlier merge's metrics
+    #    batches), and those must not ship in this zip. The dictionary is
+    #    deliberately NOT zipped. ---
+    $ZipPaths = @($OutHtmlFile, $OutConsumptionFile, $OutInventoryFile) + @($OutMetricsFiles)
     if (Test-Path -Path $OutZipFile) { Remove-Item -Path $OutZipFile -Force }
     Compress-Archive -Path $ZipPaths -CompressionLevel Fastest -DestinationPath $OutZipFile
 

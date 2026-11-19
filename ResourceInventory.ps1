@@ -1285,7 +1285,8 @@ function ExecuteInventoryProcessing()
             $ContextSwitchError = $null
             try
             {
-                $null = Set-AzContext -Subscription $sub.id -ErrorAction Stop
+                # For this run only: -Scope Process keeps the switch out of the user's saved default subscription.
+                $null = Set-AzContext -Subscription $sub.id -Scope Process -ErrorAction Stop
                 $ContextOk = ((Get-AzContext).Subscription.Id -eq $sub.id)
             }
             catch

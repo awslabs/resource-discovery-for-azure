@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($AKS)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $AKS)
         {
@@ -52,7 +52,7 @@ if ($Task -eq 'Processing')
                     'Tags'                      = $Tags;
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

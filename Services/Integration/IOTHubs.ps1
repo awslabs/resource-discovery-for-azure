@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($IOTHubs)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $IOTHubs)
         {
@@ -32,7 +32,7 @@ if ($Task -eq 'Processing')
                     'HostName'                          = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.hostName } else { $Data.hostName };
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

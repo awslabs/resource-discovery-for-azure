@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($PublicDNS)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $PublicDNS)
         {
@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'MaxNumberOfRecordSets'     = $Data.maxNumberofRecordSets;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

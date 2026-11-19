@@ -8,7 +8,7 @@ if ($Task -eq 'Processing')
 
     if ($AVD)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $AVD)
         {
@@ -80,7 +80,7 @@ if ($Task -eq 'Processing')
                     'OSVersion'          = $2.properties.osVersion;
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

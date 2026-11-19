@@ -8,7 +8,7 @@ if ($Task -eq 'Processing')
 
     if ($RedisCache)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($redisCacheInstance in $RedisCache)
         {
@@ -28,7 +28,7 @@ if ($Task -eq 'Processing')
                     'Family'                = $Data.sku.family;
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
             else
             {
@@ -43,7 +43,7 @@ if ($Task -eq 'Processing')
                     'Family'                = 'enterprise';
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

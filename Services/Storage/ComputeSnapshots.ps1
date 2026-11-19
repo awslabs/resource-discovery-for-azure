@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($Snapshots)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($snapshot in $Snapshots)
         {
@@ -31,7 +31,7 @@ if ($Task -eq 'Processing')
                 'SourceResourceId'                      = if (![string]::IsNullOrEmpty($Data.creationData.sourceResourceId) -and $null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { if ($ResourceIdDictionary.ContainsKey($Data.creationData.sourceResourceId)) { $ResourceIdDictionary[$Data.creationData.sourceResourceId] } else { 'obfuscated' } } else { $Data.creationData.sourceResourceId };
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

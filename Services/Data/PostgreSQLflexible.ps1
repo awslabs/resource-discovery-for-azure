@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($PostgreSQLFlexible)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $PostgreSQLFlexible)
         {
@@ -36,7 +36,7 @@ if ($Task -eq 'Processing')
                 'HighAvailabilityState'             = $Data.highAvailability.state;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

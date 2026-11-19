@@ -13,8 +13,10 @@ if ($Task -eq 'Processing')
             $Sub1 = $SUB | Where-Object { $_.Id -eq $disk.subscriptionId }
             $Data = $disk.PROPERTIES
             $Timecreated = $Data.timeCreated
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            # A missing value, or one that does not convert to a date, is 'Unknown'
+            # rather than an exception that fails the whole collector.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = try { if ($null -ne $Timecreated) { [datetime]::Parse($Timecreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal').ToString("yyyy-MM-dd HH:mm") } else { 'Unknown' } } catch { 'Unknown' }
             $SKU = $disk.SKU
 
             $Obj = @{

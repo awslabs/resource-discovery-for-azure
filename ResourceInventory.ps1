@@ -1589,6 +1589,14 @@ function FinalizeOutputs
 
 if (-not $RunAllSubs.IsPresent)
 {
+    # Run-wide health totals. The phases below only ever add to them, and a PowerShell
+    # window keeps its globals between runs, so a direct run starts from zero: otherwise
+    # its diagnostics log lists an earlier run's failures as this run's. Under -RunAllSubs
+    # the wrapper (or stream worker) resets them once and adds up every subscription.
+    $Global:ConsumptionRecordCount = 0
+    $Global:ConsumptionFailedSubs = @()
+    $Global:MetricsFailedSubs = @()
+    $Global:CollectorFailures = @()
 
     $PreFlightInventoryRoot = if ($OutputDirectory)
     {

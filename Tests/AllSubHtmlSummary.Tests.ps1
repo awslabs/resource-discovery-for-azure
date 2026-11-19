@@ -162,6 +162,60 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         $Html | Should -Match 'privacy-banner identifiable'
     }
 
+    It 'shows the obfuscated banner under -Obfuscated when the reports hold no records to sample' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{} -Obfuscated | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match 'privacy-banner obfuscated'
+        $Html | Should -Not -Match 'privacy-banner identifiable'
+    }
+
+    It 'says safe to share only under -Obfuscated, not when names only look masked in a sample' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ PublicIP = 3 } -Obfuscated | Out-Null
+        $Sampled = Join-Path $Run 'sampled.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Sampled | Out-Null
+        $Html = Get-Content -Path $Sampled -Raw
+        $Html | Should -Match 'privacy-banner obfuscated'
+        $Html | Should -Not -Match 'Safe to share|no real identifiers are present'
+        $Html | Should -Match 'Only a sample was checked'
+
+        $Console = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Sampled 6>&1 | ForEach-Object { [string]$_ } | Where-Object { $_ -like '*Privacy:*' })
+        $Console[0] | Should -BeLike '* Privacy: obfuscated (sample only; review before sharing).'
+
+        $Told = Join-Path $Run 'told.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Told -Obfuscated | Out-Null
+        Get-Content -Path $Told -Raw | Should -Match 'Safe to share'
+    }
+
+    It 'says Privacy: <Expected> on the console line when the reports hold no records to sample (-Obfuscated: <Obf>)' -ForEach @(
+        @{ Obf = $true; Expected = 'obfuscated' }
+        @{ Obf = $false; Expected = 'identifiable' }
+    ) {
+        $Run = New-Run
+        if ($Obf) { New-SubFolder -Root $Run -Services @{} -Obfuscated | Out-Null } else { New-SubFolder -Root $Run -Services @{} -SubName 'sub-a' | Out-Null }
+        $Out = Join-Path $Run 'main.html'
+
+        $Printed = @(New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated:$Obf 6>&1 | ForEach-Object { [string]$_ })
+        $Line = @($Printed | Where-Object { $_ -like '*Privacy:*' })
+        $Line.Count | Should -Be 1
+        $Line[0] | Should -BeLike ('* failed. Privacy: {0}.' -f $Expected)
+    }
+
+    It 'shows the identifiable banner without -Obfuscated when the reports hold no records to sample' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{} -SubName 'sub-a' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match 'privacy-banner identifiable'
+        $Html | Should -Not -Match 'privacy-banner obfuscated'
+    }
+
     It 'renders run-wide charts only when -Detailed is passed' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 2; StorageAcc = 1; AppServices = 1 } -SubName 'Sub A' | Out-Null

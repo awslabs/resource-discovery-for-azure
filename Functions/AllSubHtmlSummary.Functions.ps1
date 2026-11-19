@@ -178,7 +178,10 @@ function New-RdaAllSubHtmlSummary
         # Directory holding the per-subscription report folders (ResourcesReport*).
         [Parameter(Mandatory = $true)] $RunOutputDirectory,
 
-        # Output path for the aggregate .html.
+        # Output path for the aggregate .html. Its Report and Folder links are
+        # relative to -RunOutputDirectory, so the page works once it sits in that
+        # folder: write it there, or move it there (or into a copy of the folder
+        # layout) before anyone opens it.
         [Parameter(Mandatory = $true)] $HtmlFile,
 
         # Optional: only include report folders modified at/after this time, so the
@@ -247,7 +250,7 @@ function New-RdaAllSubHtmlSummary
         catch
         {
             # A single unreadable inventory must not abort the whole summary.
-            $SubReports += [pscustomobject]@{ Name = ('(unreadable inventory: {0})' -f $Folder.Name); Total = 0; Link = $null; Folder = $Folder.Name }
+            $SubReports += [pscustomobject]@{ Name = ('(unreadable inventory: {0})' -f $Folder.Name); Total = 0; Link = $null; Folder = $Folder.Name; FolderLink = ([uri]::EscapeDataString($Folder.Name) + '/') }
             continue
         }
 
@@ -276,10 +279,17 @@ function New-RdaAllSubHtmlSummary
 
         $HtmlItem = Get-ChildItem -LiteralPath $Folder.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
-        # Relative link so the summary travels with the report folder.
-        $Link = if ($null -ne $HtmlItem) { (Join-Path $Folder.Name $HtmlItem.Name) } else { $null }
+        # Relative link so the summary travels with the report folder. Each part
+        # is URL-encoded and joined with '/', the URL separator on every OS.
+        $Link = if ($null -ne $HtmlItem) { [uri]::EscapeDataString($Folder.Name) + '/' + [uri]::EscapeDataString($HtmlItem.Name) } else { $null }
 
-        $SubReports += [pscustomobject]@{ Name = $SubName; Total = $Total; Link = $Link; Folder = $Folder.Name }
+        # The report folder itself, relative to the summary and URL-encoded, so it
+        # opens after the zip is unpacked anywhere. The name is the report folder
+        # name (ReportName + stamp; the wrapper always uses ResourcesReport), which
+        # the Report link's path shows already.
+        $FolderLink = [uri]::EscapeDataString($Folder.Name) + '/'
+
+        $SubReports += [pscustomobject]@{ Name = $SubName; Total = $Total; Link = $Link; Folder = $Folder.Name; FolderLink = $FolderLink }
     }
 
     # Detect obfuscation posture the same way Summary.ps1 does (safe default: identifiable).
@@ -384,11 +394,14 @@ function New-RdaAllSubHtmlSummary
         $CountText = '{0:N0}' -f $Sr.Total
         $HealthCell = if ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
         $LinkCell = if ($Sr.Link) { ('<a href="{0}">open &#8599;</a>' -f (ConvertTo-HtmlSafe $Sr.Link)) } else { '<span class="muted">no report</span>' }
-        [void]$Rows.AppendFormat('<tr><td>{0}</td><td class="num">{1}</td><td>{2}</td><td>{3}</td></tr>', $NameSafe, $CountText, $HealthCell, $LinkCell)
+        # Every row comes from a folder on disk, so FolderLink is always set; the
+        # muted text is only a fallback.
+        $FolderCell = if ($Sr.FolderLink) { ('<a class="folder" href="{0}">folder &#8599;</a>' -f (ConvertTo-HtmlSafe $Sr.FolderLink)) } else { '<span class="muted">no folder</span>' }
+        [void]$Rows.AppendFormat('<tr><td>{0}</td><td class="num">{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>', $NameSafe, $CountText, $HealthCell, $LinkCell, $FolderCell)
     }
     if ($SubReports.Count -eq 0)
     {
-        [void]$Rows.Append('<tr><td colspan="4" class="muted">No per-subscription reports were found in the run output directory.</td></tr>')
+        [void]$Rows.Append('<tr><td colspan="5" class="muted">No per-subscription reports were found in the run output directory.</td></tr>')
     }
 
     $MetaBits = @()
@@ -441,15 +454,87 @@ $($Banners.ToString())
   <div class="card"><div class="n">$($FailedList.Count)</div><div class="l">Failed</div></div>
 </div>
 $ChartsHtml
-<table><thead><tr><th>Subscription</th><th class="num">Resources</th><th>Health</th><th>Report</th></tr></thead>
+<table><thead><tr><th>Subscription</th><th class="num">Resources</th><th>Health</th><th>Report</th><th>Folder</th></tr></thead>
 <tbody>$($Rows.ToString())</tbody></table>
-<footer>Resource Discovery for Azure$(if ($VersionSafe){" v$VersionSafe"}). Aggregate summary built from on-disk per-subscription reports; no Azure calls. Links open each subscription's own report.</footer>
+<footer>Resource Discovery for Azure$(if ($VersionSafe){" v$VersionSafe"}). Aggregate summary built from on-disk per-subscription reports; no Azure calls. Links open each subscription's own report and its folder.</footer>
 </div></body></html>
 "@
 
     $Html | Out-File -FilePath $HtmlFile -Encoding utf8
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
     Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
+}
+
+# =============================================================================
+# ConvertTo-RdaBundleLink
+#
+# The consolidated zip carries a copy of MainSummary.html whose links point at
+# the HTML<stamp>/ folders staged beside it. A row whose folder or html was not
+# staged would keep a link that opens nothing, so it becomes plain muted text:
+# a Folder link must name one folder right under the bundle root, a Report link
+# one file inside such a folder. Every other link shape is muted too.
+# =============================================================================
+function ConvertTo-RdaBundleLink
+{
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$Html,
+        [Parameter(Mandatory = $true)] [string]$BundleRoot
+    )
+
+    # One decoded path part that stays where it is: no separator, drive or dot name.
+    $IsPart = { param($Part) ($Part -ne '') -and ($Part -ne '.') -and ($Part -ne '..') -and ($Part -notmatch '[\\/:]') }
+
+    $FolderEvaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($Match)
+        $Raw = $Match.Groups[1].Value
+        if ($Raw.EndsWith('/')) { $Raw = $Raw.Substring(0, $Raw.Length - 1) }
+        $Name = [uri]::UnescapeDataString($Raw)
+        if ((& $IsPart $Name) -and (Test-Path -LiteralPath (Join-Path $BundleRoot $Name) -PathType Container)) { return $Match.Value }
+        return '<span class="muted">no folder</span>'
+    }
+    $ReportEvaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($Match)
+        $Parts = @($Match.Groups[1].Value -split '/' | ForEach-Object { [uri]::UnescapeDataString($_) })
+        if (($Parts.Count -eq 2) -and (& $IsPart $Parts[0]) -and (& $IsPart $Parts[1]) -and
+            (Test-Path -LiteralPath (Join-Path (Join-Path $BundleRoot $Parts[0]) $Parts[1]) -PathType Leaf)) { return $Match.Value }
+        return '<span class="muted">no report</span>'
+    }
+    $Html = [regex]::Replace($Html, '<a class="folder" href="([^"]*)">folder &#8599;</a>', $FolderEvaluator)
+    return [regex]::Replace($Html, '<a href="([^"]*)">open &#8599;</a>', $ReportEvaluator)
+}
+
+# =============================================================================
+# Copy-RdaBundleSummary
+#
+# Steps 2 and 3 of the wrapper's bundle step: put a copy of each listed report
+# folder's html in <BundleStage>/HTML<stamp>/ (the folder name with its leading
+# 'ResourcesReport' swapped for 'HTML'; html only, so nothing is copied twice;
+# a *_revealed* report is never copied), then write <BundleStage>/MainSummary.html
+# from -MainSummaryFile with its hrefs pointed at those folders and every link
+# whose folder or html was not staged turned into muted text. The caller picks the
+# folders. -MainSummaryFile may be empty or missing: then only the html is staged.
+# =============================================================================
+function Copy-RdaBundleSummary
+{
+    param(
+        [AllowNull()] [AllowEmptyString()] [string]$MainSummaryFile,
+        [Parameter(Mandatory = $true)] [string]$BundleStage,
+        [AllowNull()] [AllowEmptyCollection()] [object[]]$ReportFolders = @()
+    )
+
+    foreach ($SubDir in @($ReportFolders | Where-Object { $null -ne $_ }))
+    {
+        $SubHtml = Get-ChildItem -LiteralPath $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
+        if ($null -eq $SubHtml) { continue }
+        $DestDir = Join-Path $BundleStage ($SubDir.Name -replace '^ResourcesReport', 'HTML')
+        New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
+        Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
+    }
+
+    if ([string]::IsNullOrWhiteSpace($MainSummaryFile) -or -not (Test-Path -LiteralPath $MainSummaryFile -PathType Leaf)) { return }
+    $Html = (Get-Content -LiteralPath $MainSummaryFile -Raw) -replace 'href="ResourcesReport', 'href="HTML'
+    ConvertTo-RdaBundleLink -Html $Html -BundleRoot $BundleStage |
+        Set-Content -LiteralPath (Join-Path $BundleStage 'MainSummary.html') -Encoding utf8 -NoNewline
 }
 
 # =============================================================================

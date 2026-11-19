@@ -141,6 +141,45 @@ Describe 'New-RdaAllSubHtmlSummary aggregate report' {
         $Html | Should -Match 'returned 0 resources'
     }
 
+    It 'names each stream whose summary could not be read, with its count, and does not count it as failed' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Sub A' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        $Streams = @(
+            [pscustomobject]@{ StreamId = 0; SubCount = 3 }
+            [pscustomobject]@{ StreamId = 2; SubCount = 1 }
+        )
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -UnreadableStreams $Streams | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 0 could not be read.</b> Its 3 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 2 could not be read.</b> Its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        (Get-Card $Html 'Failed') | Should -Be '0' -Because 'an unreadable stream summary is not a failed subscription'
+        $Html | Should -Not -Match 'failed to process'
+
+        # Same fixed text under -Obfuscated: it holds stream numbers and counts only.
+        $ObfOut = Join-Path $Run 'main-obf.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $ObfOut -Obfuscated -UnreadableStreams $Streams | Out-Null
+        (Get-Content -Path $ObfOut -Raw) | Should -Match ([regex]::Escape('The summary of stream 0 could not be read.</b> Its 3 subscription(s) are not confirmed'))
+    }
+
+    It 'says a stream summary that is missing is missing, not that it could not be read' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Sub A' | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        $Streams = @(
+            [pscustomobject]@{ StreamId = 0; SubCount = 3; Reason = 'Missing' }
+            [pscustomobject]@{ StreamId = 2; SubCount = 1; Reason = 'Unreadable' }
+        )
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -UnreadableStreams $Streams | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 0 is missing.</b> Its 3 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        $Html | Should -Not -Match ([regex]::Escape('The summary of stream 0 could not be read.'))
+        $Html | Should -Match ([regex]::Escape('<div class="banner err"><b>The summary of stream 2 could not be read.</b> Its 1 subscription(s) are not confirmed; check the consolidated zip for their reports.</div>'))
+        (Get-Card $Html 'Failed') | Should -Be '0' -Because 'a missing stream summary is not a failed subscription'
+    }
+
     It 'detects obfuscated posture from prod_/nonprod_ tokens' {
         $Run = New-Run
         New-SubFolder -Root $Run -Services @{ VirtualMachines = 3; StorageAcc = 2 } -Obfuscated | Out-Null
@@ -407,5 +446,30 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
 
         $Html | Should -Match 'Tenant:' -Because 'an identifiable bundle shows the tenant'
         $Html | Should -Match 'Fabrikam-Billing' -Because 'an identifiable bundle names the affected subs'
+    }
+
+    It '<Case>: counts each subscription with a consumption failure once and shows the sign-in skips as their own count' -ForEach @(
+        @{ Case = 'without -Obfuscated'; Obfuscated = $false }
+        @{ Case = 'with -Obfuscated'; Obfuscated = $true }
+    ) {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated:$Obfuscated | Out-Null
+        $Out = Join-Path $Run 'main.html'
+        # Fabrikam-Billing twice (two of its pages failed), and the '(auth)'
+        # sign-in rows of two subscriptions, one of them twice.
+        $Rows = @(
+            [pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'page 2 failed' }
+            [pscustomobject]@{ Name = 'Fabrikam-Billing'; Id = '12345678-1234-1234-1234-123456789012'; Message = 'page 3 failed' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '00000000-0000-0000-0000-00000000000a' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '00000000-0000-0000-0000-00000000000b' }
+            [pscustomobject]@{ Name = '(all subscriptions)'; Id = '(auth)'; Message = 'skipped'; SubscriptionId = '00000000-0000-0000-0000-00000000000b' }
+        )
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated:$Obfuscated -ConsumptionFailedSubs $Rows | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<b>1 subscription\(s\) had consumption \(billing\) issues\.</b>'
+        $Html | Should -Match '<b>Consumption skipped for sign-in on 2 subscription\(s\)\.</b>'
+        $Html | Should -Not -Match '0000000a|0000000b' -Because 'the sign-in rows are counted, not named'
+        if ($Obfuscated) { $Html | Should -Not -Match 'Fabrikam-Billing' }
     }
 }

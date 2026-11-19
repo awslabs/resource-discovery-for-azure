@@ -194,6 +194,13 @@ function New-RdaAllSubHtmlSummary
         $MetricsFailedSubs = @(),
         $CollectorFailures = @(),
 
+        # Streams whose summary file is missing or could not be read:
+        # { StreamId; SubCount; Reason }, Reason 'Missing' or 'Unreadable'
+        # (no Reason reads as 'Unreadable'). Their subscriptions are not
+        # confirmed, but they are not failed subscriptions, so they get their
+        # own banner and not the Failed count.
+        $UnreadableStreams = @(),
+
         # Display-only header fields.
         $TenantId,
         $Version,
@@ -318,7 +325,12 @@ function New-RdaAllSubHtmlSummary
     # Health banners built from the passed-through wrapper collections. Each is
     # read-only; a null/empty collection renders nothing.
     $FailedList = @(@($FailedSubscriptions) | Where-Object { $_ })
-    $ConsumpList = @(@($ConsumptionFailedSubs) | Where-Object { $_ -and $_.Id -ne '(auth)' })
+    # Consumption by the wrapper's rule (Get-ConsumptionFailureView, not
+    # loaded with this file): each real subscription once by Name and Id, and
+    # the '(auth)' sign-in rows counted once per SubscriptionId.
+    $ConsumpRows = @(@($ConsumptionFailedSubs) | Where-Object { $_ })
+    $ConsumpList = @(@($ConsumpRows | Where-Object { $_.Id -ne '(auth)' }) | Sort-Object -Property Name, Id -Unique)
+    $ConsumpSignInCount = @(@($ConsumpRows | Where-Object { $_.Id -eq '(auth)' }) | ForEach-Object { [string]$_.SubscriptionId } | Sort-Object -Unique).Count
     $MetricsList = @(@($MetricsFailedSubs) | Where-Object { $_ })
     $CollectorList = @(@($CollectorFailures) | Where-Object { $_ })
 
@@ -334,6 +346,13 @@ function New-RdaAllSubHtmlSummary
             [void]$Banners.AppendFormat('<div class="banner err"><b>{0} subscription(s) failed to process.</b> These are missing from the totals below: {1}</div>', $FailedList.Count, (ConvertTo-HtmlSafe (($FailedList | ForEach-Object { [string]$_ }) -join ', ')))
         }
     }
+    # Fixed text with the stream number and count only, so it is the same
+    # under -Obfuscated.
+    foreach ($Stream in @(@($UnreadableStreams) | Where-Object { $null -ne $_ }))
+    {
+        $StateText = if ($Stream.Reason -eq 'Missing') { 'is missing' } else { 'could not be read' }
+        [void]$Banners.AppendFormat('<div class="banner err"><b>The summary of stream {0} {1}.</b> Its {2} subscription(s) are not confirmed; check the consolidated zip for their reports.</div>', [int]$Stream.StreamId, $StateText, [int]$Stream.SubCount)
+    }
     if ($EmptyCount -gt 0)
     {
         [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) returned 0 resources.</b> Often a Reader-permission gap rather than a genuinely empty subscription.</div>', $EmptyCount)
@@ -348,6 +367,11 @@ function New-RdaAllSubHtmlSummary
         {
             [void]$Banners.AppendFormat('<div class="banner warn"><b>{0} subscription(s) had consumption (billing) issues.</b> Cost data may be incomplete for: {1}</div>', $ConsumpList.Count, (ConvertTo-HtmlSafe (($ConsumpList | ForEach-Object { [string]$_.Name }) -join ', ')))
         }
+    }
+    # A count only, so it is the same under -Obfuscated.
+    if ($ConsumpSignInCount -gt 0)
+    {
+        [void]$Banners.AppendFormat('<div class="banner warn"><b>Consumption skipped for sign-in on {0} subscription(s).</b> Cost data is missing for those subscriptions.</div>', $ConsumpSignInCount)
     }
     if ($MetricsList.Count -gt 0)
     {

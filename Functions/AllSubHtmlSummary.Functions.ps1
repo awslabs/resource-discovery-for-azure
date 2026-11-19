@@ -187,6 +187,11 @@ function New-RdaAllSubHtmlSummary
         # included.
         $SinceTime,
 
+        # Optional: report folder names (ResourcesReport<stamp>) to include even when
+        # older than -SinceTime - the folders of the reports a -Resume run carries
+        # from the earlier run that completed those subscriptions.
+        $IncludeFolders = @(),
+
         # Optional run-health collections passed through from the wrapper. Each is an
         # array; when empty the corresponding banner is omitted.
         $FailedSubscriptions = @(),
@@ -228,7 +233,8 @@ function New-RdaAllSubHtmlSummary
     $Folders = @(Get-ChildItem -LiteralPath $RunOutputDirectory -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue)
     if ($null -ne $SinceTime)
     {
-        $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
+        $Included = @($IncludeFolders | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+        $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime -or $Included -contains $_.Name })
     }
 
     $ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'

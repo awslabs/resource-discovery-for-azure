@@ -127,7 +127,7 @@ $Global:ResourceCount = 1
     $AggText = (@($Body[$AggStart..($Body.Count - 1)] | ForEach-Object { $_.Extent.Text }) -join "`n")
     $script:AggregateBlock = [scriptblock]::Create(
         "param(`$StreamSummaries, `$InventoryRoot, `$TenantID, `$ResumeStateFile, `$CompletedIds, `$FailedAttempts, `$CompletedReports)`n" +
-        "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null`n" +
+        "`$SkippedSubscriptions = @(); `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$RunStartTime = (Get-Date).AddMinutes(-1)`n" +
         $AggText + "`n[pscustomobject]@{ SkippedSubscriptions = @(`$SkippedSubscriptions); SubResourceCounts = @(`$SubResourceCounts); CompletedIds = @(`$CompletedIds); CompletedReports = @(`$CompletedReports); FailedSubscriptions = @(`$FailedSubscriptions) }")
 
     # Post-processing shared by both paths: from "All subscriptions processed!"
@@ -382,7 +382,7 @@ Describe 'Exit code when an earlier report is missing from the consolidated zip'
 
     It 'the wrapper passes the uncarried list to the exit code and prints the FAILED banner before its transcript stops' {
         $Src = Get-Content -LiteralPath $script:WrapperPath -Raw
-        $Src | Should -Match ([regex]::Escape('Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing (@($UncarriedSkipped).Count -gt 0)'))
+        $Src | Should -Match ([regex]::Escape('Get-WrapperExitCode -AuthSkipped $AuthSkipped -CollectorsFailed $CollectorsFailed -ReportsMissing (($ResumeStateSaveFailed -and (Test-Path -LiteralPath $ResumeStateFile -PathType Leaf)) -or (@($UncarriedSkipped).Count -gt 0) -or (@($UnreadableStreamFiles).Count -gt 0) -or (@($LeftStreamFiles).Count -gt 0) -or (@($RetryOwedNotInRun).Count -gt 0))'))
         $Lines = Get-Content -LiteralPath $script:WrapperPath
         $Banner = ($Lines | Select-String -SimpleMatch 'FAILED (earlier report not carried) =' | Select-Object -First 1).LineNumber
         $Stop = ($Lines | Select-String -SimpleMatch 'Stop-Transcript on normal completion failed' | Select-Object -First 1).LineNumber
@@ -491,7 +491,7 @@ Describe 'Parallel path, end to end: interrupted stream, then -Resume' {
         }
     }
 
-    It 'the stream records its reports, a resumed stream reports what it skipped, and the bundle has every subscription' {
+    It 'the stream records its reports, the fold removes its file, the parent leaves out what it completed, and the bundle has every subscription' {
         $Root = script:New-CaseRoot
         $Global:RdaCarryTestRoot = $Root
         $State = Join-Path $Root '.resume-state-t.json'
@@ -509,21 +509,27 @@ Describe 'Parallel path, end to end: interrupted stream, then -Resume' {
         $Folded = & $script:FoldBlock $Root 't' $State @() @() @() 6>$null
         $HealedReports = @(script:Read-StateReports -Path $State | ForEach-Object Id)
 
+        # The fold removed the stream file once the unified file held its records.
+        Test-Path -LiteralPath $StreamFile | Should -BeFalse
+
+        # The parent leaves out what the fold lists as completed before it slices
+        # (it prints the skip and records it for the carry), so the stream gets
+        # only what is left.
         $Since = Get-Date
-        $Summary = script:Invoke-Worker -Root $Root -Ids @('sub-a', 'sub-b') -Names @('Sub A', 'Sub B') -Resume
+        $ParentSkipped = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        $Summary = script:Invoke-Worker -Root $Root -Ids @('sub-b') -Names @('Sub B') -Resume
 
         # The parent aggregates the stream summary and merges per-stream state, as written.
-        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 2 })
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $Root 'failures-stream-0.log'); SubCount = 1 })
         $Agg = & $script:AggregateBlock $Streams $Root 't' $State @($Folded.CompletedIds) @() @($Folded.CompletedReports) 6>$null
-        $Post = script:Invoke-Post -Root $Root -Since $Since -ThisRun $Agg.SubResourceCounts -Skipped $Agg.SkippedSubscriptions -Reports $Agg.CompletedReports
+        $Post = script:Invoke-Post -Root $Root -Since $Since -ThisRun $Agg.SubResourceCounts -Skipped $ParentSkipped -Reports $Agg.CompletedReports
 
         @(script:Get-InnerZipNames -OuterZip $Post.Result.OuterZipFile).Count | Should -Be 2 -Because 'the subscription the interrupted stream completed must not drop out of the consolidated zip'
         ($Post.Text -join "`n") | Should -Match 'verification: OK \(2 zip\(s\) match 1 successful sub\(s\) this run \+ 1 carried'
         $Run1Reports | Should -Be @('sub-a') -Because 'the stream records the zip of the subscription it completed'
         @($Folded.CompletedIds) | Should -Be @('sub-a')
         $HealedReports | Should -Be @('sub-a') -Because 'the healed unified state keeps the stranded report'
-        @($Summary.Skipped | ForEach-Object Id) | Should -Be @('sub-a')
-        @($Agg.SkippedSubscriptions | ForEach-Object Id) | Should -Be @('sub-a')
+        @($Summary.Skipped | ForEach-Object Id) | Should -BeNullOrEmpty -Because 'the stream was given only what is left'
         @($Agg.SubResourceCounts | ForEach-Object Id) | Should -Be @('sub-b')
         @(script:Read-StateReports -Path $State | ForEach-Object Id | Sort-Object) | Should -Be @('sub-a', 'sub-b')
     }
@@ -561,12 +567,15 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $script:FallbackBlock = [scriptblock]::Create(
             "param(`$FakeScriptRoot, `$Subscriptions, `$CompletedIds, `$FailedAttempts, `$CompletedReports, `$InventoryRoot, `$ResumeStateFile, `$TenantID)`n" +
             "`$StreamCount = 1; `$Obfuscate = `$false; `$SubResourceCounts = @(); `$FailedSubscriptions = @(); `$DiagFile = `$null; `$InventoryPassthrough = @{ ConcurrencyLimit = 6 }`n" +
+            # The parallel path builds the list it slices before this block; these runs are not -Resume runs, so it is every subscription.
+            "`$PendingSubscriptions = @(`$Subscriptions)`n" +
             ($OneIf[0].Extent.Text -replace '\$PSScriptRoot', '$FakeScriptRoot'))
 
         function script:Invoke-FailWorker
         {
-            param($Root, [string[]]$Ids, [string[]]$Names)
+            param($Root, [string[]]$Ids, [string[]]$Names, [object[]]$Prior = @())
             $WorkerArgs = @{
+                PriorFailedAttempts = $Prior
                 TenantID           = 't'
                 StreamId           = '0'
                 InventoryRoot      = $Root
@@ -696,7 +705,7 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $After2.Failed | Should -Be @('sub-a')
     }
 
-    It 'a stream that did not start leaves the earlier completion and report of its subscriptions as they were' {
+    It 'a stream that did not start ends the earlier completion of its subscriptions, puts them on the retry list, and the next -Resume collects them' {
         $S = script:Read-State -Path $script:State
         $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
         @{ StreamId = '0'; Tenant = 't'; Status = 'failed-to-start'; Reason = 'stand-in'; Completed = @(); ResourceCounts = @()
@@ -705,9 +714,174 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1 })
         $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports 6>$null
 
-        @($Agg.CompletedIds) | Should -Be @('sub-a')
-        @($Agg.CompletedReports | ForEach-Object Id) | Should -Be @('sub-a')
+        # A run without -Resume sliced sub-a, which an earlier run completed, and
+        # its stream did not start: sub-a was not collected, so the earlier
+        # completion and report end, and it is on the retry list as a failed run.
+        @($Agg.CompletedIds) | Should -BeNullOrEmpty
+        @($Agg.CompletedReports | ForEach-Object Id) | Should -BeNullOrEmpty
         @($Agg.FailedSubscriptions).Count | Should -Be 1
+        $After = script:Read-State -Path $script:State
+        $After.Completed | Should -BeNullOrEmpty
+        $After.Failed | Should -Be @('sub-a')
+
+        # The next -Resume collects sub-a instead of carrying its old report.
+        $R = script:Invoke-ResumeRun -Root $script:Root -State $script:State
+        @($R.Run.SkippedSubscriptions | ForEach-Object Id) | Should -BeNullOrEmpty
+        ($R.Post.Text -join "`n") | Should -Not -Match 'Resume: carrying'
+        @($R.Run.SubResourceCounts | ForEach-Object Id) | Should -Contain 'sub-a'
+    }
+
+    It 'a stream that did not start keeps the count of failed runs of an entry already on the retry list, and names a subscription it had no name for from the run''s list' {
+        $S = script:Read-State -Path $script:State
+        $Earlier = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 2 })
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'failed-to-start'; Reason = 'stand-in'; Completed = @(); ResourceCounts = @()
+            Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stream did not start: Az context import failed' }, @{ Id = 'sub-c'; Name = '<unknown>'; Reason = 'stream did not start: Az context import failed' })
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2 })
+        # Read by the lifted block, which names a subscription from the run's list.
+        Set-Variable -Name Subscriptions -Value @($script:A, $script:B, [pscustomobject]@{ Id = 'sub-c'; Name = 'Sub C' })
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Earlier $S.Reports 6>$null
+
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 2 -Because 'the cause is the stream''s sign-in, not the subscription'
+        [int](@($After | Where-Object Id -eq 'sub-c')[0].Attempts) | Should -Be 1
+        @($After | Where-Object Id -eq 'sub-c')[0].Name | Should -Be 'Sub C'
+    }
+
+    It 'a stream that fails a subscription counts one more failed run on top of the parent''s entry, and the parent passes each slice its entries' {
+        $Global:RdaCarryTestFailIds = @('sub-a')
+        $Prior = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
+        $null = script:Invoke-FailWorker -Root $script:Root -Ids @('sub-a') -Names @('Sub A') -Prior $Prior
+        $StreamState = Get-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Raw | ConvertFrom-Json
+        [int](@($StreamState.FailedAttempts | Where-Object Id -eq 'sub-a')[0].Attempts) | Should -Be 3
+        $Src = Get-Content -LiteralPath $script:WrapperPath -Raw
+        $Src | Should -Match ([regex]::Escape('PriorFailedAttempts = @($FailedAttempts | Where-Object { $null -ne $_ -and $SliceIds -contains [string]$_.Id })'))
+    }
+
+    It 'the end-of-run merge renames aside a per-stream file it cannot read, names it, and records it as unread' {
+        $S = script:Read-State -Path $script:State
+        $Bad = Join-Path $script:Root '.resume-state-t-stream-7.json'
+        Set-Content -LiteralPath $Bad -Value '{ not json' -NoNewline
+        $Streams = @()
+        $UnreadableStreamFiles = @()
+        $Lines = @(& { . $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports; $UnreadableStreamFiles } 6>&1 | ForEach-Object { [string]$_ })
+        Test-Path -LiteralPath $Bad | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:Root -Force -Filter '.resume-state-t-stream-7.json.unreadable-*').Count | Should -Be 1
+        @($Lines | Where-Object { $_ -like ('WARNING: Could not read the per-stream resume state file {0}:*' -f $Bad) }).Count | Should -Be 1
+    }
+
+    It 'the end-of-run merge keeps a per-stream file whose only record is a failure when the save does not reach the disk' {
+        $S = script:Read-State -Path $script:State
+        $File = Join-Path $script:Root '.resume-state-t-stream-0.json'
+        [pscustomobject]@{ Tenant = 't'; Completed = @(); FailedAttempts = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-02-01T00:00:00Z'; Reason = 'stand-in'; Attempts = 1 }); Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $File -Encoding utf8
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'partial-failure'; Completed = @(); ResourceCounts = @(); Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stand-in' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1 })
+        Mock Save-CompletedSubscriptionIds { }
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports 6>$null
+        Test-Path -LiteralPath $File | Should -BeTrue -Because 'it holds the only copy of the failure'
+    }
+
+    It 'the end-of-run merge keeps the per-stream files when the resume state does not hold their records afterwards' {
+        $S = script:Read-State -Path $script:State
+        $File = Join-Path $script:Root '.resume-state-t-stream-0.json'
+        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-b'); FailedAttempts = @(); Reports = @() } | ConvertTo-Json | Set-Content -LiteralPath $File -Encoding utf8
+        Mock Save-CompletedSubscriptionIds { }
+        $Lines = @(& $script:AggregateBlock @() $script:Root 't' $script:State $S.Completed @() $S.Reports 6>&1 | ForEach-Object { [string]$_ })
+        Test-Path -LiteralPath $File | Should -BeTrue
+        @($Lines | Where-Object { $_ -like "WARNING: The resume state file * does not hold every record of this run's per-stream files*" }).Count | Should -Be 1
+    }
+
+    It 'a stream that ended without a summary puts the subscriptions of its slice it did not complete on the retry list and ends their earlier completion' {
+        $S = script:Read-State -Path $script:State
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $script:Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1; Subs = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' }) })
+        $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports 6>$null
+        @($Agg.FailedSubscriptions) | Should -Be @('stream-0 (no summary)')
+        @($Agg.CompletedIds) | Should -BeNullOrEmpty -Because 'sub-a was not collected this run'
+        $After = script:Read-State -Path $script:State
+        $After.Completed | Should -BeNullOrEmpty
+        $After.Failed | Should -Be @('sub-a')
+    }
+
+    It 'a stream that ended without a summary counts one more failed run for a subscription its saved file holds only with the parent''s entry' {
+        $S = script:Read-State -Path $script:State
+        # Slice [A, B]; B on the retry list at 2. The stream completed A, saved its
+        # file (with B's entry as the parent gave it), then died during B.
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
+        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = $Prior; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $script:Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2; Subs = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' }, [pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B' }) })
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 3 -Because 'this run failed it too, whatever its place in the slice'
+        @($After | Where-Object Id -eq 'sub-a') | Should -BeNullOrEmpty
+    }
+
+    It 'a subscription the stream''s summary lists as failed counts one more failed run when its saved file holds only the parent''s entry' {
+        $S = script:Read-State -Path $script:State
+        # Slice [A, B]; B on the retry list at 2. The stream completed A and saved its
+        # file (with B's entry as the parent gave it); its save of B's failure did not
+        # reach the disk, and its summary lists B as failed.
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
+        [pscustomobject]@{ Tenant = 't'; Completed = @('sub-a'); FailedAttempts = $Prior; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'partial-failure'; Completed = @('sub-a'); ResourceCounts = @(); Failed = @(@{ Id = 'sub-b'; Name = 'Sub B'; Reason = 'stand-in' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 2; Subs = @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' }, [pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B' }) })
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 3 -Because 'the summary says this run failed it'
+    }
+
+    It 'a stream that ended without a summary does not count again a failure its saved file recorded this run' {
+        $S = script:Read-State -Path $script:State
+        # Slice [B]; B on the retry list at 2. The stream failed B, saved it at 3 with
+        # this run's time, then died before its summary.
+        $Prior = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = '2026-01-01T00:00:00Z'; Reason = 'earlier'; Attempts = 2 })
+        $Saved = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B'; LastFailedAt = (Get-Date).ToUniversalTime().ToString('o'); Reason = 'stand-in'; Attempts = 3 })
+        [pscustomobject]@{ Tenant = 't'; Completed = @(); FailedAttempts = $Saved; Reports = @() } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $script:Root '.resume-state-t-stream-0.json') -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = (Join-Path $script:Root '.rda-stream-0-summary.json'); FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1; Subs = @([pscustomobject]@{ Id = 'sub-b'; Name = 'Sub B' }) })
+        $null = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed $Prior $S.Reports 6>$null
+        $After = @(Get-FailedAttempts -Path $script:State -Tenant 't' | Where-Object { $null -ne $_ })
+        [int](@($After | Where-Object Id -eq 'sub-b')[0].Attempts) | Should -Be 3 -Because 'the file already counted this run''s failure'
+    }
+
+    It 'a -ResumeFailedOnly run that finds none of the retry list in the subscription set ends with exit 2' {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
+        $Block = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -eq '$ResumeFailedOnly' -and $_.Extent.Text.Contains('none are visible in the current subscription set') })
+        $Block.Count | Should -Be 1
+        function Exit-Wrapper { param([int]$Code) throw ('Exit-Wrapper ' + $Code) }
+        Set-Variable -Name ResumeFailedOnly -Value $true
+        Set-Variable -Name FailedAttempts -Value @([pscustomobject]@{ Id = 'sub-gone'; Name = 'Gone' })
+        Set-Variable -Name Subscriptions -Value @([pscustomobject]@{ Id = 'sub-a'; Name = 'Sub A' })
+        Set-Variable -Name UnreadableStreamFiles -Value @()
+        { . ([scriptblock]::Create($Block[0].Extent.Text)) 6>$null } | Should -Throw 'Exit-Wrapper 2'
+    }
+
+    It 'a run in which a stream did not start exits 2: the wrapper passes its failed subscriptions to the exit code' {
+        Get-WrapperExitCode -AuthSkipped $false -CollectorsFailed $false -SubscriptionsFailed $true | Should -Be 2
+        Get-WrapperExitCode -AuthSkipped $true -CollectorsFailed $true -SubscriptionsFailed $true | Should -Be 2
+        $Src = Get-Content -LiteralPath $script:WrapperPath -Raw
+        $Src | Should -Match ([regex]::Escape('-SubscriptionsFailed (@($FailedSubscriptions | Where-Object { $null -ne $_ }).Count -gt 0)'))
+    }
+
+    It 'a stream that did not start with an id it could not read (the unknown-id marker, or a blank id) puts no retry entry for it, and the run still keeps the state' {
+        $S = script:Read-State -Path $script:State
+        $Summary = Join-Path $script:Root '.rda-stream-0-summary.json'
+        @{ StreamId = '0'; Tenant = 't'; Status = 'failed-to-start'; Reason = 'stand-in'; Completed = @(); ResourceCounts = @()
+            Failed = @(@{ Id = '<unknown>'; Name = '<unknown>'; Reason = 'stream did not start: Az context import failed' }, @{ Id = ' '; Name = 'blank'; Reason = 'stream did not start: Az context import failed' })
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Summary -Encoding utf8
+        $Streams = @([pscustomobject]@{ StreamId = 0; SummaryPath = $Summary; FailuresPath = (Join-Path $script:Root 'failures-stream-0.log'); SubCount = 1 })
+        $Agg = & $script:AggregateBlock $Streams $script:Root 't' $script:State $S.Completed @() $S.Reports 6>$null
+
+        # The failure is listed, so the run is not clean and keeps the state; an
+        # id the stream could not read matches no subscription, so it is neither
+        # a retry entry nor taken off the completed list.
+        @($Agg.FailedSubscriptions).Count | Should -BeGreaterOrEqual 1
+        @($Agg.CompletedIds) | Should -Be @('sub-a')
+        Test-Path -LiteralPath $script:State | Should -BeTrue
+        $After = script:Read-State -Path $script:State
+        $After.Completed | Should -Be @('sub-a')
+        @($After.Failed | Where-Object { $_ -eq '<unknown>' -or [string]::IsNullOrWhiteSpace($_) }) | Should -BeNullOrEmpty
     }
 
     It 'sequential: a run without -Resume leaves no zip for sub-a, and the next -Resume collects it again' {
@@ -779,6 +953,50 @@ Describe 'A failed attempt, or a run that leaves no zip, clears the completed re
         $After2.Failed | Should -BeNullOrEmpty
         @($R.Run.SkippedSubscriptions | ForEach-Object Id) | Should -BeNullOrEmpty -Because 'the -Resume run must not skip a subscription whose latest run left no report'
         @($R.Run.SubResourceCounts | ForEach-Object Id) | Should -Be @('sub-a', 'sub-b')
+    }
+
+    It 'a failed save of the resume state after a subscription fails is named at the end, with a run without -Resume as the way on' {
+        # Run 1 (BeforeEach) completed sub-a. This run fails sub-a, and its save of
+        # that does not reach the disk, so the file still lists sub-a as completed:
+        # a -Resume would skip it and carry its old report.
+        $Global:RdaCarryTestFailIds = @('sub-a')
+        $S = script:Read-State -Path $script:State
+        $script:ResumeStateSaveFailed = $false
+        Mock Set-Content -ParameterFilter { [string]$LiteralPath -like '*.resume-state-*.tmp' } -MockWith { throw 'stand-in: disk full' }
+        $null = & $script:SeqBlock $script:FailRoot @($script:A) $false $S.Completed @(Get-FailedAttempts -Path $script:State -Tenant 't') $S.Reports $script:Root $script:State 't' $false 6>$null
+        (script:Read-State -Path $script:State).Completed | Should -Be @('sub-a') -Because 'the save did not reach the disk'
+        $script:ResumeStateSaveFailed | Should -BeTrue
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
+        $Banner = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$ResumeStateSaveFailed*' })
+        $Banner.Count | Should -Be 1
+        Set-Variable -Name ResumeStateSaveFailed -Value $true
+        Set-Variable -Name ResumeStateFile -Value $script:State
+        $Lines = @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1 | ForEach-Object { [string]$_ })
+        @($Lines | Where-Object { $_ -like ('The resume state file {0} could not be written at least once this run*a -Resume or -ResumeFailedOnly run would skip it and carry its old report.' -f $script:State) }).Count | Should -Be 1
+        @($Lines | Where-Object { $_ -like '*then run again without -Resume or -ResumeFailedOnly: it collects every subscription.' }).Count | Should -Be 1
+    }
+
+    It 'a save of the resume state that reaches the disk after one that failed clears the flag, and the banner is quiet without a state file' {
+        $script:ResumeStateSaveFailed = $true
+        Save-CompletedSubscriptionIds -Path $script:State -Tenant 't' -Ids @() -FailedAttempts @() -Reports @()
+        $script:ResumeStateSaveFailed | Should -BeFalse -Because 'the file now holds the whole state again'
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:WrapperPath, [ref]$null, [ref]$null)
+        # The run starts with the flag down.
+        @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.Text -eq '$ResumeStateSaveFailed = $false' }).Count | Should -Be 1
+        $Banner = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -like '$ResumeStateSaveFailed -and *' })
+        $Banner.Count | Should -Be 1
+        Set-Variable -Name ResumeStateSaveFailed -Value $true
+        Set-Variable -Name ResumeStateFile -Value (Join-Path $script:Root 'no-such-state.json')
+        @(& ([scriptblock]::Create($Banner[0].Extent.Text)) 6>&1) | Should -BeNullOrEmpty -Because 'a run that cleared the state leaves nothing a -Resume could skip on'
+    }
+
+    It 'a run whose saves of the resume state all reach the disk says nothing about it' {
+        $Global:RdaCarryTestFailIds = @('sub-a')
+        $S = script:Read-State -Path $script:State
+        $script:ResumeStateSaveFailed = $false
+        $null = & $script:SeqBlock $script:FailRoot @($script:A) $false $S.Completed @(Get-FailedAttempts -Path $script:State -Tenant 't') $S.Reports $script:Root $script:State 't' $false 6>$null
+        (script:Read-State -Path $script:State).Completed | Should -BeNullOrEmpty
+        $script:ResumeStateSaveFailed | Should -BeFalse
     }
 }
 

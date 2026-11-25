@@ -470,10 +470,10 @@ function Get-CompletedSubscriptionIds
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant)
         {
             Write-Host ("Resume state file is for a different tenant ({0}); ignoring." -f $State.TenantID) -ForegroundColor Yellow
@@ -499,10 +499,10 @@ function Get-FailedAttempts
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.FailedAttempts) { return @() }
         return @($State.FailedAttempts)
@@ -521,10 +521,10 @@ function Get-CompletedReports
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return @() }
         if ($null -eq $State.CompletedReports) { return @() }
         return @($State.CompletedReports)
@@ -566,10 +566,10 @@ function Test-ResumeStateWithoutReports
 {
     param([string]$Path, [string]$Tenant)
 
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     try
     {
-        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        $State = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         if ($State.TenantID -ne $Tenant) { return $false }
         return ($null -eq $State.PSObject.Properties['CompletedReports'])
     }
@@ -608,6 +608,9 @@ function Save-CompletedSubscriptionIds
     }
     try
     {
+        # Every error stops here: a write error of Set-Content (a full disk)
+        # does not stop by default, and must not reach the move below.
+        $ErrorActionPreference = 'Stop'
         # Atomic write: serialize to a sibling temp file, then swap it into place
         # with File.Move(overwrite). A move within the same volume is a rename,
         # which is atomic - so a crash / SIGKILL / disk-full DURING the write can
@@ -618,14 +621,84 @@ function Save-CompletedSubscriptionIds
         # a large tenant / Cloud Shell run that gets killed). The temp file shares
         # the target directory so the move stays on the same volume.
         $TmpPath = "$Path.tmp"
-        $State | ConvertTo-Json -Depth 4 | Set-Content -Path $TmpPath -Encoding utf8
+        $State | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TmpPath -Encoding utf8
         [System.IO.File]::Move($TmpPath, $Path, $true)
+        # Each save writes the whole state this run holds, so one that reaches
+        # the disk makes the file right again after an earlier one failed.
+        $script:ResumeStateSaveFailed = $false
     }
     catch
     {
         Write-Host ("WARNING: Failed to persist resume state to {0}: $_" -f $Path) -ForegroundColor Yellow
         Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
+        # The file on disk can now be older than this run's state (it can still
+        # list a subscription this run failed as completed); the wrapper says so
+        # at the end of the run.
+        $script:ResumeStateSaveFailed = $true
     }
+}
+
+# Whether the resume state file at $Path holds exactly the state given: the
+# completed ids, each retry-list entry with its count of failed runs and its
+# reason, and the report zip of each completed id. Save-CompletedSubscriptionIds
+# reports a failed write only as a warning, so this is read back before the
+# per-stream files that gave those records are removed.
+function Test-ResumeStateSaved
+{
+    param([string]$Path, [string]$Tenant, [string[]]$Ids = @(), $FailedAttempts = @(), $Reports = @())
+    $WantIds = @(@($Ids) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    $WantFailed = @(@($FailedAttempts) | Where-Object { $null -ne $_ })
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return ($WantIds.Count -eq 0 -and $WantFailed.Count -eq 0) }
+    $SavedIds = @(Get-CompletedSubscriptionIds -Path $Path -Tenant $Tenant | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    if (($SavedIds -join "`n") -ne ($WantIds -join "`n")) { return $false }
+    # Each retry entry whole, as JSON (so no field runs into the next): its id,
+    # count, time (as UTC round-trip text: the file reads it back as a date),
+    # reason and name, compared exactly. Merge-FailedAttempts picks the newest
+    # entry by its time, so an entry that differs only there is not saved.
+    $FailedKey = {
+        param($Entry)
+        $Field = { param($Name) if ($Entry.PSObject.Properties[$Name]) { $Entry.$Name } else { $null } }
+        $When = & $Field 'LastFailedAt'
+        if ($When -is [datetime]) { $When = $When.ToUniversalTime().ToString('o') }
+        elseif ($null -ne $When)
+        {
+            $Parsed = [datetime]::MinValue
+            if ([datetime]::TryParse([string]$When, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$Parsed)) { $When = $Parsed.ToUniversalTime().ToString('o') }
+            else { $When = [string]$When }
+        }
+        [ordered]@{ Id = [string](& $Field 'Id'); Attempts = [string](& $Field 'Attempts'); LastFailedAt = $When; Reason = [string](& $Field 'Reason'); Name = [string](& $Field 'Name') } | ConvertTo-Json -Compress
+    }
+    $SavedFailed = @(Get-FailedAttempts -Path $Path -Tenant $Tenant | Where-Object { $null -ne $_ } | ForEach-Object { & $FailedKey $_ } | Sort-Object -CaseSensitive)
+    if (($SavedFailed -join "`n") -cne (@($WantFailed | ForEach-Object { & $FailedKey $_ } | Sort-Object -CaseSensitive) -join "`n")) { return $false }
+    $WantReports = Get-LatestCompletedReports -Reports $Reports
+    $SavedReports = Get-LatestCompletedReports -Reports @(Get-CompletedReports -Path $Path -Tenant $Tenant)
+    foreach ($Id in $WantIds)
+    {
+        if (-not $WantReports.ContainsKey($Id)) { continue }
+        if (-not $SavedReports.ContainsKey($Id) -or [string]$SavedReports[$Id].Zip -ne [string]$WantReports[$Id].Zip) { return $false }
+    }
+    return $true
+}
+
+# A per-stream resume state file that could not be read is renamed aside (to
+# <name>.unreadable-<time>), so no stream of a later run writes over it and no
+# later run folds it in again, and it is named in a warning with what to do.
+# Returns the path it is now at: the old path when it cannot be renamed, which
+# the warning then says.
+function Move-UnreadableStreamFile
+{
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$Reason, [switch]$Interrupted)
+    $Aside = '{0}.unreadable-{1}' -f $Path, (Get-Date -Format 'yyyyMMddHHmmssfff')
+    $Of = if ($Interrupted) { ' of an interrupted run' } else { '' }
+    try { Move-Item -LiteralPath $Path -Destination $Aside -ErrorAction Stop }
+    catch
+    {
+        # Left under its own name: the caller stops, or keeps the state.
+        Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} It could not be renamed aside either: {3}" -f $Path, $Of, $Reason, $_.Exception.Message) -ForegroundColor Yellow
+        return $Path
+    }
+    Write-Host ("WARNING: Could not read the per-stream resume state file {0}{1}: {2} Its records are not used, so this run keeps the resume state and ends with exit 2. It is kept as {3}: fix it and rename it back to {0} for the next -Resume to fold it in, or delete it." -f $Path, $Of, $Reason, $Aside) -ForegroundColor Yellow
+    return $Aside
 }
 
 # Update an in-memory FailedAttempts list to record (or refresh) one sub's
@@ -681,6 +754,33 @@ function Remove-FailedAttempt
     return @($Existing | Where-Object { $_ -and $_.Id -ne $Id })
 }
 
+# The retry-list reason for a subscription whose report was written but whose
+# metrics or consumption were skipped or left incomplete, or $null when they
+# were not. ResourceInventory.ps1 appends one entry to $Global:MetricsFailedSubs
+# or $Global:ConsumptionFailedSubs for each such gap; -MetricsBefore and
+# -ConsumptionBefore are the sizes of those lists just before the call for this
+# subscription, so only the entries that call appended count. Entries are not
+# matched by Id because a consumption sign-in skip is recorded as '(auth)'.
+function Get-IncompleteDataReason
+{
+    param(
+        # [object]: same single-element collapse as Add-FailedAttempt.
+        [object]$MetricsEntries,
+        [int]$MetricsBefore = 0,
+        [object]$ConsumptionEntries,
+        [int]$ConsumptionBefore = 0
+    )
+    $NewMetrics = @(@($MetricsEntries | Where-Object { $null -ne $_ }) | Select-Object -Skip ([Math]::Max($MetricsBefore, 0)))
+    $NewConsumption = @(@($ConsumptionEntries | Where-Object { $null -ne $_ }) | Select-Object -Skip ([Math]::Max($ConsumptionBefore, 0)))
+    $Phases = @()
+    if ($NewMetrics.Count -gt 0) { $Phases += 'Metrics' }
+    if ($NewConsumption.Count -gt 0) { $Phases += 'Consumption' }
+    if ($Phases.Count -eq 0) { return $null }
+    $Messages = @(@($NewMetrics) + @($NewConsumption) | ForEach-Object { [string]$_.Message } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    if ($Messages.Count -eq 0) { return ('{0} incomplete.' -f ($Phases -join ' and ')) }
+    return ('{0} incomplete: {1}' -f ($Phases -join ' and '), ($Messages -join ' '))
+}
+
 # Discover every per-stream resume-state file on disk for a tenant, rather
 # than iterating 0..($StreamCount-1). $StreamCount reflects THIS run's
 # -ParallelStreams value; if an earlier interrupted run used a LARGER value,
@@ -696,7 +796,7 @@ function Get-StreamResumeStateFiles
         [Parameter(Mandatory = $true)][string]$InventoryRoot,
         [Parameter(Mandatory = $true)][string]$Tenant
     )
-    return @(Get-ChildItem -Path $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
+    return @(Get-ChildItem -LiteralPath $InventoryRoot -Filter (".resume-state-{0}-stream-*.json" -f $Tenant) -File -Force -ErrorAction SilentlyContinue)
 }
 
 # Reconcile FailedAttempts entries gathered from multiple streams (plus any
@@ -1052,9 +1152,13 @@ function Get-WrapperExitCode
         # be carried into the consolidated zip, so that report is missing from it.
         # Same meaning as the verification gap (2) and takes precedence over 3-5:
         # a missing report is worse than an incomplete one.
-        [bool]$ReportsMissing = $false
+        [bool]$ReportsMissing = $false,
+        # A subscription failed this run (it is listed under Subscriptions
+        # Failed), so its report is missing from the consolidated zip: the same
+        # meaning as a missing report, so 2, and the run is never reported as clean.
+        [bool]$SubscriptionsFailed = $false
     )
-    if ($ReportsMissing) { return 2 }
+    if ($ReportsMissing -or $SubscriptionsFailed) { return 2 }
     if ($AuthSkipped -and $CollectorsFailed) { return 5 }
     if ($AuthSkipped) { return 3 }
     if ($CollectorsFailed) { return 4 }
@@ -1072,10 +1176,10 @@ function Write-Stream
 function Read-StreamState
 {
     param([string]$Path)
-    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @(); Reports = @() } }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @{ Completed = @(); Failed = @(); Reports = @() } }
     try
     {
-        $Obj = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $Obj = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         return @{
             Completed = if ($null -eq $Obj.Completed) { @() } else { @($Obj.Completed) }
             # Backward-compatible: state files written by an older worker had
@@ -1103,11 +1207,17 @@ function Write-StreamState
             Completed      = $Completed
             FailedAttempts = @($FailedAttempts)
             Reports        = @($Reports)
-        } | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding utf8
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$Path.tmp" -Encoding utf8 -ErrorAction Stop
+        # Swapped into place in one rename, as Save-CompletedSubscriptionIds
+        # does: a stream stopped during the write (Ctrl+C, a killed process)
+        # leaves the file it had, never one cut short, which the next run could
+        # not read and would put aside with the failures it holds.
+        [System.IO.File]::Move("$Path.tmp", $Path, $true)
     }
     catch
     {
         Write-Stream ("WARNING: failed to persist stream state to {0}: {1}" -f $Path, $_.Exception.Message) 'Yellow'
+        Remove-Item -LiteralPath "$Path.tmp" -Force -ErrorAction SilentlyContinue
     }
 }
 

@@ -39,6 +39,10 @@ param (
     # worker's binding. Default to @() and guard the body explicitly.
     [string[]] $SubscriptionIds = @(),
     [string[]] $SubscriptionNames = @(),
+    # The parent's retry-list entries for this slice ({ Id, Name, LastFailedAt,
+    # Reason, Attempts }). [object] for the same single-element collapse as
+    # Add-FailedAttempt's -Existing.
+    [object] $PriorFailedAttempts = @(),
 
     [switch] $Resume,
     # The parent already narrowed $SubscriptionIds to just the failed subs
@@ -59,7 +63,7 @@ param (
 # breaking later with a confusing "command not found".
 # ---------------------------------------------------------------------------
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/RunAllSubscriptions.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -85,11 +89,15 @@ if ($SubscriptionIds.Count -eq 0)
         SubsProcessed         = 0
         Completed             = @()
         Failed                = @()
+        Skipped               = @()
+        NoReport              = @()
+        Incomplete            = @()
         ResourceCounts        = @()
         ConsumptionRecords    = 0
         ConsumptionFailedSubs = @()
         MetricsFailedSubs     = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+        CollectorFailures     = @()
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
     exit 0
 }
 
@@ -129,8 +137,18 @@ catch
                 $Id = if ($_ -lt $SubscriptionIds.Count) { $SubscriptionIds[$_] }   else { '<unknown>' }
                 [pscustomobject]@{ Id = $Id; Name = $Name; Reason = 'stream did not start: Az context import failed' }
             })
-        ResourceCounts = @()
-    } | ConvertTo-Json -Depth 5 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+        # Every property of the full summary, so the wrapper reads it under
+        # Set-StrictMode too.
+        SubsProcessed         = 0
+        Skipped               = @()
+        NoReport              = @()
+        Incomplete            = @()
+        ResourceCounts        = @()
+        ConsumptionRecords    = 0
+        ConsumptionFailedSubs = @()
+        MetricsFailedSubs     = @()
+        CollectorFailures     = @()
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
     exit 1
 }
 
@@ -163,6 +181,14 @@ if ($Resume -or $ResumeFailedOnly)
         Write-Stream ("resume-failed-only: prior FailedAttempts list has {0} entry(ies) for this stream" -f $FailedAttempts.Count) 'DarkGray'
     }
 }
+# Start from the parent's retry-list entries, so a failure here counts one more
+# run on top of the earlier ones instead of starting again at one. The newer
+# entry wins where this stream's own state file has the same subscription.
+$Prior = @(@($PriorFailedAttempts) | Where-Object { $null -ne $_ })
+if ($Prior.Count -gt 0)
+{
+    $FailedAttempts = @(Merge-FailedAttempts -ExistingFailedAttempts $Prior -StreamFailedAttempts $FailedAttempts -CompletedIds @())
+}
 
 # ---- Build the inner-script passthrough --------------------------------------
 $InventoryPassthrough = @{}
@@ -190,6 +216,10 @@ $SkippedSubs = @()
 # Subs this stream collected without a zip being written; reported in the
 # summary so the parent takes them off the unified completed list.
 $NoReportSubs = @()
+# Subs this stream collected with metrics or consumption left incomplete; they
+# are in the retry list, and the summary names them so the parent also takes
+# them off the unified completed list.
+$IncompleteSubs = @()
 
 # The inner script's $Global:ConsumptionRecordCount / $Global:ConsumptionFailedSubs
 # are *running totals*: ResourceInventory.ps1 only nil-initializes them once and
@@ -233,6 +263,9 @@ for ($i = 0; $i -lt $PairCount; $i++)
     {
         # Cleared first so a stale path from the previous sub is never recorded as this one's.
         $Global:ZipOutputFile = $null
+        # Counted before the call, so Get-IncompleteDataReason sees only what this call appends.
+        $MetricsGapsBefore = @($Global:MetricsFailedSubs | Where-Object { $null -ne $_ }).Count
+        $ConsumptionGapsBefore = @($Global:ConsumptionFailedSubs | Where-Object { $null -ne $_ }).Count
         & (Join-Path $ScriptRoot 'ResourceInventory.ps1') -TenantID $TenantID -SubscriptionID $SubId @InventoryPassthrough -RunAllSubs
         # Only treat as failure if the inner script set a non-zero exit code.
         # Some completion paths in ResourceInventory.ps1 leave $LASTEXITCODE
@@ -262,6 +295,7 @@ for ($i = 0; $i -lt $PairCount; $i++)
         {
             $Reports = @(@($Reports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $SubId }) + $NewReport)
         }
+        $IncompleteReason = Get-IncompleteDataReason -MetricsEntries $Global:MetricsFailedSubs -MetricsBefore $MetricsGapsBefore -ConsumptionEntries $Global:ConsumptionFailedSubs -ConsumptionBefore $ConsumptionGapsBefore
 
         if ($null -eq $NewReport)
         {
@@ -275,6 +309,18 @@ for ($i = 0; $i -lt $PairCount; $i++)
                 $Reports = @($Reports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $SubId })
                 Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $Reports
             }
+        }
+        elseif ($null -ne $IncompleteReason)
+        {
+            # Same as the parent's sequential branch: the report was written
+            # without some of its metrics or consumption, so the sub goes into
+            # the retry list instead of the completed list.
+            Write-Stream ("{0} It stays in the retry list, so -Resume or -ResumeFailedOnly collects '{1}' again." -f $IncompleteReason, $SubName) 'Yellow'
+            $IncompleteSubs += [pscustomobject]@{ Id = $SubId; Name = $SubName; Reason = $IncompleteReason }
+            $Completed = @($Completed | Where-Object { $_ -ne $SubId })
+            $Reports = @($Reports | Where-Object { $null -ne $_ -and [string]$_.Id -ne $SubId })
+            $FailedAttempts = Add-FailedAttempt -Existing $FailedAttempts -Id $SubId -Name $SubName -Reason $IncompleteReason
+            Write-StreamState -Path $StreamStateFile -Completed @($Completed) -FailedAttempts $FailedAttempts -Reports $Reports
         }
         elseif (-not ($Completed -contains $SubId))
         {
@@ -365,6 +411,7 @@ $Summary = [pscustomobject]@{
     Failed                 = $FailedSubs
     Skipped                = @($SkippedSubs)
     NoReport               = @($NoReportSubs)
+    Incomplete             = @($IncompleteSubs)
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
     ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
@@ -373,7 +420,7 @@ $Summary = [pscustomobject]@{
 }
 try
 {
-    $Summary | ConvertTo-Json -Depth 6 | Set-Content -Path $StreamSummaryPath -Encoding utf8
+    $Summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StreamSummaryPath -Encoding utf8
 }
 catch
 {

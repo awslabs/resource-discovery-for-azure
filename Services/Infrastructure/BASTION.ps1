@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($BASTION)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $BASTION)
         {
@@ -23,7 +23,7 @@ if ($Task -eq 'Processing')
                 'ScaleUnits'      = $Data.scaleUnits;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
 
         }
         $Tmp

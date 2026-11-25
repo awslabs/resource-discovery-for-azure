@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($Streamanalytics)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $Streamanalytics)
         {
@@ -44,7 +44,7 @@ if ($Task -eq 'Processing')
                 'OutputErrorPolicy'                = $Data.outputErrorPolicy;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($CONTAINER)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $CONTAINER)
         {
@@ -33,7 +33,7 @@ if ($Task -eq 'Processing')
                     'RequestMemoryGB'     = $2.properties.resources.requests.memoryInGB;
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($PublicIP)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $PublicIP)
         {
@@ -33,7 +33,7 @@ if ($Task -eq 'Processing')
                     'AssociatedResourceType'   = if ([string]::IsNullOrEmpty($Data.ipConfiguration.id)) { $null } else { $Data.ipConfiguration.id.split('/')[7] };
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
             else
             {
@@ -52,7 +52,7 @@ if ($Task -eq 'Processing')
                     'AssociatedResourceType'   = 'None';
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

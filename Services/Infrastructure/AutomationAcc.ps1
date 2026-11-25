@@ -7,7 +7,7 @@ if ($Task -eq 'Processing')
 
     if ($Autacc)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($0 in $Autacc)
         {
@@ -41,7 +41,7 @@ if ($Task -eq 'Processing')
                         'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };
                     }
 
-                    $Tmp += $Obj
+                    [void]$Tmp.Add($Obj)
                 }
             }
             else
@@ -62,7 +62,7 @@ if ($Task -eq 'Processing')
                     'RunbookDescription'            = $null;
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

@@ -32,7 +32,7 @@ if ($Task -eq 'Processing')
 
     if ($Vmss)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $Vmss)
         {
@@ -85,7 +85,7 @@ if ($Task -eq 'Processing')
                 'CreatedTime'                   = $Timecreated;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

@@ -7,7 +7,7 @@ if ($Task -eq 'Processing')
 
     if ($SQLSERVERMI)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $SQLSERVERMI)
         {
@@ -36,7 +36,7 @@ if ($Task -eq 'Processing')
                 'Databases'                     = if ($null -ne $Databases) { $Databases.Count } else { '0' }
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

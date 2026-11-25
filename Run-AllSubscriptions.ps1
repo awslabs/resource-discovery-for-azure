@@ -13,7 +13,8 @@ param (
     # subs), use this to re-run just those without walking the whole tenant
     # again. (Use -Resume instead to continue an interrupted run - that covers
     # both failures and subscriptions not yet reached.) If there are no recorded
-    # failures, prints "Nothing to retry" and exits 0. Works with
+    # failures, prints "Nothing to retry", names any subscription an interrupted
+    # run never reached, and exits 0. Works with
     # -ParallelStreams; the failed-only filter is applied before the
     # subscriptions are split across streams.
     [switch]$ResumeFailedOnly,
@@ -738,6 +739,10 @@ $FailedAttempts = Get-FailedAttempts -Path $ResumeStateFile -Tenant $TenantID
 # A -Resume run carries these into the consolidated zip for the subscriptions it
 # skips; every save below writes them back.
 $CompletedReports = Get-CompletedReports -Path $ResumeStateFile -Tenant $TenantID
+# The subscriptions an earlier access check skipped as not readable, so
+# -ResumeFailedOnly does not name them as never collected. Updated after this
+# run's access check below.
+$NotReadableIds = @(Get-NotReadableSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID)
 # The subscriptions a state file written before CompletedReports existed lists as
 # completed (see the -Resume block below). Read now, before the fold of per-stream
 # state can rewrite the file with the key.
@@ -847,10 +852,21 @@ if ($ResumeFailedOnly)
     {
         Write-Host "ResumeFailedOnly: no failed subscriptions in resume state. Nothing to retry." -ForegroundColor Green
         Write-Host ("If you expected failures here, verify {0} has a non-empty FailedAttempts array." -f $ResumeStateFile) -ForegroundColor DarkGray
+        # After an interrupted run the state still lists what completed, so name
+        # the subscriptions it never reached. Without a state file (a clean run
+        # deleted it) there is nothing to name.
+        if (Test-Path -Path $ResumeStateFile -PathType Leaf)
+        {
+            Write-NotCollectedSummary -NotCollected (Get-NotCollectedSubscriptions -Eligible $Subscriptions -CompletedIds $CompletedIds -NotReadableIds $NotReadableIds) -ResumeStateFile $ResumeStateFile
+        }
         Exit-Wrapper -Code 0
     }
     $FailedIds = @($FailedAttempts | ForEach-Object { $_.Id })
     $BeforeCount = $Subscriptions.Count
+    # Kept for the resume-state cleanup at the end, which names any of these that
+    # no run has completed. Copied here because in the sequential path the inner
+    # script can replace $Subscriptions.
+    $EligibleBeforeRetryFilter = @($Subscriptions)
     $Subscriptions = @($Subscriptions | Where-Object { $FailedIds -contains $_.Id })
     Write-Host ("ResumeFailedOnly: filtered to {0} previously-failed subscription(s) (was {1})." -f $Subscriptions.Count, $BeforeCount) -ForegroundColor Cyan
     if ($Subscriptions.Count -eq 0)
@@ -956,6 +972,23 @@ if (-not $SkipConsumption -and $Subscriptions.Count -gt 0)
     else
     {
         Write-Host "Consumption access confirmed." -ForegroundColor Green
+    }
+}
+
+# Keep the subscriptions the access check above skipped as not readable in the
+# resume state, so a later -ResumeFailedOnly run does not name them as never
+# collected (the run that skipped them lists them). A subscription this run did
+# not check keeps the earlier answer. The state is written only when the list
+# changed.
+if ($ScopeForProbe.Count -gt 0)
+{
+    $NotReadableBefore = (@($NotReadableIds | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique) -join ',')
+    $CheckedIds = @($ScopeForProbe | ForEach-Object { [string]$_.Id })
+    $SkippedNotReadable = @(if ($null -ne $AccessDecision) { @($AccessDecision.InaccessibleIds) | Where-Object { $_ } })
+    $NotReadableIds = @(@($NotReadableIds | Where-Object { $_ -and $CheckedIds -notcontains [string]$_ }) + $SkippedNotReadable | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    if (($NotReadableIds -join ',') -ne $NotReadableBefore)
+    {
+        Save-CompletedSubscriptionIds -Path $ResumeStateFile -Tenant $TenantID -Ids $CompletedIds -FailedAttempts $FailedAttempts -Reports $CompletedReports -NotReadable $NotReadableIds
     }
 }
 
@@ -1956,7 +1989,17 @@ if ($null -ne $OuterZipFile)
 # Clean up resume state on a fully successful run (all subs processed, no failures
 # this run AND no pending retries from a prior run). Otherwise leave it so a
 # future -Resume / -ResumeFailedOnly invocation can pick up where this stopped.
-if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
+# -ResumeFailedOnly collects only the retry list, so an eligible subscription
+# that is neither completed nor on the retry list (one an interrupted run never
+# reached) is still owed: the state is kept, so a later -Resume collects it and
+# still skips the completed ones. The summary below names them.
+$NotCollected = @()
+if ($ResumeFailedOnly)
+{
+    $RetryListIds = @($FailedAttempts | Where-Object { $_ } | ForEach-Object { [string]$_.Id })
+    $NotCollected = @(Get-NotCollectedSubscriptions -Eligible $EligibleBeforeRetryFilter -CompletedIds $CompletedIds -RetryIds $RetryListIds -NotReadableIds $NotReadableIds)
+}
+if ($FailedSubscriptions.Count -eq 0 -and $FailedAttempts.Count -eq 0 -and $NotCollected.Count -eq 0 -and (Test-Path -Path $ResumeStateFile -PathType Leaf))
 {
     try
     {
@@ -2206,6 +2249,11 @@ elseif ($FailedAttempts.Count -gt 0)
     # because the most recent run was clean.
     Write-Host ("Pending Retries:         {0} subscription(s) from a prior run still in FailedAttempts" -f $FailedAttempts.Count) -ForegroundColor Yellow
     Write-Host "Re-run with -ResumeFailedOnly to retry them." -ForegroundColor Yellow
+}
+if ($NotCollected.Count -gt 0)
+{
+    # Set by the resume-state cleanup above on a -ResumeFailedOnly run.
+    Write-NotCollectedSummary -NotCollected $NotCollected -ResumeStateFile $ResumeStateFile
 }
 Write-Host ("Execution Time:          {0}" -f $Elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Green
 if ($OuterZipFile)

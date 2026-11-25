@@ -535,6 +535,28 @@ function Get-CompletedReports
     }
 }
 
+# Read the NotReadableSubscriptionIds list (the subscriptions the up-front access
+# check skipped as not readable) out of the same resume-state file, the same way
+# as Get-FailedAttempts: an empty array if the file is absent, malformed, for a
+# different tenant, or written by a version without the key.
+function Get-NotReadableSubscriptionIds
+{
+    param([string]$Path, [string]$Tenant)
+
+    if (-not (Test-Path -Path $Path -PathType Leaf)) { return @() }
+    try
+    {
+        $State = Get-Content -Path $Path -Raw | ConvertFrom-Json
+        if ($State.TenantID -ne $Tenant) { return @() }
+        if ($null -eq $State.NotReadableSubscriptionIds) { return @() }
+        return @($State.NotReadableSubscriptionIds)
+    }
+    catch
+    {
+        return @()
+    }
+}
+
 # True when the resume-state file for this tenant has no CompletedReports key at
 # all: it was written by a version that did not record report zips, so a -Resume
 # run has no report to carry for any subscription it lists as completed. A key
@@ -559,11 +581,14 @@ function Test-ResumeStateWithoutReports
 
 function Save-CompletedSubscriptionIds
 {
-    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @(), $Reports = @())
+    param([string]$Path, [string]$Tenant, [string[]]$Ids, $FailedAttempts = @(), $Reports = @(), $NotReadable = @())
 
     # One report record per completed id (the last one given wins), none for an
     # id that is not completed. See New-CompletedReportRecord for the shape.
     $LatestReports = Get-LatestCompletedReports -Reports $Reports
+    # Only the access check passes -NotReadable; every other save keeps the list
+    # the file already holds.
+    if (-not $PSBoundParameters.ContainsKey('NotReadable')) { $NotReadable = Get-NotReadableSubscriptionIds -Path $Path -Tenant $Tenant }
     $State = [pscustomobject]@{
         TenantID                  = $Tenant
         CompletedSubscriptionIds  = @($Ids)
@@ -576,6 +601,9 @@ function Save-CompletedSubscriptionIds
         # an accurate snapshot of "subs that failed at least once and have
         # not yet succeeded since".
         FailedAttempts            = @($FailedAttempts)
+        # The subscriptions the up-front access check skipped as not readable,
+        # so a -ResumeFailedOnly run does not name them as never collected.
+        NotReadableSubscriptionIds = @(@($NotReadable) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
         LastUpdated               = (Get-Date).ToString('o')
     }
     try
@@ -710,6 +738,34 @@ function Merge-FailedAttempts
         $Reconciled += $Best
     }
     return $Reconciled
+}
+
+# The eligible subscriptions that no run has completed and that are not on the
+# retry list: after an interrupted run, the ones it never reached.
+# -ResumeFailedOnly retries only the retry list, so it does not collect these;
+# -Resume does. A subscription the up-front access check skipped as not readable
+# (-NotReadableIds) is left out: the run that skipped it already listed it, and
+# a later run checks it again.
+function Get-NotCollectedSubscriptions
+{
+    param([object]$Eligible, [object]$CompletedIds, [object]$RetryIds, [object]$NotReadableIds)
+    $Done = @(@($CompletedIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $Retry = @(@($RetryIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $NotReadable = @(@($NotReadableIds) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    return @(@($Eligible) | Where-Object { $null -ne $_ -and $Done -notcontains [string]$_.Id -and $Retry -notcontains [string]$_.Id -and $NotReadable -notcontains [string]$_.Id })
+}
+
+# Name the subscriptions Get-NotCollectedSubscriptions returned on a
+# -ResumeFailedOnly run, which keeps the resume state for them. Prints nothing
+# for an empty list.
+function Write-NotCollectedSummary
+{
+    param([object]$NotCollected, [string]$ResumeStateFile)
+    $List = @(@($NotCollected) | Where-Object { $null -ne $_ })
+    if ($List.Count -eq 0) { return }
+    Write-Host ("Not Collected:           {0} ({1}) - no run has completed these and -ResumeFailedOnly retries only the retry list" -f $List.Count, (@($List | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Yellow
+    Write-Host ("Resume State:            {0} (kept)" -f $ResumeStateFile) -ForegroundColor Yellow
+    Write-Host "Re-run with -Resume to collect them; it skips the subscriptions already completed." -ForegroundColor Yellow
 }
 
 # The resume-state record for one completed subscription's report zip:

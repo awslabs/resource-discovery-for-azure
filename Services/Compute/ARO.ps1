@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($ARO)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
         foreach ($1 in $ARO)
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
@@ -27,7 +27,7 @@ if ($Task -eq 'Processing')
                 'TotalWorkerNodes'     = $Data.workerProfiles.count;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

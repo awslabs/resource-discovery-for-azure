@@ -60,9 +60,10 @@ For larger tenants (100+ subscriptions), see [Choosing where to run](#choosing-w
 Before running the script, ensure your Azure user account has the following roles assigned:
 
 - **✅ Reader Role** - Access to view Azure resources
-- **✅ Billing Reader Role** - Access to billing and cost data
+- **✅ Billing Reader Role** - Access to billing data
 - **✅ Monitoring Reader Role** - Access to Azure Monitor metrics
-- **✅ Cost Management Reader Role** - Access to cost management data
+
+Consumption (usage) data needs the permission `Microsoft.Commerce/UsageAggregates/read` on every subscription in the run, granted at the subscription or above (a role on a resource group does not return usage). The built-in **Reader** and **Billing Reader** roles include it. **Cost Management Reader does not**, so it is not enough for consumption data on its own.
 
 ### Environment Options
 
@@ -161,6 +162,8 @@ git clone https://github.com/awslabs/resource-discovery-for-azure.git
 
 **Bottom line: prefer `git clone`** — it "just works" and avoids the execution-policy/unblock dance on every new desktop. See [Troubleshooting](#common-issues) if you must use the ZIP.
 
+Put it in a folder whose path has no `[`, `]`, `*` or `?`: PowerShell reads them as wildcards, so `Run-AllSubscriptions.ps1` stops at once (exit 1) when its folder's path holds one, before it offers or installs anything.
+
 ## Usage
 
 ### Authentication Notes
@@ -184,9 +187,9 @@ You might get more than one authentication request due to different collector pr
 
 ### Advanced Usage Examples
 
-For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it inventories the whole tenant and forwards the common options (`-SkipConsumption`, `-SkipMetrics`, `-ConcurrencyLimit`, `-Obfuscate`, `-DeviceLogin`), so they behave exactly as they would on the inner script:
+For most runs, use the `Run-AllSubscriptions.ps1` wrapper (recommended) — it inventories the whole tenant and forwards these options (`-SkipConsumption`, `-SkipMetrics`, `-ConcurrencyLimit`, `-Obfuscate`, `-DeviceLogin`), so they behave exactly as they would on the inner script:
 
-**Skip consumption (billing) data:**
+**Skip consumption (billing) data** (not for a normal run; see [When to use `-SkipConsumption`](#when-to-use--skipconsumption)):
 ```powershell
 ./Run-AllSubscriptions.ps1 -TenantID "contoso.onmicrosoft.com" -SkipConsumption
 ```
@@ -214,7 +217,7 @@ The wrapper always covers the whole tenant. To scope a run to **one** subscripti
 
 **Scan a specific resource group:**
 ```powershell
-./ResourceInventory.ps1 -ReportName "CompanyName" -ResourceGroup "MyResourceGroup"
+./ResourceInventory.ps1 -ReportName "CompanyName" -SubscriptionID "12345678-1234-1234-1234-123456789012" -ResourceGroup "MyResourceGroup"
 ```
 
 ### Running Across All Subscriptions
@@ -273,9 +276,13 @@ For tenants with many subscriptions, the run can be cut short by environment-lev
 ./Run-AllSubscriptions.ps1 -TenantID "12345678-1234-1234-1234-123456789012" -Resume
 ```
 
-After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The state file is cleared automatically after a clean run with no failures.
+After each subscription is fully processed (its per-subscription ZIP has been written), the wrapper records the subscription ID in a state file at `InventoryReports/.resume-state-<TenantID>.json`, together with the path of that ZIP and whether the run used `-Obfuscate`. Re-running with `-Resume` reads that file and skips subscriptions that are already complete; the partially processed subscription (the one that was running when the session ended) is re-run from the start. The consolidated `AllSubscriptions_ResourcesReport_<timestamp>.zip` of the `-Resume` run still covers the skipped subscriptions: it carries the ZIP the earlier run recorded for each one, provided that ZIP is still on disk, opens as a ZIP and was written with the same `-Obfuscate` setting as this run. A skipped subscription whose ZIP cannot be carried is named under a `FAILED (earlier report not carried)` banner and the run exits with code `2`; re-run without `-Resume`, or collect that subscription on its own with `./ResourceInventory.ps1 -TenantID <tenant> -SubscriptionID <id>`. The state file is cleared automatically after a clean run with no failures.
 
-`-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription`, and existing state is left untouched.
+After an interrupted run, `-ResumeFailedOnly` retries only the subscriptions in the retry list, so one the interrupted run never reached is not collected by it. While such a subscription remains, the `-ResumeFailedOnly` run names it under `Not Collected` at the end and keeps the state file, so a later `-Resume` collects it and still skips the completed ones. When the retry list is empty, `-ResumeFailedOnly` prints `Nothing to retry`, names those subscriptions the same way, and exits `0` without collecting anything. A subscription the up-front access check skipped as not readable is recorded in the state file and is not named under `Not Collected`: the run that skipped it lists it, and a later run checks it again.
+
+`-Resume` is opt-in. Without it, the wrapper processes every subscription returned by `Get-AzSubscription` and still updates the state file as it goes: a subscription that writes its ZIP is recorded as completed with that ZIP, replacing any earlier record, and one that fails or leaves no ZIP is taken off the completed list, so a later `-Resume` collects it again (a failure is also recorded for `-ResumeFailedOnly`). As with `-Resume`, a clean run with no failures deletes the state file.
+
+A subscription whose ZIP was written but whose metrics or consumption were skipped or left incomplete (for example when the sign-in stops working part-way through a run; see the `FAILED (auth)` banner) is not recorded as completed either. It goes into the retry list with a reason that starts `Metrics incomplete:`, `Consumption incomplete:` or `Metrics and Consumption incomplete:`, so both `-Resume` and `-ResumeFailedOnly` collect it again, and the state file is kept until it has been collected in full. It is not counted as a failed subscription.
 
 #### Parallel subscription processing
 
@@ -364,7 +371,7 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 
 | File | Description |
 |------|-------------|
-| `Consumption_ResourcesReport_(date).csv` | Cost and billing data |
+| `Consumption_ResourcesReport_(date).csv` | The file holds Azure usage only: one row per meter and resource, with quantity, unit and usage dates. It has no prices or cost amounts. (see [Consumption data](docs/consumption-data.md)) |
 | `Inventory_ResourcesReport_(date).json` | Complete resource inventory |
 | `Metrics_ResourcesReport_(date).json` | Performance metrics data |
 | `ResourcesReport_(date).html` | Self-contained HTML report (open in any browser; no Excel required) |
@@ -372,6 +379,28 @@ Upon completion, the script generates reports in the `InventoryReports` folder:
 | `DebugLog_<ReportName>_(date).log` | Consolidated **local** debug log — per-collector heartbeat + metrics diagnostics. Never added to the zip (may contain real names/exception text) |
 | `Diagnostics_<ReportName>_(date).log` | Shareable, scrubbed diagnostics summary (phase timings + collector/metrics/consumption health). **Included in the zip on `-Obfuscate` runs only** |
 | `ResourcesReport_(date).zip` | All files compressed |
+
+A Consumption file starts like this (made-up test data). The full sample, with a VM, a managed disk, a storage account and a SQL database, is [docs/samples/Consumption_ResourcesReport_sample.csv](docs/samples/Consumption_ResourcesReport_sample.csv). The columns are explained in [Consumption data](docs/consumption-data.md).
+
+```csv
+"InstanceData","MeterCategory","MeterId","MeterName","MeterRegion","MeterSubCategory","Quantity","Unit","UsageStartTime","UsageEndTime","ResourceId","ResourceLocation","ConsumptionMeter","ReservationId","ReservationOrderId"
+"{""Microsoft.Resources"":{""ResourceUri"":""/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/virtualmachines/vm-app-01"",""Location"":""westeurope"",""additionalInfo"":{""ConsumptionMeter"":"""",""ImageType"":""canonical"",""AHB"":"""",""vCores"":0,""VCPUs"":8,""ServiceType"":""standard_e8s_v5"",""ResourceCategory"":"""",""Edition"":"""",""LicenseType"":"""",""HostLicenseType"":"""",""OS"":"""",""IsVM"":"""",""NumberOfCores"":0,""NumberOfLogicalProcessors"":0,""SLO"":"""",""ServerSku"":"""",""ServerEdition"":"""",""IsHAEnabled"":""""}}}","Virtual Machines","c3a4f13b-6b0f-5154-a116-65e9ed24daa3","E8s_v5","EU West","Dsv5 Series","20.45","1 Hour","10/1/2026 12:00:00 AM","10/2/2026 12:00:00 AM","/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/virtualmachines/vm-app-01","westeurope",,,
+"{""Microsoft.Resources"":{""ResourceUri"":""/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1"",""Location"":""westeurope"",""additionalInfo"":{""ConsumptionMeter"":"""",""ImageType"":"""",""AHB"":"""",""vCores"":0,""VCPUs"":0,""ServiceType"":"""",""ResourceCategory"":"""",""Edition"":"""",""LicenseType"":"""",""HostLicenseType"":"""",""OS"":"""",""IsVM"":"""",""NumberOfCores"":0,""NumberOfLogicalProcessors"":0,""SLO"":"""",""ServerSku"":"""",""ServerEdition"":"""",""IsHAEnabled"":""""}}}","Storage","bf07323a-2702-5ff8-9802-27a9778ba970","P10 LRS Disk","EU West","Premium SSD Managed Disks","0.0522","1/Month","10/1/2026 12:00:00 AM","10/2/2026 12:00:00 AM","/subscriptions/11111111-1111-1111-1111-111111111111/resourcegroups/rg-app-prod/providers/microsoft.compute/disks/vm-app-01_osdisk_1","westeurope",,,
+```
+
+#### When to use `-SkipConsumption`
+
+Do not use `-SkipConsumption` for a normal run. A normal run needs the usage data.
+
+Use it only:
+
+- to troubleshoot a run, or
+- to collect certain services or metrics again, when you already have the usage data for that period.
+
+What you lose with `-SkipConsumption`:
+
+- The run reads no usage data. The `Consumption_*.csv` file holds only its header row, so the report has no usage rows.
+- `Run-AllSubscriptions.ps1` skips its up-front check that the signed-in identity can read usage data.
 
 ### File Delivery
 
@@ -395,7 +424,7 @@ When using `-Obfuscate`, the following data is masked in all output files:
 
 | Category | What is masked | Masked Format |
 |----------|---------------|---------------|
-| Resource ID | All resource IDs across inventory, metrics, and consumption | `prod_<guid>` or `nonprod_<guid>` |
+| Resource ID | All resource IDs across inventory, metrics, and consumption: every name segment (subscription, resource group, each resource name, a parent's included) | ARM-shaped path of `prod_<guid>` / `nonprod_<guid>` tokens |
 | Resource Name | All resource names | `prod_<guid>` or `nonprod_<guid>` |
 | Subscription | Subscription names (deterministic — same real sub always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |
 | Resource Group | Resource group names (deterministic — same real RG always maps to the same value) | `prod_<guid>` or `nonprod_<guid>` |
@@ -418,10 +447,12 @@ Resources with names matching dev/test/qa patterns (including short prefixes lik
 
 ### Manual Compression (If Needed)
 
-If automatic compression fails:
+If automatic compression fails, zip the run's shareable files from its report folder (`InventoryReports/<ReportName><timestamp>`, or your `-OutputDirectory`). Replace `<timestamp>` with the part of the file names after the report name, for example `Inventory_<ReportName>_<timestamp>.json`. The command leaves out the files that stay on your machine (`ObfuscationDictionary_*`, `Transcript_Log_*`, `DebugLog_*`, `ErrorLog_*`, `Full_*`) and the files of other runs in the same folder:
 ```powershell
-cd InventoryReports
-Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-Date -Format 'yyyy-MM-dd').zip"
+cd InventoryReports/<ReportName><timestamp>
+Get-ChildItem -File -Path ./* -Include *.html, Consumption_*.csv, Inventory_*.json, Metrics_*.json, Diagnostics_*.log |
+    Where-Object Name -like '*_<timestamp>*' |
+    Compress-Archive -DestinationPath "CompanyName_ResourcesReport_$(Get-Date -Format 'yyyy-MM-dd').zip"
 ```
 ## Parameters Reference
 
@@ -432,7 +463,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | `ReportName` | String | **Required.** Company/customer name for file naming | `-ReportName "AcmeCorp"` |
 | `TenantID` | String | Target specific Azure tenant | `-TenantID "12345678-1234-1234-1234-123456789012"` |
 | `SubscriptionID` | String | Scan single subscription only | `-SubscriptionID "12345678-1234-1234-1234-123456789012"` |
-| `ResourceGroup` | String | Scan specific resource group only | `-ResourceGroup "Production-RG"` |
+| `ResourceGroup` | String | Scan specific resource group only; requires `SubscriptionID` | `-ResourceGroup "Production-RG"` |
 | `OutputDirectory` | String | Full path to write reports to. Defaults to `~/InventoryReports` (or `C:\InventoryReports` on Windows). Must be the full path. | `-OutputDirectory "/data/rda-out"` |
 
 ### Performance Parameters
@@ -440,7 +471,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 | Parameter | Type | Description | Default | Example |
 |-----------|------|-------------|---------|----------|
 | `ConcurrencyLimit` | Integer | Parallel execution limit | 6 | `-ConcurrencyLimit 8` |
-| `SkipConsumption` | Switch | Skip cost/billing data collection | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Skip usage (billing) data collection. Not for a normal run: use it only to troubleshoot, or to collect certain services or metrics again when you already have the usage data for that period. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption). | False | `-SkipConsumption` |
 | `SkipMetrics` | Switch | Skip Azure Monitor metrics collection | False | `-SkipMetrics` |
 | `MetricsLookbackDays` | Integer | Days of metric history to collect for the trend metrics. Lower values reduce run time and memory use. | 31 | `-MetricsLookbackDays 14` |
 
@@ -450,7 +481,7 @@ Compress-Archive -Path ./* -DestinationPath "CompanyName_ResourcesReport_$(Get-D
 metrics only. Lowering it (e.g. 31 → 14 or 7) reduces both run time and memory
 use, which helps on large estates that time out or hit out-of-memory errors
 during the metrics phase. It does **not** change which resources are found, and
-it does **not** affect cost/consumption data (that phase uses its own fixed
+it does **not** affect consumption (usage) data (that phase uses its own fixed
 window).
 
 The tradeoff is right-sizing accuracy: a shorter window samples fewer
@@ -502,14 +533,14 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 |-----------|------|-------------|---------|---------|
 | `TenantID` | String | **Required.** Azure tenant GUID or verified domain. The wrapper resolves a domain to its GUID via OIDC discovery before authenticating. | — | `-TenantID "contoso.onmicrosoft.com"` |
 | `Resume` | Switch | Skip subscriptions already completed in a prior run. Reads from `InventoryReports/.resume-state-<TenantID>.json`. State is cleared automatically after a clean run. | False | `-Resume` |
-| `ResumeFailedOnly` | Switch | Retry **only** the subscriptions that failed in a prior run, skipping both already-completed and never-attempted ones. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (failed **and** not-yet-attempted subs); `-ResumeFailedOnly` targets failures only. | False | `-ResumeFailedOnly` |
+| `ResumeFailedOnly` | Switch | Retry **only** the subscriptions in the retry list from a prior run: those that failed, and those whose metrics or consumption were left incomplete (see [Resuming an interrupted run](#resuming-an-interrupted-run)). Already-completed and never-attempted ones are skipped. Use this after a run finishes with a handful of failures (e.g. transient throttling) to re-run just those instead of walking the whole tenant again. `-Resume` continues an interrupted run (retry list **and** not-yet-attempted subs); `-ResumeFailedOnly` targets the retry list only. | False | `-ResumeFailedOnly` |
 | `IncludeDisabled` | Switch | Include subscriptions whose state is not `Enabled` (e.g. `Disabled`, `Warned`, `PastDue`). By default these are skipped because they return little or no data. | False | `-IncludeDisabled` |
 | `AllowPartialAccess` | Switch | Change the up-front access check from hard-stop to skip-and-continue. By default the wrapper verifies read access to every in-scope subscription before any work and **stops** if any is unreadable (see [Subscription access check](#subscription-access-check-up-front)). With this switch, unreadable subscriptions are skipped (and listed) and the run proceeds with the accessible ones. | False | `-AllowPartialAccess` |
 | `ParallelStreams` | Integer | Number of subscriptions to process concurrently. `1` (default) is the existing sequential behavior. See [Parallel subscription processing](#parallel-subscription-processing) for sizing guidance. | 1 | `-ParallelStreams 6` |
 | `ConcurrencyLimit` | Integer | Forwarded to the inner script's metrics-collection throttle. Controls how many `Get-AzMetric` calls run in parallel within one subscription. | 6 | `-ConcurrencyLimit 12` |
 | `Obfuscate` | Switch | Forwarded. Replace resource IDs, names, subscriptions, resource groups, and tags with masked values. | False | `-Obfuscate` |
 | `SkipMetrics` | Switch | Forwarded. Skip Azure Monitor metrics collection. | False | `-SkipMetrics` |
-| `SkipConsumption` | Switch | Forwarded. Skip cost/billing data collection. | False | `-SkipConsumption` |
+| `SkipConsumption` | Switch | Forwarded. Skip usage (billing) data collection, and skip the up-front check of usage data access. Not for a normal run: use it only to troubleshoot, or to collect certain services or metrics again when you already have the usage data for that period. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption). | False | `-SkipConsumption` |
 | `DeviceLogin` | Switch | Forwarded. Use device-code authentication (browser flow with a code). | False | `-DeviceLogin` |
 
 ## Troubleshooting
@@ -535,8 +566,8 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 - Failed subs are listed at the end of the wrapper transcript and in `InventoryReports/RunAllSubscriptions_failures_<timestamp>.log`.
 
 **Run stops immediately with "not authorized to read consumption/billing data":**
-- `Run-AllSubscriptions.ps1` verifies consumption (billing) access up front whenever consumption is requested (i.e. `-SkipConsumption` was **not** passed). If the signed-in identity can't read consumption data, the run **hard-fails immediately** rather than producing reports silently missing the billing data you asked for.
-- Fix: grant the identity **Cost Management Reader** (or **Billing Reader** on the billing scope), then re-run — or re-run with `-SkipConsumption` to inventory without billing data.
+- `Run-AllSubscriptions.ps1` verifies consumption (billing) access up front whenever consumption is requested (i.e. `-SkipConsumption` was **not** passed). If the signed-in identity can't read consumption data, the run **hard-fails immediately** rather than producing reports silently missing the usage data you asked for.
+- Fix: grant the identity **Reader** or **Billing Reader** on each subscription (or above), then re-run. **Cost Management Reader** does not include the usage permission `Microsoft.Commerce/UsageAggregates/read`, so it is not enough. Do not use `-SkipConsumption` to get past this check on a normal run: the report then has no usage rows. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption).
 - Note: this is a genuine authorization denial. A transient/token issue (Conditional Access, expired token, throttling) is **not** treated as a hard fail here — it warns and continues, and per-subscription consumption health is still reported at the end of the run.
 
 **Consumption sheet empty across many subs:**
@@ -551,7 +582,7 @@ These are the parameters specific to `Run-AllSubscriptions.ps1`. The wrapper for
 
 **Performance Issues:**
 - Reduce `ConcurrencyLimit` if experiencing timeouts
-- Use `SkipConsumption` to speed up execution. This is not recommended, as it greatly reduces the usefulness of the report.
+- Do not use `SkipConsumption` to speed up a normal run: the report then has no usage rows. See [When to use `-SkipConsumption`](#when-to-use--skipconsumption).
 - Consider targeting specific subscriptions or resource groups
 - For tenants with many subscriptions, use `-ParallelStreams` (see the Cloud Shell sizing table above).
 
@@ -578,11 +609,13 @@ The wrapper script sets a process exit code so automation/CI can detect problems
 | Code | Meaning |
 |---|---|
 | `0` | Clean run — no failures of any kind. |
-| `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start). |
-| `2` | Per-subscription output verification gap (a subscription reported success but its output zip is missing). |
+| `1` | Hard failure during pre-flight, authentication, or setup (the run did not meaningfully start), including a per-stream resume state file of an earlier run that could not be removed or renamed aside, or whose records could not be saved into the resume state file (it is named, with what to do). It is also given when a stream summary file an earlier parallel run left (`.rda-stream-<N>-summary.json`) cannot be removed before the streams start; the run stops there, before it collects anything. |
+| `2` | One or more subscriptions failed (they are listed under `Subscriptions Failed` and their reports are missing), a per-stream resume state file could not be read (it is renamed aside to `<name>.unreadable-<time>` and named in a warning, on every `-Resume` and `-ResumeFailedOnly` run until it is fixed and renamed back or deleted, or a run without either switch removes it as stale once it has collected, unless the resume state still lists as completed a subscription that run did not collect (then it is removed once a clean run clears the resume state); also on a `-ResumeFailedOnly` run with an empty retry list), a per-stream resume state file could not be removed at the end of the run (it is named in a warning: remove it before the next run), a subscription on the retry list is not in the run's subscription set (`Not In This Run`: for example disabled without `-IncludeDisabled`; fix that, or delete the resume state files to start over), a `-ResumeFailedOnly` run found none of the subscriptions on the retry list in the current subscription set, a per-subscription output verification gap (a subscription reported success but its output zip is missing), or a `-Resume` run could not carry the report of a subscription it skipped as already completed (see the "FAILED (earlier report not carried)" banner). Takes precedence over `3`–`5`. Also when a save of the resume state failed and the file is still there (see the "FAILED (resume state not saved)" banner: run again without `-Resume` or `-ResumeFailedOnly`), and when the end-of-run merge keeps per-stream resume state files because the saved resume state does not hold their records (the state is kept for the next run). |
 | `3` | Completed, but a requested data phase (Metrics and/or Consumption) was skipped for one or more subscriptions due to an authentication problem — see the "FAILED (auth)" banner. |
 | `4` | Completed, but one or more `Services/*/*.ps1` collectors failed for one or more subscriptions — see the "FAILED (collectors)" banner and "Collector Failures" summary. Affected resource types are missing (not empty) from those subscriptions' reports. |
 | `5` | Both `3` and `4` occurred in the same run. |
+
+A direct run of `ResourceInventory.ps1` (without `-RunAllSubs`) exits `1` and writes no report when Resource Graph discovery fails, for example when a page of results cannot be read or a query still fails after 4 attempts; the console shows `Resource discovery failed` followed by the Resource Graph error. Under `-RunAllSubs` that subscription is listed as failed instead, and `-ResumeFailedOnly` retries it.
 
 Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
 
@@ -592,11 +625,12 @@ A direct `ResourceInventory.ps1` run (without `-RunAllSubs`) also sets an exit c
 
 | Code | Meaning |
 |---|---|
-| `0` | Completed; no collector failed. A run that stopped before writing its zip, for example after 5 collectors failed in a row, can also end with `0`, so check that the zip named on the `Reporting Data File:` line exists. |
-| `1` | A pre-flight check stopped the run before collection (for example `-Service` matched no collector, or the `-ObfuscationDictionary` file is missing or not valid JSON). |
+| `0` | Completed: the report and zip were written and no collector failed. |
+| `1` | The run stopped during setup or a pre-flight check, before it collected anything; the red error line printed before it gives the cause. For example the output folder cannot be written, the Azure CLI is not installed, a service principal sign-in has no `-Secret`, `-ResourceGroup` is given without `-SubscriptionID`, `-Service` matched no collector, or the `-ObfuscationDictionary` file is missing or not valid JSON. |
+| `2` | The run ended without writing its report zip, and its last console line says `No report was written`. This happens, for example, when 5 collectors failed in a row and collection stopped, or when the HTML report or the zip could not be written; the errors printed before that line give the cause. |
 | `4` | Completed and the report and zip were written, but one or more `Services/*/*.ps1` collectors failed. Those resource types are missing (not empty) from the report; its "Incomplete collection" banner names them. |
 
-Under `-RunAllSubs`, which is how `Run-AllSubscriptions.ps1` calls it, the script does not exit `4` when a collector failed; the wrapper reports the failure with its own code `4` above.
+Under `-RunAllSubs`, which is how `Run-AllSubscriptions.ps1` calls it, the script does not exit `2` or `4`: the wrapper checks each subscription's zip itself and reports a failed collector with its own code `4` above. A run that stops during setup (`1`) is counted by the wrapper as a failed subscription.
 
 ### Important Notes
 

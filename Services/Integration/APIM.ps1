@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($APIM)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $APIM)
         {
@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'VirtualNetworkType'   = $Data.virtualNetworkType;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

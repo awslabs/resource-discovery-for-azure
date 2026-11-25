@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($IOTHubs)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $IOTHubs)
         {
@@ -20,8 +20,9 @@ if ($Task -eq 'Processing')
                     'Subscription'                      = $Sub1.Name;
                     'ResourceGroup'                     = $1.RESOURCEGROUP;
                     'Name'                              = $1.NAME;
-                    'SKU'                               = $Data.sku.name;
-                    'SKUTier'                           = $Data.sku.tier;
+                    # The SKU is on the resource itself, not in its properties.
+                    'SKU'                               = $1.sku.name;
+                    'SKUTier'                           = $1.sku.tier;
                     'Location'                          = $loc.location;
                     'Role'                              = $loc.role;
                     'State'                             = $Data.state;
@@ -32,7 +33,7 @@ if ($Task -eq 'Processing')
                     'HostName'                          = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.hostName } else { $Data.hostName };
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($Synapse)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $Synapse)
         {
@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'ManagedResourceGroup'         = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.managedResourceGroupName };
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

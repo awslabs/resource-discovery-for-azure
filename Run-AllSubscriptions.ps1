@@ -458,6 +458,15 @@ Disable-ConsoleQuickEdit
 $RunStartTime = Get-Date
 $FailedSubscriptions = @()
 
+# Run-wide consumption health: the record total, and a list of { Name, Id, Message }
+# objects for subscriptions whose consumption could not be collected ('(auth)' when
+# the whole phase was skipped). ResourceInventory.ps1 (sequential run) and the
+# per-stream aggregation below (parallel run) only ever add to them, and a PowerShell
+# window keeps its globals between runs, so start every run from zero. Otherwise a
+# second run in the same window reports the first run's failures and records as its own.
+$Global:ConsumptionRecordCount = 0
+$Global:ConsumptionFailedSubs = @()
+
 # Per-subscription metrics-phase auth health, aggregated across the whole run.
 # This is the metrics counterpart to $Global:ConsumptionFailedSubs and works the
 # same way: a list of { Name, Id, Message } objects, one per subscription whose

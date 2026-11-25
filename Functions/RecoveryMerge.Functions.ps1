@@ -25,10 +25,29 @@
 # match the gap bundle's tokens exactly, so the recovered rows can be spliced in
 # with no remapping. This function performs that splice + re-package.
 #
-# Definitions only - dot-source this file, then call Merge-RecoveryData. It has
-# no dependency on ResourceInventory.ps1's globals; it only reads/writes files
-# and re-invokes Extension/Summary.ps1 to regenerate the HTML report.
+# Dot-source this file, then call Merge-RecoveryData. On load it runs one step:
+# it checks that Functions/InventoryJson.Functions.ps1 is next to it (throws if
+# not, and the throw stops the caller under any $ErrorActionPreference) and
+# dot-sources it, which defines Write-InventoryJson. So it works when
+# dot-sourced on its own. The rest is definitions. Merge-RecoveryData has no
+# dependency on ResourceInventory.ps1's globals; it only reads/writes files and
+# re-invokes Extension/Summary.ps1 to regenerate the HTML report.
 # =============================================================================
+
+# InventoryJson.Functions.ps1 defines only Write-InventoryJson, so loading it
+# sets no variable and leaves the caller's other functions as they were.
+if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1') -PathType Leaf))
+{
+    # A plain throw here, even one re-thrown from a catch, is skipped when the caller
+    # runs with $ErrorActionPreference = 'SilentlyContinue' or 'Ignore'. Thrown from a
+    # child scope set to Stop, it stops the caller under any preference. The child
+    # scope ends here, so the caller's own preference is left as it was.
+    & {
+        $ErrorActionPreference = 'Stop'
+        throw ("RecoveryMerge.Functions.ps1: required file not found: {0}. Keep the Functions folder together." -f (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1'))
+    }
+}
+. (Join-Path $PSScriptRoot 'InventoryJson.Functions.ps1')
 
 function Merge-RecoveryData
 {
@@ -102,9 +121,8 @@ function Merge-RecoveryData
     }
 
     # -- Verify an ObfuscationDictionary actually BELONGS to a given inventory.
-    #    An obfuscated inventory stores per-resource tokens (prod_/nonprod_<guid>)
-    #    in its ID/Name/cross-ref fields; those exact tokens are the KEYS of the
-    #    dictionary's maps (ResourceIdMap/ResourceNameMap/... are token -> real).
+    #    An obfuscated inventory holds per-resource tokens (prod_/nonprod_<guid>);
+    #    each one is a KEY of one of the dictionary's maps (token -> real).
     #    So the dictionary that goes with an inventory must contain (almost) all of
     #    that inventory's tokens as keys. If someone points at the WRONG dictionary
     #    (a different run/subscription), the inventory's tokens are absent and
@@ -128,10 +146,9 @@ function Merge-RecoveryData
         }
 
         # Collect the DISTINCT obfuscation tokens present in the inventory text.
-        # The pattern matches only flat per-resource tokens (prod_/nonprod_<guid>),
-        # which are what the inventory ID/Name fields carry and what the dictionary
-        # maps key on. Consumption-style tokens (prod_sub_/prod_rg_...) live in the
-        # CSV, not the inventory JSON, so they never enter this scan.
+        # The pattern counts every prod_/nonprod_<guid> token in the inventory text that
+        # is not joined to a letter, digit or '_' on either side (\b); each must be a key
+        # of one of the dictionary's maps.
         $InventoryText = Get-Content -Path $InventoryPath -Raw
         $InventoryTokens = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($TokenMatch in [regex]::Matches($InventoryText, '(?i)\b(?:prod|nonprod)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'))
@@ -332,20 +349,28 @@ function Merge-RecoveryData
     $OutZipFile = Join-Path $OutputPath ("{0}.zip" -f $BundleBase)
     $OutDictionaryFile = Join-Path $OutputPath ("ObfuscationDictionary_{0}.json" -f $BundleBase)
 
-    # -- Write the merged inventory (depth 100 + compressed, matching the
-    #    original serialization in ResourceInventory.ps1) ----------------------
-    $GapInventory | ConvertTo-Json -Depth 100 -Compress | Out-File -FilePath $OutInventoryFile
+    # -- Write the merged inventory with Write-InventoryJson, as
+    #    ResourceInventory.ps1 does: one collector at a time, so the whole
+    #    document is never one string, and the same bytes as
+    #    'ConvertTo-Json -Depth 100 -Compress | Out-File'. A failed write stops
+    #    the merge and leaves no new, empty or partial inventory; an inventory
+    #    already at $OutInventoryFile is left unchanged. -------------------------
+    Write-InventoryJson -InputObject $GapInventory -Path $OutInventoryFile
 
     # -- Consumption source. By default carry the gap bundle's CSV forward: an
     #    inventory gap does not affect the whole-subscription consumption file.
     #    With -RecoverConsumption, whole-file REPLACE it with the recovery
     #    bundle's CSV instead (used when the gap run's consumption is missing or
     #    incomplete - e.g. truncated by a transient "copying content to a stream"
-    #    error). Consumption ResourceUris are obfuscated with a per-run scheme
-    #    that is independent of the inventory dictionary (it preserves the ARM
-    #    path structure for categorisation but mints its own sub/rg/name tokens),
-    #    so a replaced consumption file is internally consistent and categorises
-    #    correctly even though its tokens differ from the gap run's. If the chosen
+    #    error). Consumption ResourceUris keep the ARM path structure for
+    #    categorisation. A ResourceUri that matches an inventory id exactly
+    #    takes that resource's whole masked path from the run's ResourceIdMap;
+    #    any other ResourceUri gets the tokens the run's own consumption
+    #    masking gives it (how they relate to the inventory's tokens is that
+    #    code's rule, in ResourceInventory.ps1, not this merge's). So a
+    #    replaced consumption file categorises correctly, and its tokens match
+    #    the gap run's only when the recovery run was seeded with the gap
+    #    bundle's dictionary. If the chosen
     #    source has none, write a canonical empty file so the bundle is
     #    structurally complete. --------------------------------------------------
     $ConsumptionSource = 'gap'
@@ -405,6 +430,7 @@ function Merge-RecoveryData
     #    via the seeded ResourceIdMap, so a recovery run seeded with the gap
     #    dictionary yields metrics tokens that match the merged inventory. Write a
     #    canonical empty file only if the chosen source has none.
+    $OutMetricsFiles = [System.Collections.Generic.List[string]]::new()
     if ($RecoverMetrics)
     {
         $RecoveryMetricsFiles = @(Get-ChildItem -Path $RecoveryBundlePath -Filter 'Metrics_*.json' -File -ErrorAction SilentlyContinue)
@@ -419,6 +445,7 @@ function Merge-RecoveryData
             $Suffix = $MetricsFile.BaseName -replace ('^Metrics_' + [regex]::Escape($RecoveryBase)), ''
             $RebasedName = 'Metrics_' + $BundleBase + $Suffix + '.json'
             Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $RebasedName) -Force
+            $OutMetricsFiles.Add((Join-Path $OutputPath $RebasedName))
         }
         $MetricsSource = 'recovery'
         # Advisory: the regenerated HTML does not render metrics (Summary.ps1
@@ -436,11 +463,13 @@ function Merge-RecoveryData
             foreach ($MetricsFile in $GapMetricsFiles)
             {
                 Copy-Item -Path $MetricsFile.FullName -Destination (Join-Path $OutputPath $MetricsFile.Name) -Force
+                $OutMetricsFiles.Add((Join-Path $OutputPath $MetricsFile.Name))
             }
         }
         else
         {
             @{ Metrics = @() } | ConvertTo-Json -Depth 5 -Compress | Out-File -FilePath $OutMetricsFile -Encoding utf8
+            $OutMetricsFiles.Add($OutMetricsFile)
         }
         $MetricsSource = 'gap'
     }
@@ -489,13 +518,12 @@ function Merge-RecoveryData
     $ReportVersion = if ($GapInventory.PSObject.Properties.Name -contains 'Version') { $GapInventory.Version } else { $null }
     & $SummaryScript -JsonFile $OutInventoryFile -HtmlFile $OutHtmlFile -Title 'Azure Resource Inventory' -Version $ReportVersion -ConsumptionFile $OutConsumptionFile | Out-Null
 
-    # -- Re-zip, mirroring ResourceInventory.ps1's packaging filter: HTML +
-    #    Consumption CSV + every *.json EXCEPT the local-only dictionary/Full/
-    #    Heartbeat/ErrorLog files. The dictionary is deliberately NOT zipped. ---
-    $ZipJsonFiles = Get-ChildItem -Path $OutputPath -Filter '*.json' |
-        Where-Object { $_.Name -notlike 'ObfuscationDictionary_*' -and $_.Name -notlike 'Full_*' -and $_.Name -notlike 'Heartbeat_*' -and $_.Name -notlike 'ErrorLog_*' } |
-        Select-Object -ExpandProperty FullName
-    $ZipPaths = @($OutHtmlFile, $OutConsumptionFile) + $ZipJsonFiles
+    # -- Re-zip only the files this call wrote: HTML + consumption CSV + merged
+    #    inventory + metrics. An existing -OutputPath can hold another bundle's
+    #    files (another report's inventory, or an earlier merge's metrics
+    #    batches), and those must not ship in this zip. The dictionary is
+    #    deliberately NOT zipped. ---
+    $ZipPaths = @($OutHtmlFile, $OutConsumptionFile, $OutInventoryFile) + @($OutMetricsFiles)
     if (Test-Path -Path $OutZipFile) { Remove-Item -Path $OutZipFile -Force }
     Compress-Archive -Path $ZipPaths -CompressionLevel Fastest -DestinationPath $OutZipFile
 

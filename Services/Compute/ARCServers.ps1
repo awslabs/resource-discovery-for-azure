@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($Arcservers)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
         foreach ($1 in $Arcservers)
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
@@ -26,7 +26,7 @@ if ($Task -eq 'Processing')
                 'DomainName'           = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { 'obfuscated' } else { $Data.domainName };
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

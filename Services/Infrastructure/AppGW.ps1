@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($APPGTW)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $APPGTW)
         {
@@ -33,7 +33,7 @@ if ($Task -eq 'Processing')
                 'CurrentInstances'      = $Data.sku.capacity;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

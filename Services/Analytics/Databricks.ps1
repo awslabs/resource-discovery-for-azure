@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($DataBricks)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $DataBricks)
         {
@@ -14,8 +14,10 @@ if ($Task -eq 'Processing')
             $Data = $1.PROPERTIES
             $Sku = $1.SKU
             $Timecreated = $Data.createdDateTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            # A missing value, or one that does not convert to a date, is 'Unknown'
+            # rather than an exception that fails the whole collector.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = try { if ($null -ne $Timecreated) { [datetime]::Parse($Timecreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal').ToString("yyyy-MM-dd HH:mm") } else { 'Unknown' } } catch { 'Unknown' }
 
             $Obj = @{
                 'ID'                        = $1.id;
@@ -33,7 +35,7 @@ if ($Task -eq 'Processing')
                 'CreatedTime'               = $Timecreated;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

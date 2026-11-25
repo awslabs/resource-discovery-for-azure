@@ -73,7 +73,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if ([string]::IsNullOrWhiteSpace($JsonFile) -or -not (Test-Path -Path $JsonFile -PathType Leaf))
+if ([string]::IsNullOrWhiteSpace($JsonFile) -or -not (Test-Path -LiteralPath $JsonFile -PathType Leaf))
 {
     throw "Summary.ps1: Inventory JSON not found at '$JsonFile'."
 }
@@ -90,7 +90,7 @@ if ([string]::IsNullOrWhiteSpace($HtmlFile))
 # branch) rather than loaded into every entry point. This script sits in
 # Extension/, so resolve the sibling Functions/ folder from the repo root.
 $RenderFunctionsFile = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Functions/AllSubHtmlSummary.Functions.ps1'
-if (-not (Test-Path -Path $RenderFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $RenderFunctionsFile -PathType Leaf))
 {
     throw "Summary.ps1: shared render helpers not found at '$RenderFunctionsFile'."
 }
@@ -106,7 +106,7 @@ $RenderStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 # Read input JSON. Top-level keys are service-type names; values are arrays of
 # resource records. No schema validation - a new field simply appears as a new
 # column in that service's table.
-$RawJson = Get-Content -Path $JsonFile -Raw -Encoding utf8
+$RawJson = Get-Content -LiteralPath $JsonFile -Raw -Encoding utf8
 $Inventory = $RawJson | ConvertFrom-Json
 
 # Compute summary stats. Every array-valued key becomes a (service, count)
@@ -124,15 +124,17 @@ foreach ($prop in $Inventory.PSObject.Properties)
         Count   = $Count
     }
 }
-$ServiceSummary = $ServiceSummary | Sort-Object -Property Count -Descending
-$TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
+$ServiceSummary = @($ServiceSummary | Sort-Object -Property Count -Descending)
+# A plain sum: 0 for a report with no resources, also under strict mode.
+$TotalResources = 0; foreach ($SvcRow in $ServiceSummary) { $TotalResources += [int]$SvcRow.Count }
 
 # Detect obfuscation so the header can carry a privacy-posture banner. Sample
 # resource Names and Subscription values across the first few populated
-# services; if most match the obfuscation signature treat the report as
-# obfuscated, else identifiable (the safe default for an unclear posture).
+# services; if most are whole obfuscation tokens (Get-RdaObfuscationTokenPattern)
+# treat the report as obfuscated, else identifiable (the safe default for an
+# unclear posture).
 $ObfuscationStatus = 'identifiable'
-$ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+$ObfPattern = '^(?:' + (Get-RdaObfuscationTokenPattern) + ')$'
 $Samples = New-Object System.Collections.Generic.List[string]
 foreach ($svc in $ServiceSummary | Select-Object -First 5)
 {
@@ -146,7 +148,7 @@ foreach ($svc in $ServiceSummary | Select-Object -First 5)
 }
 if ($Samples.Count -gt 0)
 {
-    $ObfHits = ($Samples | Where-Object { $_ -match $ObfPattern }).Count
+    $ObfHits = @($Samples | Where-Object { $_ -match $ObfPattern }).Count
     if ($ObfHits -gt ($Samples.Count * 0.7))
     {
         $ObfuscationStatus = 'obfuscated'
@@ -157,18 +159,23 @@ if ($Samples.Count -gt 0)
 # that EXISTS; the consumption CSV lists VMs that produced a compute-usage
 # record in the billing window. A running VM with no compute-usage record is an
 # anomaly - it usually means consumption data was incomplete for that VM's
-# subscription (auth / billing-scope gap), not that the VM is idle. We compare
-# COUNTS only (not identities): the inventory and consumption files obfuscate
-# resource ids through different dictionaries, so a per-VM join is impossible in
-# an obfuscated report. Counts of distinct tokens are preserved either way.
+# subscription (auth / billing-scope gap), not that the VM is idle.
+# shortcut: COUNTS only, so a running VM with no billing can be missed when
+# another billed VM makes the counts match. Both files carry the same id (the
+# output contract gives a masked resource one token in every file), so join
+# each running VM to the billed ids by ID, with Set (its scale set) as the
+# fallback, when that must be caught.
 $VmBilling = $null
-if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $ConsumptionFile -PathType Leaf))
+if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -LiteralPath $ConsumptionFile -PathType Leaf))
 {
     $RunningVmCount = 0
-    $VmRecords = $Inventory.VirtualMachines
+    # A report with no VirtualMachines section has no VM (also under Set-StrictMode).
+    $VmRecords = if ($Inventory.PSObject.Properties.Name -contains 'VirtualMachines') { $Inventory.VirtualMachines } else { $null }
     if ($VmRecords)
     {
-        $RunningVmCount = @($VmRecords | Where-Object { $_.PowerState -match 'running' }).Count
+        # A VM is on when PowerState is 'running' or 'transient', and so is
+        # an empty state.
+        $RunningVmCount = @($VmRecords | Where-Object { $State = if ($_.PSObject.Properties.Name -contains 'PowerState') { [string]$_.PowerState } else { '' }; [string]::IsNullOrWhiteSpace($State) -or $State -match 'running|transient' }).Count
     }
 
     # Count distinct VM-meter resources in the consumption CSV. A header-only or
@@ -181,9 +188,10 @@ if (-not [string]::IsNullOrWhiteSpace($ConsumptionFile) -and (Test-Path -Path $C
     $HasConsumptionData = $false
     try
     {
-        $Consumption = @(Import-Csv -Path $ConsumptionFile -ErrorAction Stop)
+        $Consumption = @(Import-Csv -LiteralPath $ConsumptionFile -ErrorAction Stop)
         $HasConsumptionData = ($Consumption.Count -gt 0)
-        $BilledVmCount = (@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }).ResourceId | Sort-Object -Unique).Count
+        # Each row's ResourceId, so no VM row (a real zero) counts 0 under Set-StrictMode too.
+        $BilledVmCount = @(@($Consumption | Where-Object { $_.MeterCategory -eq 'Virtual Machines' }) | ForEach-Object { $_.ResourceId } | Sort-Object -Unique).Count
     }
     catch
     {
@@ -227,7 +235,7 @@ if ([string]::IsNullOrWhiteSpace($SubscriptionName))
 }
 
 # Resolve version: explicit -Version wins, else the JSON's Version key.
-if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Version)
+if ([string]::IsNullOrWhiteSpace([string]$Version) -and $Inventory.PSObject.Properties.Name -contains 'Version' -and $null -ne $Inventory.Version)
 {
     $Version = [string]$Inventory.Version
 }
@@ -248,6 +256,32 @@ if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Ver
 # Column selection: the union of all field names across the records, ordered
 # by frequency. This avoids the trap of letting a single record with many
 # fields blow out the column list.
+
+# The text of one table cell: at most 200 characters, then '...'. In an
+# obfuscated report a cut that would split a masked token
+# (Get-RdaObfuscationTokenPattern) ends after that token instead, so Reveal can
+# still replace it; a value whose cut reaches its end is shown whole. Other
+# reports are cut at 200 characters as before.
+function Get-ReportCellText
+{
+    param([string]$Text, [string]$ObfuscationStatus)
+    $Limit = 200
+    if ($Text.Length -le $Limit) { return $Text }
+    $Cut = $Limit
+    if ($ObfuscationStatus -eq 'obfuscated')
+    {
+        foreach ($Token in [regex]::Matches($Text, (Get-RdaObfuscationTokenPattern)))
+        {
+            if ($Token.Index -lt $Limit -and ($Token.Index + $Token.Length) -gt $Limit)
+            {
+                $Cut = $Token.Index + $Token.Length
+                break
+            }
+        }
+    }
+    if ($Cut -ge $Text.Length) { return $Text }
+    return $Text.Substring(0, $Cut) + '...'
+}
 
 function New-ServiceTable
 {
@@ -399,7 +433,7 @@ function New-ServiceTable
                         }
                         [string]$_
                     }) -join ', '
-                if ($Joined.Length -gt 200) { $Joined = $Joined.Substring(0, 200) + '...' }
+                $Joined = Get-ReportCellText -Text $Joined -ObfuscationStatus $ObfuscationStatus
                 [void]$Sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $Joined))
             }
             elseif ($Val -is [bool])
@@ -409,8 +443,7 @@ function New-ServiceTable
             }
             else
             {
-                $S = [string]$Val
-                if ($S.Length -gt 200) { $S = $S.Substring(0, 200) + '...' }
+                $S = Get-ReportCellText -Text ([string]$Val) -ObfuscationStatus $ObfuscationStatus
                 [void]$Sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $S))
             }
         }
@@ -779,7 +812,7 @@ $PlatBlock = if ([string]::IsNullOrWhiteSpace($PlatSafe)) { '' } else { "<div><b
 # content carries real subscription / resource names.
 if ($ObfuscationStatus -eq 'obfuscated')
 {
-    $PrivacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names have been replaced with deterministic pseudonyms (prod_/nonprod_ prefixes). Real identifiers are not present. Suitable for sharing.</div></div>'
+    $PrivacyBanner = '<div class="privacy-banner obfuscated"><span class="privacy-icon">&#128274;</span><div><b>Obfuscated report.</b> Resource and subscription names in a sample of this report are deterministic pseudonyms (prod_/nonprod_ prefixes). Only a sample was checked: review the report before sharing it.</div></div>'
 }
 else
 {
@@ -868,14 +901,14 @@ $Js
 </html>
 "@
 
-Set-Content -Path $HtmlFile -Value $Html -Encoding utf8
+Set-Content -LiteralPath $HtmlFile -Value $Html -Encoding utf8
 Write-Host ("HTML report written: {0}" -f $HtmlFile) -ForegroundColor Green
 Write-Host ("  Total resources: {0:N0} across {1} service type(s)" -f $TotalResources, $ServiceSummary.Count) -ForegroundColor Green
-$FileSize = (Get-Item $HtmlFile).Length
+$FileSize = (Get-Item -LiteralPath $HtmlFile).Length
 Write-Host ("  File size: {0:N0} bytes ({1:N1} KB)" -f $FileSize, ($FileSize / 1KB)) -ForegroundColor Green
 if ($ObfuscationStatus -eq 'obfuscated')
 {
-    Write-Host "  Privacy posture: obfuscated (safe to share)" -ForegroundColor Green
+    Write-Host "  Privacy posture: obfuscated (names in a sample look masked; review before sharing)" -ForegroundColor Green
 }
 else
 {

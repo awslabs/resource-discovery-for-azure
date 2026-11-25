@@ -6,15 +6,17 @@ if ($Task -eq 'Processing')
 
     if ($Storageacc)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $Storageacc)
         {
             $Sub1 = $SUB | Where-Object { $_.Id -eq $1.subscriptionId }
             $Data = $1.PROPERTIES
             $Timecreated = $Data.creationTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            # A missing value, or one that does not convert to a date, is 'Unknown'
+            # rather than an exception that fails the whole collector.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = try { if ($null -ne $Timecreated) { [datetime]::Parse($Timecreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal').ToString("yyyy-MM-dd HH:mm") } else { 'Unknown' } } catch { 'Unknown' }
 
             if ($Data.isHnsEnabled) { $HnsEnabled = $true } else { $HnsEnabled = $false }
 
@@ -34,7 +36,7 @@ if ($Task -eq 'Processing')
                 'CreatedTime'                          = $Timecreated;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

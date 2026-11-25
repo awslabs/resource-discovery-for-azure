@@ -33,7 +33,9 @@ records when the token is missing, which would otherwise leave an empty
 consumption sheet that looks like "this tenant has no billing data." If the
 check fails, RDA attempts **one** reconnect; if that still fails it logs a loud
 error, records the subscription in the run health, and skips only the
-consumption phase (the rest of the inventory continues).
+consumption phase (the rest of the inventory continues). In a
+`Run-AllSubscriptions.ps1` run, the main summary marks that subscription's row
+**consumption incomplete** (see below).
 
 ### Transient-failure retry
 
@@ -111,7 +113,12 @@ recorded (in `$Global:ConsumptionFailedSubs`) with:
 - `Complete = $false`
 - `PageAtFailure` — the paged `Get-UsageAggregates` call it stopped on
 - `RecordsCollected` — how many rows were written before it stopped
+- `ReportFolder` — the name of the report folder the run writes to
 - a message ending `… this subscription's consumption is INCOMPLETE`
+
+In a `Run-AllSubscriptions.ps1` run, the main summary marks that
+subscription's row **consumption incomplete** (found through `ReportFolder`),
+so the obfuscated main summary also says which subscription it is.
 
 On an obfuscated run this is surfaced in the shareable
 `Diagnostics_<ReportName>_<timestamp>.log` under **"Consumption

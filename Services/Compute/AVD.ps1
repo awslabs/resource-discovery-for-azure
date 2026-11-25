@@ -26,6 +26,10 @@ if ($Task -eq 'Processing')
                 }
             }
 
+            # A host pool with no session host still gets one row, its session-host
+            # columns empty, as AvSet.ps1 writes a set that has no VMs.
+            if ($Sessionhosts.Count -eq 0) { $Sessionhosts = @($null) }
+
             foreach ($2 in $Sessionhosts)
             {
                 $Vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId }

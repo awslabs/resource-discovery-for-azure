@@ -17,6 +17,10 @@ if ($Task -eq 'Processing')
             $Vhub = $VirtualHub | Where-Object { $_.ID -in $Data.virtualHubs.id }
             $Vpn = $VPNSite | Where-Object { $_.ID -in $Data.vpnSites.id }
 
+            # A virtual WAN with no hub still gets its row(s), the hub columns empty,
+            # as AvSet.ps1 writes a set that has no VMs.
+            if ($null -eq $Vhub) { $Vhub = @($null) }
+
             if ($Vpn)
             {
                 foreach ($2 in $Vhub)

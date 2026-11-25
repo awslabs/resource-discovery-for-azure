@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($SQLPOOL)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $SQLPOOL)
         {
@@ -32,7 +32,7 @@ if ($Task -eq 'Processing')
                 'ZoneRedundant'              = $Data.zoneRedundant;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

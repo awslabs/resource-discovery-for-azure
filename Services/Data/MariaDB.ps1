@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($MariaDB)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $MariaDB)
         {
@@ -33,7 +33,7 @@ if ($Task -eq 'Processing')
                 'ReplicaCapacity'           = $Data.replicaCapacity;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

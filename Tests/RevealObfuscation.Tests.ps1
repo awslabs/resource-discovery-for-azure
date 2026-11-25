@@ -107,12 +107,15 @@ BeforeAll {
         )
     }
 
-    # Consumption CSV with the sub + rg tokens embedded inside an ARM-path field,
-    # so revealing the comma-bearing subscription name must not break columns.
+    # Consumption CSV with the sub + rg tokens embedded inside an ARM-path field
+    # (where the subscription token stands for the subscription id) and the sub
+    # token on its own (the comma-bearing display name), so revealing it must
+    # not break columns.
     $ConsumptionRows = @(
         [pscustomobject]@{
-            InstanceId = "/subscriptions/$($script:TokSub)/resourceGroups/$($script:TokRg)/providers/Microsoft.Compute/virtualMachines/vm01"
-            Cost       = '12.34'
+            InstanceId   = "/subscriptions/$($script:TokSub)/resourceGroups/$($script:TokRg)/providers/Microsoft.Compute/virtualMachines/vm01"
+            Subscription = $script:TokSub
+            Cost         = '12.34'
         }
     )
 
@@ -226,8 +229,12 @@ Describe "Reveal-Obfuscation default fields (ResourceGroup + Subscription)" {
     It "keeps the Consumption CSV columns intact despite a comma in the revealed subscription name" {
         @($Script:R.Csv).Count | Should -Be 1
         $Script:R.Csv[0].Cost | Should -Be '12.34'
-        $Script:R.Csv[0].InstanceId | Should -Match ([regex]::Escape($script:RealSubName))
+        $Script:R.Csv[0].Subscription | Should -BeExactly $script:RealSubName
         $Script:R.Csv[0].InstanceId | Should -Match ([regex]::Escape($script:RealRgName))
+    }
+
+    It "reveals the subscription id, not the display name, inside an ARM path" {
+        $Script:R.Csv[0].InstanceId | Should -BeExactly "/subscriptions/12345678-1234-1234-1234-123456789012/resourceGroups/$($script:RealRgName)/providers/Microsoft.Compute/virtualMachines/vm01"
     }
 }
 
@@ -350,6 +357,40 @@ Describe "Reveal-Obfuscation older / partial dictionaries" {
 
         $R = Invoke-Reveal -DictPath $LegacyDict
         $R.Inventory.VirtualMachines[0].Subscription | Should -Be '12345678-1234-1234-1234-123456789012'
+    }
+
+    It "reveals the name of a collector row with no id without its stand-in suffix" {
+        # A row with no id is filed under a stand-in path whose last segment is <name>~<hash>.
+        $NoIdDir = Join-Path $script:TmpDir ("noid_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $NoIdDir -Force | Out-Null
+        $NoIdDict = Join-Path $NoIdDir 'ObfuscationDictionary_NoId.json'
+        [ordered]@{
+            GeneratedAt     = '2026-06-30 00:00:00'
+            ResourceNameMap = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/rg-app/providers/rda.noid/virtualmachines/vm01~0a1b2c3d" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $NoIdDict -Encoding utf8
+
+        $R = Invoke-Reveal -Fields @('ResourceName') -DictPath $NoIdDict
+        $R.Inventory.VirtualMachines[0].Name | Should -Be 'vm01'
+    }
+
+    It "reveals a no-id row's name whose stand-in carries a second-row count, and leaves a row with no name masked" {
+        $NoIdDir = Join-Path $script:TmpDir ("noid2_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $NoIdDir -Force | Out-Null
+        $NoIdDict = Join-Path $NoIdDir 'ObfuscationDictionary_NoId2.json'
+        [ordered]@{
+            GeneratedAt     = '2026-06-30 00:00:00'
+            ResourceNameMap = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/rg-app/providers/rda.noid/virtualmachines/vm01~0a1b2c3d-2" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $NoIdDict -Encoding utf8
+        $R = Invoke-Reveal -Fields @('ResourceName') -DictPath $NoIdDict
+        $R.Inventory.VirtualMachines[0].Name | Should -Be 'vm01'
+
+        $NoNameDict = Join-Path $NoIdDir 'ObfuscationDictionary_NoName.json'
+        [ordered]@{
+            GeneratedAt     = '2026-06-30 00:00:00'
+            ResourceNameMap = [ordered]@{ $script:TokName = "/subscriptions/12345678-1234-1234-1234-123456789012/resourcegroups/rg-app/providers/rda.noid/virtualmachines/~noname~0a1b2c3d" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -Path $NoNameDict -Encoding utf8
+        $R = Invoke-Reveal -Fields @('ResourceName') -DictPath $NoNameDict
+        $R.Inventory.VirtualMachines[0].Name | Should -Be $script:TokName
     }
 
     It "leaves tag values masked when -Fields Tag is requested but the dictionary has no TagMap" {

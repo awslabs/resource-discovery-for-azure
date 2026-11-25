@@ -7,7 +7,7 @@ if ($Task -eq 'Processing')
 
     if ($Autacc)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($0 in $Autacc)
         {
@@ -16,8 +16,10 @@ if ($Task -eq 'Processing')
 
             $Data0 = $0.properties
             $Timecreated = $Data0.creationTime
-            $Timecreated = [datetime]$Timecreated
-            $Timecreated = $Timecreated.ToString("yyyy-MM-dd HH:mm")
+            # A missing value, or one that does not convert to a date, is 'Unknown'
+            # rather than an exception that fails the whole collector.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = try { if ($null -ne $Timecreated) { [datetime]::Parse($Timecreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal').ToString("yyyy-MM-dd HH:mm") } else { 'Unknown' } } catch { 'Unknown' }
 
             if ($null -ne $Rbs)
             {
@@ -35,13 +37,13 @@ if ($Task -eq 'Processing')
                         'AutomationAccountCreatedTime'  = $Timecreated;
                         'Location'                      = $0.LOCATION;
                         'RunbookName'                   = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $1.Name } else { $1.Name };
-                        'LastModifiedTime'              = ([datetime]$Data.lastModifiedTime).tostring('MM/dd/yyyy hh:mm') ;
+                        'LastModifiedTime'              = try { if ($null -ne $Data.lastModifiedTime) { ([datetime]::Parse($Data.lastModifiedTime, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal')).ToString("yyyy-MM-dd HH:mm") } else { 'Unknown' } } catch { 'Unknown' } ;
                         'RunbookState'                  = $Data.state;
                         'RunbookType'                   = $Data.runbookType;
                         'RunbookDescription'            = if ($null -ne $ResourceIdDictionary -and $ResourceIdDictionary.Count -gt 0) { Protect-FreeTextValue $Data.description } else { $Data.description };
                     }
 
-                    $Tmp += $Obj
+                    [void]$Tmp.Add($Obj)
                 }
             }
             else
@@ -62,7 +64,7 @@ if ($Task -eq 'Processing')
                     'RunbookDescription'            = $null;
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

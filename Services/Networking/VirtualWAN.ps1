@@ -8,7 +8,7 @@ if ($Task -eq 'Processing')
 
     if ($VirtualWAN)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $VirtualWAN)
         {
@@ -16,6 +16,10 @@ if ($Task -eq 'Processing')
             $Data = $1.PROPERTIES
             $Vhub = $VirtualHub | Where-Object { $_.ID -in $Data.virtualHubs.id }
             $Vpn = $VPNSite | Where-Object { $_.ID -in $Data.vpnSites.id }
+
+            # A virtual WAN with no hub still gets its row(s), the hub columns empty,
+            # as AvSet.ps1 writes a set that has no VMs.
+            if ($null -eq $Vhub) { $Vhub = @($null) }
 
             if ($Vpn)
             {
@@ -36,7 +40,7 @@ if ($Task -eq 'Processing')
                             'LinkSpeedMbps'                 = [string]$3.properties.vpnSiteLinks.properties.linkProperties.linkSpeedInMbps;
                         }
 
-                        $Tmp += $Obj
+                        [void]$Tmp.Add($Obj)
                     }
                 }
             }
@@ -52,7 +56,7 @@ if ($Task -eq 'Processing')
                         'Location'                      = $1.LOCATION;
                     }
 
-                    $Tmp += $Obj
+                    [void]$Tmp.Add($Obj)
                 }
             }
         }

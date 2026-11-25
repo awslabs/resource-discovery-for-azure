@@ -16,7 +16,7 @@
 #
 # HOW
 # ---
-# Write-InventoryJson is dot-sourced from Functions/ResourceInventory.Functions.ps1
+# Write-InventoryJson is dot-sourced from Functions/InventoryJson.Functions.ps1
 # and tested directly. ResourceInventory.ps1 runs login and collection when
 # invoked, so its parts are lifted out with the PowerShell parser: the functions
 # it defines, the top-level statements of RunInventorySetup and
@@ -45,7 +45,8 @@ BeforeAll {
     $script:InventoryScript = Join-Path $script:RepoRoot 'ResourceInventory.ps1'
     $script:CommonFunctions = Join-Path $script:RepoRoot 'Functions/Common.Functions.ps1'
     $script:InventoryFunctions = Join-Path $script:RepoRoot 'Functions/ResourceInventory.Functions.ps1'
-    foreach ($Required in @($script:InventoryScript, $script:CommonFunctions, $script:InventoryFunctions))
+    $script:InventoryJsonFunctions = Join-Path $script:RepoRoot 'Functions/InventoryJson.Functions.ps1'
+    foreach ($Required in @($script:InventoryScript, $script:CommonFunctions, $script:InventoryFunctions, $script:InventoryJsonFunctions))
     {
         if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) { throw "Required file not found: $Required" }
     }
@@ -263,6 +264,7 @@ function Get-AzContext { }
                 '$ErrorActionPreference = ''silentlycontinue'''
                 ('. {0}' -f (& $Q $script:CommonFunctions))
                 ('. {0}' -f (& $Q $script:InventoryFunctions))
+                ('. {0}' -f (& $Q $script:InventoryJsonFunctions))
                 'function GetLocalVersion { ''1.2.3'' }'
                 'function Write-RdaShareableDiagnosticsLog { $null }'
                 ('$Global:DefaultPath = {0}' -f (& $Q ($RunDir + [IO.Path]::DirectorySeparatorChar)))
@@ -403,10 +405,10 @@ AfterAll {
 Describe 'Write-InventoryJson' {
 
     BeforeAll {
-        . $script:InventoryFunctions
+        . $script:InventoryJsonFunctions
         if (-not (Get-Command -Name 'Write-InventoryJson' -CommandType Function -ErrorAction SilentlyContinue))
         {
-            throw "Expected function 'Write-InventoryJson' to be defined by $script:InventoryFunctions, but it was not."
+            throw "Expected function 'Write-InventoryJson' to be defined by $script:InventoryJsonFunctions, but it was not."
         }
 
         # An empty folder of its own, so a test can check every file the writer left behind.
@@ -498,7 +500,7 @@ Describe 'Write-InventoryJson' {
     It 'says when it cannot remove the temporary file of a failed write' {
         Mock Remove-Item { }
         $Dir = New-WriterCaseDir
-        $Out = @(& { try { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir 'Inventory_W.json') } catch { } } 3>&1)
+        $Out = @(& { try { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir 'Inventory_W.json') } catch { $null = $_ } } 3>&1)
         ($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message }) -join "`n" | Should -Match 'could not remove the temporary file .*rda-write-[0-9a-f]{32}\.tmp'
     }
 
@@ -512,11 +514,147 @@ Describe 'Write-InventoryJson' {
         @(Get-WriterCaseFiles $Dir) | Should -Be @((Split-Path $Other -Leaf), (Split-Path $Earlier -Leaf) | Sort-Object)
     }
 
-    It 'leaves no temporary file when the write cannot be opened' {
+    It 'throws and makes no file or folder when the destination folder does not exist' {
         $Dir = New-WriterCaseDir
         $Missing = Join-Path $Dir 'no-such-folder'
         { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Missing 'Inventory_X.json') 3>$null } | Should -Throw
+        Test-Path -LiteralPath $Missing | Should -BeFalse
         @(Get-WriterCaseFiles $Dir) | Should -BeNullOrEmpty
+    }
+
+    It 'keeps the write''s own error when the clean-up after it fails too (ErrorActionPreference <Preference>)' -ForEach @(
+        @{ Preference = 'Continue' }
+        @{ Preference = 'Stop' }
+        @{ Preference = 'SilentlyContinue' }
+    ) {
+        # Fail-safe rule: the clean-up after a failed write never replaces the write's error.
+        Mock Remove-Item { throw 'stand-in: clean-up failed' }
+        $Dir = New-WriterCaseDir
+        $ErrorActionPreference = $Preference
+        $script:CleanupCaught = $null
+        $Out = @(& { try { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir 'Inventory_C.json') } catch { $script:CleanupCaught = $_.Exception.Message } } 3>&1)
+        $Caught = $script:CleanupCaught
+        $ErrorActionPreference = 'Continue'
+        $Caught | Should -Not -BeNullOrEmpty -Because 'the failed write still throws'
+        $Caught | Should -Not -Match 'clean-up failed' -Because 'the caller gets the write''s own error'
+        $Caught | Should -Match 'Hashtable|ConvertTo-Json returned nothing'
+        ($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message }) -join "`n" | Should -Match 'could not remove the temporary file .*rda-write-[0-9a-f]{32}\.tmp'
+    }
+
+    It 'names a temporary file the build before this one left (the inventory name, .json, a GUID, .tmp), and keeps it' {
+        $Dir = New-WriterCaseDir
+        $Old = Join-Path $Dir ('Inventory_Old.json.{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        [System.IO.File]::WriteAllText($Old, 'keep')
+        $Out = @(& { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_O.json') } 3>&1)
+        $Warnings = @($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] -and $_.Message -like 'Write-InventoryJson:*' } | ForEach-Object { $_.Message })
+        $Warnings.Count | Should -Be 1
+        $Warnings[0] | Should -BeLike ("*{0}' is a temporary file*" -f (Split-Path $Old -Leaf))
+        Test-Path -LiteralPath $Old | Should -BeTrue
+    }
+
+    It 'names a temporary file the build before this one left for a final name of any kind (<Name>)' -ForEach @(
+        @{ Name = 'custom.json' }
+        @{ Name = 'Inventory_Old.json' }
+        # A report name may hold a line break on Linux and macOS, and the old build used the whole name.
+        @{ Name = "Inventory_Old`nline.json" }
+    ) {
+        if ($IsWindows -and $Name.Contains("`n")) { Set-ItResult -Skipped -Because 'Windows file names cannot hold a line break'; return }
+        $Dir = New-WriterCaseDir
+        $Old = Join-Path $Dir ('{0}.{1}.tmp' -f $Name, [guid]::NewGuid().ToString('N'))
+        [System.IO.File]::WriteAllText($Old, 'keep')
+        $Out = @(& { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_N.json') } 3>&1)
+        @($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] -and $_.Message -like ("*{0}' is a temporary file*" -f (Split-Path $Old -Leaf)) }).Count | Should -Be 1
+        Test-Path -LiteralPath $Old | Should -BeTrue
+    }
+
+    It 'writes through the -TempName it is given, in the destination folder, and refuses any other form' {
+        $Dir = New-WriterCaseDir
+        $Given = 'rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+        # A stand-in removal leaves the failed write's file, to show which name it used.
+        Mock Remove-Item { }
+        { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir 'Inventory_T.json') -TempName $Given 3>$null } | Should -Throw
+        @(Get-WriterCaseFiles $Dir) | Should -Be @($Given)
+        # Upper case (a later listing would not find it), another name, the final file's name, a path.
+        $Other = New-WriterCaseDir
+        foreach ($Bad in @($Given.ToUpperInvariant(), 'notes.tmp', 'Inventory_U.json', (Join-Path $Other ('rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')))))
+        {
+            { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_U.json') -TempName $Bad } | Should -Throw -ExpectedMessage '*must be a name of the form*'
+        }
+        Test-Path -LiteralPath (Join-Path $Dir 'Inventory_U.json') | Should -BeFalse -Because 'a refused -TempName writes nothing'
+        @(Get-WriterCaseFiles $Other) | Should -BeNullOrEmpty
+    }
+
+    It 'warns with the path when the removal fails in a folder that can no longer be read' -Skip:($IsWindows -or ((& id -u) -eq '0')) {
+        # File.Exists reads false in a folder that cannot be read, so the failed removal itself
+        # must give the warning. The stand-in serialiser makes the folder unreadable, then fails.
+        $Dir = New-WriterCaseDir
+        $script:LockDir = $Dir
+        Mock ConvertTo-Json { [System.IO.File]::SetUnixFileMode($script:LockDir, [System.IO.UnixFileMode]::None); throw 'stand-in: serialiser failed' }
+        try
+        {
+            $Out = @(& { try { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_U.json') } catch { $script:LockCaught = $_.Exception.Message } } 3>&1)
+        }
+        finally
+        {
+            [System.IO.File]::SetUnixFileMode($Dir, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+        }
+        $script:LockCaught | Should -Match 'stand-in: serialiser failed' -Because 'the write''s own error stands'
+        ($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] } | ForEach-Object { $_.Message }) -join "`n" | Should -Match 'could not remove the temporary file .*rda-write-[0-9a-f]{32}\.tmp'
+        @(Get-WriterCaseFiles $Dir | Where-Object { $_ -like 'rda-write-*.tmp' }).Count | Should -Be 1 -Because 'the file the warning names is there'
+    }
+
+    It 'gives no removal warning when the temporary file is already gone' {
+        # The stand-in removal deletes the file, then reports it as not found.
+        Mock Remove-Item { [System.IO.File]::Delete($LiteralPath); throw [System.Management.Automation.ItemNotFoundException]::new('stand-in: not found') }
+        $Dir = New-WriterCaseDir
+        $Out = @(& { try { Write-InventoryJson -InputObject (New-FailingInventoryFixture) -Path (Join-Path $Dir 'Inventory_G.json') } catch { $null = $_ } } 3>&1)
+        @($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] -and $_.Message -like '*could not remove*' }).Count | Should -Be 0
+        @(Get-WriterCaseFiles $Dir) | Should -BeNullOrEmpty
+    }
+
+    It 'leaves another run''s file alone when the -TempName it is given is already taken' {
+        # CreateNew refuses the taken name, so the file is never this call's and is never removed.
+        $Dir = New-WriterCaseDir
+        $Taken = 'rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+        [System.IO.File]::WriteAllText((Join-Path $Dir $Taken), 'another run')
+        { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_C.json') -TempName $Taken 3>$null } | Should -Throw
+        [System.IO.File]::ReadAllText((Join-Path $Dir $Taken)) | Should -Be 'another run'
+        @(Get-WriterCaseFiles $Dir) | Should -Be @($Taken)
+    }
+
+    It 'refuses a -TempName that is the final file''s own name, or that ends in a line break' {
+        $Dir = New-WriterCaseDir
+        $Name = 'rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+        # The final file itself has the temporary form here, so only the final-name check refuses it.
+        { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir $Name) -TempName $Name } | Should -Throw -ExpectedMessage '*must be a name of the form*'
+        # '$' in a .NET pattern also matches before a closing line break; the check must not.
+        { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_L.json') -TempName ($Name + "`n") } | Should -Throw -ExpectedMessage '*must be a name of the form*'
+        @(Get-WriterCaseFiles $Dir) | Should -BeNullOrEmpty
+    }
+
+    It 'guards every clean-up step after a failed write with a catch that drops a second error' {
+        # The fail-safe rule, read from the code: the close and removal calls on a failure path
+        # (which a test cannot make fail on a working disk) each sit alone in a try with a catch.
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryJsonFunctions, [ref]$null, [ref]$null)
+        $Fn = $Ast.Find({ param($N) $N -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $N.Name -eq 'Write-InventoryJson' }, $true)
+        $Guarded = @($Fn.FindAll({ param($N) $N -is [System.Management.Automation.Language.TryStatementAst] -and $N.CatchClauses.Count -eq 1 -and $N.CatchClauses[0].Body.Extent.Text -match '^\{\s*(\$(null|RemoveError) = \$_|if \(\$_\.Exception -isnot \[System\.Management\.Automation\.ItemNotFoundException\]\) \{ \$RemoveError = \$_ \})\s*\}$' }, $true) | ForEach-Object { $_.Body.Extent.Text })
+        foreach ($Call in @('$TempStream.Dispose()', '$Writer.Dispose()', 'Remove-Item -LiteralPath $TempPath'))
+        {
+            @($Guarded | Where-Object { $_.Contains($Call) }).Count | Should -BeGreaterOrEqual 1 -Because "$Call on a failure path must not replace the write's error"
+        }
+    }
+
+    It 'names a temporary file an earlier stopped write left, keeps it, and still writes' {
+        $Dir = New-WriterCaseDir
+        $Left = Join-Path $Dir ('rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        $NotOurs = Join-Path $Dir 'rda-write-notes.tmp'
+        foreach ($F in $Left, $NotOurs) { [System.IO.File]::WriteAllText($F, 'keep') }
+        $Out = @(& { Write-InventoryJson -InputObject (New-InventoryFixture) -Path (Join-Path $Dir 'Inventory_L.json') } 3>&1)
+        # Only this writer's own lines count (ConvertTo-Json can warn about the fixture too).
+        $Warnings = @($Out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] -and $_.Message -like 'Write-InventoryJson:*' } | ForEach-Object { $_.Message })
+        $Warnings.Count | Should -Be 1 -Because 'only the name the writer makes is its leftover'
+        $Warnings[0] | Should -BeLike ("*{0}' is a temporary file*delete it*" -f (Split-Path $Left -Leaf))
+        @(Get-WriterCaseFiles $Dir) | Should -Be (@('Inventory_L.json', (Split-Path $Left -Leaf), (Split-Path $NotOurs -Leaf)) | Sort-Object) -Because 'it may be another run''s file, so it is never removed here'
     }
 
     It 'leaves no temporary file when the move into place fails' {
@@ -629,6 +767,290 @@ Describe 'Write-InventoryJson' {
         [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Inventory)))
         Get-WriterCaseFiles $Dir | Should -Be @('Inventory_test.json')
     }
+
+    # A dictionary's PSObject properties are Keys, Values, Count and so on, not its entries,
+    # so writing one property at a time would give the wrong shape with no error.
+    It 'refuses a <Kind> input with a clear error and writes nothing' -ForEach @(
+        @{ Kind = 'hashtable'; Make = { @{ VirtualMachines = @(); Version = '1.2.3' } } }
+        @{ Kind = 'ordered dictionary'; Make = { [ordered]@{ VirtualMachines = @(); Version = '1.2.3' } } }
+    ) {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+
+        { Write-InventoryJson -InputObject (& $Make) -Path $Path 3>$null } | Should -Throw '*-InputObject is a dictionary*'
+
+        Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'nothing is written for a refused input'
+    }
+
+    # A string's PSObject properties are Length, an array's Count and so on: not collectors.
+    It 'refuses a <Kind> input that is not a [pscustomobject] and writes nothing' -ForEach @(
+        @{ Kind = 'string'; Make = { '{"Version":"1.2.3"}' } }
+        @{ Kind = 'array'; Make = { , @([pscustomobject]@{ Version = '1.2.3' }) } }
+        @{ Kind = 'number'; Make = { 42 } }
+    ) {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+
+        { Write-InventoryJson -InputObject (& $Make) -Path $Path 3>$null } | Should -Throw '*not a `[pscustomobject`]*'
+
+        Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'nothing is written for a refused input'
+    }
+
+    It 'refuses a dictionary without touching an existing file at the path' {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($Path, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($Path)
+
+        { Write-InventoryJson -InputObject @{ Version = '1.2.3' } -Path $Path 3>$null } | Should -Throw '*-InputObject is a dictionary*'
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String($Before))
+        Get-WriterCaseFiles $Dir | Should -Be @('Inventory_test.json')
+    }
+
+    # Pester runs each test inside a try, and a throw inside a try always stops. So the
+    # caller here is a child pwsh with no try at all, as a script run on its own would be.
+    # The third case passes -ErrorAction SilentlyContinue at the call site instead, with the
+    # caller's own preference left at Continue.
+    It 'refuses a dictionary under <Label> with no enclosing try, writing nothing' -ForEach @(
+        @{ Label = 'ErrorActionPreference SilentlyContinue'; Preference = 'SilentlyContinue'; CallSite = '' }
+        @{ Label = 'ErrorActionPreference Ignore'; Preference = 'Ignore'; CallSite = '' }
+        @{ Label = 'call-site -ErrorAction SilentlyContinue'; Preference = 'Continue'; CallSite = ' -ErrorAction SilentlyContinue' }
+    ) {
+        $EmptyDir = New-WriterCaseDir
+        $EmptyPath = Join-Path $EmptyDir 'Inventory_test.json'
+        $ExistingDir = New-WriterCaseDir
+        $ExistingPath = Join-Path $ExistingDir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($ExistingPath, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($ExistingPath)
+
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('silent_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            ('$ErrorActionPreference = {0}' -f (& $Q $Preference))
+            ('. {0}' -f (& $Q $script:InventoryJsonFunctions))
+            ('Write-InventoryJson -InputObject @{{ VirtualMachines = @(); Version = ''1.2.3'' }} -Path {0}{1}' -f (& $Q $EmptyPath), $CallSite)
+            'Write-Output ''AFTER_FIRST'''
+            ('Write-InventoryJson -InputObject ([ordered]@{{ Version = ''1.2.3'' }}) -Path {0}{1}' -f (& $Q $ExistingPath), $CallSite)
+            'Write-Output ''AFTER_SECOND'''
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        # The child gets past both calls (its own preference lets it go on); the writer must not.
+        $Output | Should -Contain 'AFTER_SECOND' -Because ($Output -join [Environment]::NewLine)
+        Get-WriterCaseFiles $EmptyDir | Should -BeNullOrEmpty -Because 'no inventory and no temporary file is written for a dictionary'
+        Get-WriterCaseFiles $ExistingDir | Should -Be @('Inventory_test.json') -Because 'no temporary file is left'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
+    }
+
+    # A serialiser error the caller's preference lets pass returns nothing instead of
+    # throwing. The mock stands in for that on one collector's value only. Pester runs
+    # this inside its own try; the next test covers a caller with no try.
+    It 'stops and writes nothing when ConvertTo-Json returns nothing for a value (ErrorActionPreference <Preference>, inside a try)' -ForEach @(
+        @{ Preference = 'Continue' }
+        @{ Preference = 'SilentlyContinue' }
+    ) {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        $ExistingDir = New-WriterCaseDir
+        $ExistingPath = Join-Path $ExistingDir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($ExistingPath, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($ExistingPath)
+        $Inventory = [pscustomobject][ordered]@{ Disks = @([ordered]@{ Name = 'disk-01' }); Broken = 'serialiser-returns-nothing'; Version = '1.2.3' }
+        Mock -CommandName ConvertTo-Json -MockWith { } -ParameterFilter { $InputObject -is [string] -and $InputObject -eq 'serialiser-returns-nothing' }
+        $ErrorActionPreference = $Preference
+
+        { Write-InventoryJson -InputObject $Inventory -Path $Path 3>$null } | Should -Throw "*returned nothing for the 'Broken' property*"
+        { Write-InventoryJson -InputObject $Inventory -Path $ExistingPath 3>$null } | Should -Throw "*returned nothing for the 'Broken' property*"
+
+        $ErrorActionPreference = 'Continue'
+        Get-WriterCaseFiles $Dir | Should -BeNullOrEmpty -Because 'an inventory with a property and no value must not be written'
+        Get-WriterCaseFiles $ExistingDir | Should -Be @('Inventory_test.json') -Because 'no temporary file is left'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
+    }
+
+    # The same case from a child pwsh with no try at all, as a script run on its own would
+    # be. A ConvertTo-Json function in the child stands in for the serialiser error.
+    It 'stops and writes nothing when ConvertTo-Json returns nothing for a value under ErrorActionPreference SilentlyContinue with no enclosing try' {
+        $EmptyDir = New-WriterCaseDir
+        $EmptyPath = Join-Path $EmptyDir 'Inventory_test.json'
+        $ExistingDir = New-WriterCaseDir
+        $ExistingPath = Join-Path $ExistingDir 'Inventory_test.json'
+        [System.IO.File]::WriteAllText($ExistingPath, '{"old":1}')
+        $Before = [System.IO.File]::ReadAllBytes($ExistingPath)
+
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('silent_empty_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            '$ErrorActionPreference = ''SilentlyContinue'''
+            ('. {0}' -f (& $Q $script:InventoryJsonFunctions))
+            'function ConvertTo-Json { param($InputObject, $Depth, [switch]$Compress) if ($InputObject -is [string] -and $InputObject -eq ''serialiser-returns-nothing'') { return }; Microsoft.PowerShell.Utility\ConvertTo-Json @PSBoundParameters }'
+            '$Inventory = [pscustomobject][ordered]@{ Disks = @([ordered]@{ Name = ''disk-01'' }); Broken = ''serialiser-returns-nothing''; Version = ''1.2.3'' }'
+            ('Write-InventoryJson -InputObject $Inventory -Path {0}' -f (& $Q $EmptyPath))
+            'Write-Output ''AFTER_FIRST'''
+            ('Write-InventoryJson -InputObject $Inventory -Path {0}' -f (& $Q $ExistingPath))
+            'Write-Output ''AFTER_SECOND'''
+        )
+        $Output = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        $Output | Should -Contain 'AFTER_SECOND' -Because ($Output -join [Environment]::NewLine)
+        Get-WriterCaseFiles $EmptyDir | Should -BeNullOrEmpty -Because 'an inventory with a property and no value must not be written'
+        Get-WriterCaseFiles $ExistingDir | Should -Be @('Inventory_test.json') -Because 'no temporary file is left'
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ExistingPath)) | Should -BeExactly ([Convert]::ToBase64String($Before)) -Because 'an existing inventory is left unchanged'
+    }
+
+    It 'still writes null and empty collectors, which ConvertTo-Json returns as text' {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        $Inventory = [pscustomobject][ordered]@{ Empty = @(); Nothing = $null; Text = ''; Version = '1.2.3' }
+
+        Write-InventoryJson -InputObject $Inventory -Path $Path 3>$null
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Inventory)))
+    }
+
+    It 'still writes a [pscustomobject] built from an ordered dictionary' {
+        $Dir = New-WriterCaseDir
+        $Path = Join-Path $Dir 'Inventory_test.json'
+        $Inventory = [pscustomobject][ordered]@{ VirtualMachines = @([ordered]@{ Name = 'vm-01' }); Version = '1.2.3' }
+
+        Write-InventoryJson -InputObject $Inventory -Path $Path 3>$null
+
+        [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) | Should -BeExactly ([Convert]::ToBase64String((Get-ReferenceBytes $Inventory)))
+    }
+}
+
+Describe 'ResourceInventory.ps1 start-up loads Write-InventoryJson' {
+
+    It 'defines Write-InventoryJson after the start-up load statements run in a fresh pwsh (<Case>)' -ForEach @(
+        @{ Case = 'the repo folder'; Bracketed = $false }
+        @{ Case = 'a copy in a folder whose name holds [ and ]'; Bracketed = $true }
+    ) {
+        # The top-level statements before the first '$Debug.IsPresent' check are the
+        # functions-file loads. Run them in a child pwsh with $PSScriptRoot set to the repo.
+        $Tokens = $null
+        $ParseErrors = $null
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$Tokens, [ref]$ParseErrors)
+        $Load = @()
+        foreach ($Statement in $Ast.EndBlock.Statements)
+        {
+            if ($Statement.Extent.Text -match '^\s*if\s*\(\s*\$Debug\.IsPresent') { break }
+            $Load += $Statement.Extent.Text
+        }
+        $Load.Count | Should -BeGreaterThan 0
+
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $Root = $script:RepoRoot
+        if ($Bracketed)
+        {
+            # -Path reads [ and ] as a pattern, so the checks must read the paths literally.
+            $Root = Join-Path $script:TmpRoot ('br[1]x_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $null = New-Item -ItemType Directory -Path (Join-Path $Root 'Functions')
+            Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot 'Functions') -File | ForEach-Object { [System.IO.File]::Copy($_.FullName, (Join-Path (Join-Path $Root 'Functions') $_.Name)) }
+        }
+        $ChildFile = Join-Path $script:TmpRoot ('startup_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            ('$RepoRoot = {0}' -f (& $Q $Root))
+            (($Load -join [Environment]::NewLine) -replace '\$PSScriptRoot', '$RepoRoot')
+            'Write-Output (''HAS_WRITER='' + [bool](Get-Command -Name ''Write-InventoryJson'' -CommandType Function -ErrorAction SilentlyContinue))'
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        $LASTEXITCODE | Should -Be 0 -Because ($Output -join [Environment]::NewLine)
+        $Output | Should -Contain 'HAS_WRITER=True'
+    }
+
+    It 'stops with exit 1 and names the file when InventoryJson.Functions.ps1 is missing (<Case>)' -ForEach @(
+        @{ Case = 'default settings'; Prelude = '' }
+        # A caller's strict mode and Stop preference reach the script's start-up lines.
+        @{ Case = 'strict mode Latest and errors set to Stop'; Prelude = 'Set-StrictMode -Version Latest; $ErrorActionPreference = ''Stop''' }
+    ) {
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$null, [ref]$null)
+        $Load = @()
+        $FoundEnd = $false
+        foreach ($Statement in $Ast.EndBlock.Statements)
+        {
+            # The debug-mode setup ends the functions-file loads: an 'if ($Debug.IsPresent)' check, or a '$DebugMode = ...' line.
+            if ($Statement.Extent.Text -match '^\s*(\$DebugMode\s*=|if\s*\(\s*\$Debug(Mode\b|\.IsPresent))') { $FoundEnd = $true; break }
+            $Load += $Statement.Extent.Text
+        }
+        # Without the end marker $Load would hold the whole script, and the child would run past the loads.
+        $FoundEnd | Should -BeTrue -Because 'the start-up loads must end at the debug-mode setup'
+        # A copy of the Functions folder without the writer's file.
+        $Root = Join-Path $script:TmpRoot ('nowriter_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        $null = New-Item -ItemType Directory -Path (Join-Path $Root 'Functions')
+        Get-ChildItem -LiteralPath (Join-Path $script:RepoRoot 'Functions') -File | Where-Object { $_.Name -ne 'InventoryJson.Functions.ps1' } | ForEach-Object { [System.IO.File]::Copy($_.FullName, (Join-Path (Join-Path $Root 'Functions') $_.Name)) }
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('startup_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            $Prelude
+            ('$RepoRoot = {0}' -f (& $Q $Root))
+            (($Load -join [Environment]::NewLine) -replace '\$PSScriptRoot', '$RepoRoot')
+            'Write-Output ''REACHED_END'''
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+
+        $LASTEXITCODE | Should -Be 1 -Because ($Output -join [Environment]::NewLine)
+        $Output | Should -Not -Contain 'REACHED_END'
+        ($Output -join "`n") | Should -Match ('ERROR: Required functions file not found: .*' + [regex]::Escape('InventoryJson.Functions.ps1'))
+        ($Output -join "`n") | Should -Match "Ensure the 'Functions' folder ships alongside this script\."
+    }
+
+    It 'checks for InventoryJson.Functions.ps1 through Write-Log, with no Write-Host of its own' {
+        # Common.Functions.ps1 (Write-Log) is loaded before this check, so it adds no
+        # PSAvoidUsingWriteHost finding to the script.
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$null, [ref]$null)
+        $Check = @($Ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.IfStatementAst] -and $_.Clauses[0].Item1.Extent.Text -match '\$InventoryJsonFunctionsFile' })
+        $Check.Count | Should -Be 1
+        $Commands = @($Check[0].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        $Commands | Should -Not -Contain 'Write-Host'
+        $Commands | Should -Contain 'Write-Log'
+    }
+
+    It 'lets Write-Log run before setup under strict mode Latest and errors set to Stop (<Severity>, debug log <ToDebugLog>)' -ForEach @(
+        @{ Severity = 'Error'; ToDebugLog = $false }
+        @{ Severity = 'Info'; ToDebugLog = $true }
+    ) {
+        # Before setup neither $Global:ErrorLogFile nor $Global:DebugLogFile exists.
+        $Q = { param($s) "'" + $s.Replace("'", "''") + "'" }
+        $ChildFile = Join-Path $script:TmpRoot ('writelog_' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.ps1')
+        Set-Content -LiteralPath $ChildFile -Encoding utf8 -Value @(
+            'Set-StrictMode -Version Latest; $ErrorActionPreference = ''Stop'''
+            ('. {0}' -f (& $Q $script:CommonFunctions))
+            ('Write-Log -Message ''early line'' -Severity {0}{1}' -f $Severity, $(if ($ToDebugLog) { ' -ToDebugLog' } else { '' }))
+            'Write-Output ''AFTER_LOG'''
+        )
+        $Pwsh = (Get-Process -Id $PID).Path
+        $Output = @(& $Pwsh -NoProfile -NonInteractive -File $ChildFile 2>&1 | ForEach-Object { [string]$_ })
+        $LASTEXITCODE | Should -Be 0 -Because ($Output -join [Environment]::NewLine)
+        $Output | Should -Contain 'early line'
+        $Output | Should -Contain 'AFTER_LOG'
+    }
+}
+
+Describe 'ResourceInventory.ps1 inventory folder' {
+
+    It 'takes the folder the run names its temporary inventory file in from $DefaultPath, keeping a root (<Case>)' -ForEach @(
+        @{ Case = 'a file-system root'; Root = $true }
+        @{ Case = 'a folder below the root'; Root = $false }
+    ) {
+        # The run's own Write-Log lines name the write's temporary file in this folder, and the
+        # writer puts it beside the inventory, in the folder of $DefaultPath + the inventory's name.
+        $Ast = [System.Management.Automation.Language.Parser]::ParseFile($script:InventoryScript, [ref]$null, [ref]$null)
+        $Assign = @($Ast.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $Node.Left.Extent.Text -eq '$InventoryFolder' }, $true))
+        $Assign.Count | Should -Be 1
+        # As ResourceInventory.ps1 builds it: the resolved folder plus one separator.
+        $Folder = if ($Root) { [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()) } else { [System.IO.Path]::GetTempPath() }
+        $DefaultPath = (Resolve-Path -LiteralPath $Folder).Path + [System.IO.Path]::DirectorySeparatorChar
+        $Expected = [System.IO.Path]::GetDirectoryName($DefaultPath + 'Inventory_ResourcesReport_test.json')
+        $InventoryFolder = & ([scriptblock]::Create($Assign[0].Right.Extent.Text))
+        $InventoryFolder | Should -Be $Expected
+        (Join-Path $InventoryFolder 'rda-write-x.tmp') | Should -Be ([System.IO.Path]::Combine($Expected, 'rda-write-x.tmp'))
+        { $null = [System.IO.Directory]::EnumerateFiles($InventoryFolder, '*.tmp') } | Should -Not -Throw
+    }
 }
 
 Describe 'ProcessResourceResult' {
@@ -636,6 +1058,7 @@ Describe 'ProcessResourceResult' {
     BeforeAll {
         . $script:CommonFunctions
         . $script:InventoryFunctions
+        . $script:InventoryJsonFunctions
         . ([scriptblock]::Create($script:ProcessResourceResultText))
         $Global:ErrorLogFile = $null
         $Global:Version = '1.2.3'
@@ -712,6 +1135,95 @@ function CreateResourceJobs
         $Output | Should -Not -Match 'Reporting Data File' -Because "no zip was written, so none may be reported. Output:`n$Output"
         $Output | Should -Match 'No report was written' -Because 'the run says plainly that there is no zip'
         @($R[0].Files | Where-Object { $_ -like 'Inventory_*' -or $_ -like '*.tmp' -or $_ -like '*.zip' }) | Should -BeNullOrEmpty -Because 'a failed write leaves no inventory, no cut-off or temporary file and no zip'
+    }
+
+    It 'names a leftover temporary inventory file itself in the debug log, once, whatever the stream settings (<Case>)' -ForEach @(
+        @{ Case = 'good write'; Writer = ''; Form = 'rda-write-{0}.tmp' }
+        # Information action Stop from right before the write (the collector stand-in sets it last).
+        @{ Case = 'information action Stop'; Writer = ''; Form = 'rda-write-{0}.tmp'; Settings = 'function CreateResourceJobs { $Global:SmaResources = New-Object PSObject; $Global:SmaResources | Add-Member -MemberType NoteProperty -Name ''Disks'' -Value @($Global:Resources | Where-Object { $_.type -eq ''microsoft.compute/disks'' } | ForEach-Object { [ordered]@{ Name = $_.name } }); $Global:PSDefaultParameterValues[''*:InformationAction''] = ''Stop'' }' }
+        @{ Case = 'failed write'; Writer = 'function Write-InventoryJson { param($InputObject, $Path) throw ''stand-in: out of memory while writing'' }'; Form = 'rda-write-{0}.tmp' }
+        @{ Case = 'older build name'; Writer = ''; Form = 'Inventory_ResourcesReport_old.json.{0}.tmp' }
+        @{ Case = 'older build name with a line break'; Writer = ''; Form = "Inventory_Resources`nReport_old.json.{0}.tmp" }
+    ) {
+        if ($IsWindows -and $Form.Contains("`n")) { Set-ItResult -Skipped -Because 'Windows file names cannot hold a line break'; return }
+        # Each case silences every stream, or sets the Stop information action right before the write,
+        # so only the run's own Write-Log lines can name the file.
+        $Name = 'leftover-named-{0}' -f ($Case -replace ' ', '-')
+        $Left = $Form -f [guid]::NewGuid().ToString('N')
+        $Stub = @(
+            $(if ($Settings) { $Settings } else { '$WarningPreference = ''Ignore''; $InformationPreference = ''Ignore''; $PSDefaultParameterValues[''*:WarningAction''] = ''Ignore''; $PSDefaultParameterValues[''*:InformationAction''] = ''Ignore''' })
+            ('[System.IO.File]::WriteAllText(($Global:DefaultPath + ''{0}''), ''keep'')' -f $Left)
+            $Writer
+        ) -join [Environment]::NewLine
+        $R = @(Invoke-InventoryRun -Name $Name -Runs @($Stub) -Direct)
+
+        # The debug log is the record: the console line may be silenced or stopped.
+        $DebugLog = Join-Path (Join-Path (Join-Path $script:TmpRoot $Name) 'run0') 'DebugLog_ResourcesReport_test.log'
+        @([regex]::Matches((Get-Content -LiteralPath $DebugLog -Raw), [regex]::Escape($Left) + "' is a temporary file")).Count | Should -Be 1 -Because "Output:`n$([string]$R[0].Output)"
+        $R[0].Files | Should -Contain $Left -Because 'it may be another run''s, so it is never removed'
+    }
+
+    It 'names a leftover temporary inventory file when the output folder is on a PowerShell drive' {
+        # .NET would read the drive name as a folder name, so the run uses the provider path.
+        $Left = 'rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+        $Stub = @(
+            ('[System.IO.File]::WriteAllText(($Global:DefaultPath + ''{0}''), ''keep'')' -f $Left)
+            '$null = New-PSDrive -Name RdaWriteDrive -PSProvider FileSystem -Root $Global:DefaultPath -Scope Global'
+            '$Global:DefaultPath = ''RdaWriteDrive:'' + [System.IO.Path]::DirectorySeparatorChar'
+        ) -join [Environment]::NewLine
+        $R = @(Invoke-InventoryRun -Name 'leftover-psdrive' -Runs @($Stub) -Direct)
+        $DebugLog = Join-Path (Join-Path (Join-Path $script:TmpRoot 'leftover-psdrive') 'run0') 'DebugLog_ResourcesReport_test.log'
+        (Get-Content -LiteralPath $DebugLog -Raw) | Should -Match ([regex]::Escape($Left) + "' is a temporary file") -Because "Output:`n$([string]$R[0].Output)"
+        @($R[0].Files) | Should -Contain 'Inventory_ResourcesReport_test.json' -Because 'the write itself works on the drive'
+    }
+
+    It 'names this write''s temporary file again after a failed write when it is still there or the folder cannot be read (<Case>)' -ForEach @(
+        @{ Case = 'still there'; Lock = $false }
+        @{ Case = 'folder unreadable'; Lock = $true }
+        @{ Case = 'still there, information action Stop'; Lock = $false; Settings = 'function CreateResourceJobs { $Global:SmaResources = New-Object PSObject; $Global:SmaResources | Add-Member -MemberType NoteProperty -Name ''Disks'' -Value @($Global:Resources | Where-Object { $_.type -eq ''microsoft.compute/disks'' } | ForEach-Object { [ordered]@{ Name = $_.name } }); $Global:PSDefaultParameterValues[''*:InformationAction''] = ''Stop'' }' }
+    ) {
+        if ($Lock -and ($IsWindows -or ((& id -u) -eq '0'))) { Set-ItResult -Skipped -Because 'folder modes do not deny access here'; return }
+        $Name = 'temp-left-{0}' -f ($Case -replace '[ ,]+', '-')
+        $Body = if ($Lock) { '[System.IO.File]::SetUnixFileMode((Split-Path -Parent $Path), [System.IO.UnixFileMode]''UserWrite, UserExecute'')' } else { '[System.IO.File]::WriteAllText((Join-Path (Split-Path -Parent $Path) $TempName), ''part'')' }
+        $Stub = @(
+            $(if ($Settings) { $Settings } else { '$WarningPreference = ''Ignore''; $InformationPreference = ''Ignore''; $PSDefaultParameterValues[''*:WarningAction''] = ''Ignore''; $PSDefaultParameterValues[''*:InformationAction''] = ''Ignore''' })
+            ('function Write-InventoryJson {{ param($InputObject, $Path, $TempName) {0}; throw ''stand-in: out of memory while writing'' }}' -f $Body)
+        ) -join [Environment]::NewLine
+        try { $R = @(Invoke-InventoryRun -Name $Name -Runs @($Stub) -Direct) }
+        finally { if ($Lock) { [System.IO.File]::SetUnixFileMode((Join-Path (Join-Path $script:TmpRoot $Name) 'run0'), [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute') } }
+        $DebugLog = Join-Path (Join-Path (Join-Path $script:TmpRoot $Name) 'run0') 'DebugLog_ResourcesReport_test.log'
+        (Get-Content -LiteralPath $DebugLog -Raw) | Should -Match 'The temporary file \S*rda-write-[0-9a-f]{32}\.tmp may still be there; delete it by hand' -Because "Output:`n$([string]$R[0].Output)"
+    }
+
+    It 'logs a warning of the write that is not its own, such as a value cut for being nested too deep' {
+        # ConvertTo-Json warns and cuts a value nested deeper than its depth: data is lost, so the
+        # run must still say so (it drops only the writer's own 'Write-InventoryJson:' warnings).
+        $Stub = @'
+function CreateResourceJobs
+{
+    $Deep = @{ Leaf = 'end' }
+    for ($i = 0; $i -lt 105; $i++) { $Deep = @{ Child = $Deep } }
+    $Global:SmaResources = New-Object PSObject
+    $Global:SmaResources | Add-Member -MemberType NoteProperty -Name 'Disks' -Value @([pscustomobject]@{ Name = 'disk-01'; Deep = $Deep })
+}
+'@
+        $R = @(Invoke-InventoryRun -Name 'write-deep-warning' -Runs @($Stub) -Direct)
+        $DebugLog = Join-Path (Join-Path (Join-Path $script:TmpRoot 'write-deep-warning') 'run0') 'DebugLog_ResourcesReport_test.log'
+        (Get-Content -LiteralPath $DebugLog -Raw) | Should -Match 'truncated' -Because "Output:`n$([string]$R[0].Output)"
+        $R[0].Files | Should -Contain 'Inventory_ResourcesReport_test.json'
+    }
+
+    It 'names the exact temporary file in the debug log before the write starts, whatever the stream settings' {
+        # A run stopped during the write cannot log afterwards, so the line comes first. The real
+        # writer runs here and fails part-way on a collector ConvertTo-Json rejects.
+        $Stub = '$WarningPreference = ''Ignore''; $InformationPreference = ''Ignore''; $PSDefaultParameterValues[''*:WarningAction''] = ''Ignore''; $PSDefaultParameterValues[''*:InformationAction''] = ''Ignore''' + [Environment]::NewLine + $script:WriteFailures['collector ConvertTo-Json rejects'].Stub
+        $R = @(Invoke-InventoryRun -Name 'write-temp-named' -Runs @($Stub) -Direct)
+        $DebugLog = Join-Path (Join-Path (Join-Path $script:TmpRoot 'write-temp-named') 'run0') 'DebugLog_ResourcesReport_test.log'
+        $Text = Get-Content -LiteralPath $DebugLog -Raw
+        $Match = [regex]::Match($Text, 'Writing the inventory through the temporary file (?<Path>\S*rda-write-[0-9a-f]{32}\.tmp);')
+        $Match.Success | Should -BeTrue -Because "the debug log names the exact file. Output:`n$([string]$R[0].Output)"
+        Split-Path -Parent $Match.Groups['Path'].Value | Should -Be (Join-Path $script:TmpRoot 'write-temp-named/run0')
+        $Match.Index | Should -BeLessThan $Text.IndexOf('Inventory write FAILED') -Because 'it is logged before the write'
     }
 
     It 'stops a wrapper run with the real cause, not with the missing-file error of the report step' {
@@ -1180,7 +1692,8 @@ $Rounds = foreach ($Round in 1..3)
                     param($Node)
                     $Node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $Node.Name -eq 'ProcessResourceResult'
                 }, $true) | Select-Object -First 1
-            $Catch = @($Fn.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.TryStatementAst] }, $true))[0].CatchClauses[0].Body.Extent.Text
+            # The try around the write (the first try whose body calls Write-InventoryJson).
+            $Catch = @($Fn.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.TryStatementAst] -and $Node.Body.Extent.Text -match 'Write-InventoryJson' }, $true))[0].CatchClauses[0].Body.Extent.Text
 
             $script:ReadPattern.Match($Catch).Success | Should -BeTrue
             $Catch | Should -Match 'ClientFactory\.RemoveHandler\(\[Microsoft\.Azure\.Commands\.Common\.Authentication\.Models\.RPRegistrationDelegatingHandler\]\)'

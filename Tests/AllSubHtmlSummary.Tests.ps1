@@ -268,6 +268,23 @@ Describe 'New-RdaAllSubHtmlSummaryFromZip (rebuild from consolidated zip)' {
         Test-Path -Path ($OutDir + '.zip') | Should -BeTrue -Because '-PackageZip zips the reconstructed folder'
     }
 
+    It 'rebuilt summary: every Folder link resolves after the -PackageZip bundle is unzipped to a fresh folder' {
+        $Run = New-Run
+        $Outer = New-ConsolidatedZip -Root $Run
+        $OutDir = Join-Path $Run 'rebuilt_folder'
+        New-RdaAllSubHtmlSummaryFromZip -InputZip $Outer -OutputDirectory $OutDir -PackageZip | Out-Null
+
+        $Fresh = Join-Path $Run ('fresh_' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+        Expand-Archive -LiteralPath ($OutDir + '.zip') -DestinationPath $Fresh
+        $Html = Get-Content -LiteralPath (Join-Path $Fresh 'MainSummary.html') -Raw
+        $Links = @([regex]::Matches($Html, '<a class="folder" href="([^"]+)">') | ForEach-Object { $_.Groups[1].Value })
+        $Links.Count | Should -Be 2
+        foreach ($L in $Links)
+        {
+            Test-Path -LiteralPath (Join-Path $Fresh ([uri]::UnescapeDataString($L))) -PathType Container | Should -BeTrue -Because "Folder link '$L' must resolve after unzip"
+        }
+    }
+
     It 'throws on an archive that holds no per-subscription reports' {
         $Run = New-Run
         $Junk = Join-Path $Run 'junk.zip'
@@ -407,5 +424,176 @@ Describe 'New-RdaAllSubHtmlSummary obfuscation redaction (shareable-bundle leak 
 
         $Html | Should -Match 'Tenant:' -Because 'an identifiable bundle shows the tenant'
         $Html | Should -Match 'Fabrikam-Billing' -Because 'an identifiable bundle names the affected subs'
+    }
+}
+
+Describe 'MainSummary Folder link (each row links to its report folder)' {
+
+    It 'gives every row a relative Folder link that resolves to its report folder' {
+        $Run = New-Run
+        $A = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Sub A'
+        $B = New-SubFolder -Root $Run -Services @{ AppServices = 1 } -SubName 'Sub B' -NoHtml
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match '<th>Folder</th>'
+        $Links = @([regex]::Matches($Html, '<a class="folder" href="([^"]+)">') | ForEach-Object { $_.Groups[1].Value })
+        $Links.Count | Should -Be 2 -Because 'one Folder link per row, also for a row with no per-sub html'
+        ($Links | Sort-Object) | Should -Be (@(((Split-Path $A -Leaf) + '/'), ((Split-Path $B -Leaf) + '/')) | Sort-Object)
+        foreach ($L in $Links)
+        {
+            $L | Should -Not -Match '^(/|[A-Za-z]:|\\\\)' -Because 'the link is relative, never an absolute local path'
+            Test-Path -LiteralPath (Join-Path $Run ([uri]::UnescapeDataString($L))) -PathType Container | Should -BeTrue
+        }
+        $Html | Should -Not -Match ([regex]::Escape($Run)) -Because 'no local path leaks into the page'
+    }
+
+    It 'URL-encodes the folder name in the Folder link and in the Report link' {
+        $Run = New-Run
+        $Dir = New-SubFolder -Root $Run -Services @{ VirtualMachines = 1 } -SubName 'Sub A'
+        $HtmlName = (Get-ChildItem -LiteralPath $Dir -Filter '*.html').Name
+        $Odd = Join-Path $Run 'ResourcesReport a#b&c%d'
+        Move-Item -LiteralPath $Dir -Destination $Odd
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+
+        $Html | Should -Match ([regex]::Escape('<a class="folder" href="ResourcesReport%20a%23b%26c%25d/">'))
+        $Html | Should -Match ([regex]::Escape(('<a href="ResourcesReport%20a%23b%26c%25d/{0}">' -f $HtmlName))) -Because 'the Report link is encoded and joined with / too, on every OS'
+        foreach ($Href in @([regex]::Matches($Html, '<a (?:class="folder" )?href="([^"]+)">') | ForEach-Object { $_.Groups[1].Value }))
+        {
+            Test-Path -LiteralPath (Join-Path $Run ([uri]::UnescapeDataString($Href))) | Should -BeTrue -Because "link '$Href' must resolve"
+        }
+    }
+
+    It 'still writes a summary a caller puts elsewhere to move it beside the folders later' {
+        $Run = New-Run
+        New-SubFolder -Root $Run -Services @{ VirtualMachines = 1 } -SubName 'Sub A' | Out-Null
+        $Elsewhere = Join-Path $script:TmpRoot ('work_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $Elsewhere -Force | Out-Null
+        $Out = Join-Path $Elsewhere 'MainSummary.html'
+
+        { New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out } | Should -Not -Throw
+        Move-Item -LiteralPath $Out -Destination (Join-Path $Run 'MainSummary.html')
+        $Html = Get-Content -LiteralPath (Join-Path $Run 'MainSummary.html') -Raw
+        foreach ($Href in @([regex]::Matches($Html, '<a (?:class="folder" )?href="([^"]+)">') | ForEach-Object { $_.Groups[1].Value }))
+        {
+            Test-Path -LiteralPath (Join-Path $Run ([uri]::UnescapeDataString($Href))) | Should -BeTrue -Because "link '$Href' resolves once the page sits in the run folder"
+        }
+    }
+
+    It 'under -Obfuscated the Folder link holds only the report stamp, no real name' {
+        $Run = New-Run
+        $A = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -Obfuscated
+        $Out = Join-Path $Run 'main.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out -Obfuscated -FailedSubscriptions @('Contoso-Prod-Sub') | Out-Null
+        $Html = Get-Content -Path $Out -Raw
+        $Links = @([regex]::Matches($Html, '<a class="folder" href="([^"]+)">') | ForEach-Object { $_.Groups[1].Value })
+        $Links | Should -Be @((Split-Path $A -Leaf) + '/')
+        $Links[0] | Should -Match '^ResourcesReport_?[0-9a-f]+/$'
+        $Html | Should -Not -Match 'Contoso-Prod-Sub'
+    }
+
+    It 'gives the unreadable-inventory row a Folder link too' {
+        $Run = New-Run
+        $Bad = New-SubFolder -Root $Run -BadInventory
+        $Out = Join-Path $Run 'main.html'
+
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        (Get-Content -Path $Out -Raw) | Should -Match ([regex]::Escape(('<a class="folder" href="{0}/">' -f (Split-Path $Bad -Leaf))))
+    }
+
+    It 'keeps the empty-table row spanning every column' {
+        $Run = New-Run
+        $Out = Join-Path $Run 'main.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Out | Out-Null
+        (Get-Content -Path $Out -Raw) | Should -Match '<td colspan="5" class="muted">No per-subscription reports'
+    }
+
+}
+
+Describe 'ConvertTo-RdaBundleLink and Copy-RdaBundleSummary (consolidated zip copy of MainSummary)' {
+
+    It 'keeps a Folder link whose folder is in the bundle and mutes one whose folder is not' {
+        $Root = New-Run
+        New-Item -ItemType Directory -Path (Join-Path $Root 'HTML_1') -Force | Out-Null
+        $In = '<td><a class="folder" href="HTML_1/">folder &#8599;</a></td><td><a class="folder" href="HTML_2/">folder &#8599;</a></td>'
+
+        $OutHtml = ConvertTo-RdaBundleLink -Html $In -BundleRoot $Root
+
+        $OutHtml | Should -Be '<td><a class="folder" href="HTML_1/">folder &#8599;</a></td><td><span class="muted">no folder</span></td>'
+    }
+
+    It 'mutes a Folder link that would leave the bundle root' {
+        $Root = New-Run
+        New-Item -ItemType Directory -Path (Join-Path $Root 'HTML_1') -Force | Out-Null
+        $In = '<a class="folder" href="../">folder &#8599;</a><a class="folder" href="HTML_1/../HTML_1/">folder &#8599;</a><a class="folder" href="%2E%2E/">folder &#8599;</a>'
+
+        (ConvertTo-RdaBundleLink -Html $In -BundleRoot $Root) | Should -Be ('<span class="muted">no folder</span>' * 3)
+    }
+
+    It 'decodes an encoded folder name before it looks for the folder' {
+        $Root = New-Run
+        New-Item -ItemType Directory -Path (Join-Path $Root 'HTML a#b') -Force | Out-Null
+        $In = '<a class="folder" href="HTML%20a%23b/">folder &#8599;</a>'
+        (ConvertTo-RdaBundleLink -Html $In -BundleRoot $Root) | Should -Be $In
+    }
+
+    It 'keeps a Report link whose html is in the bundle and mutes one that is not, or that leaves its folder' {
+        $Root = New-Run
+        New-Item -ItemType Directory -Path (Join-Path $Root 'HTML_1') -Force | Out-Null
+        'x' | Set-Content -LiteralPath (Join-Path $Root 'HTML_1/r a.html')
+        $Keep = '<a href="HTML_1/r%20a.html">open &#8599;</a>'
+        $Gone = @('<a href="HTML_2/r.html">open &#8599;</a>', '<a href="HTML_1/missing.html">open &#8599;</a>', '<a href="HTML_1/../HTML_1/r%20a.html">open &#8599;</a>', '<a href="HTML_1%2Fr%20a.html">open &#8599;</a>', '<a href="HTML_1">open &#8599;</a>')
+        (ConvertTo-RdaBundleLink -Html ($Keep + ($Gone -join '')) -BundleRoot $Root) | Should -Be ($Keep + ('<span class="muted">no report</span>' * $Gone.Count))
+    }
+
+    It 'Copy-RdaBundleSummary: after the bundle is unzipped to a fresh folder every link resolves, and a row with no staged folder is muted' {
+        $Run = New-Run
+        $A = New-SubFolder -Root $Run -Services @{ VirtualMachines = 2 } -SubName 'Sub A'
+        $B = New-SubFolder -Root $Run -Services @{ AppServices = 1 } -SubName 'Sub B' -NoHtml
+        New-SubFolder -Root $Run -Services @{ AppServices = 1 } -SubName 'Sub C' | Out-Null   # left out of the bundle
+        $Summary = Join-Path $Run 'MainSummary_x.html'
+        New-RdaAllSubHtmlSummary -RunOutputDirectory $Run -HtmlFile $Summary | Out-Null
+        $Stage = Join-Path $script:TmpRoot ('stage_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+
+        Copy-RdaBundleSummary -MainSummaryFile $Summary -BundleStage $Stage -ReportFolders @((Get-Item -LiteralPath $A), (Get-Item -LiteralPath $B))
+
+        $Zip = $Stage + '.zip'
+        Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Zip -Force
+        $Fresh = $Stage + '_fresh'
+        Expand-Archive -LiteralPath $Zip -DestinationPath $Fresh
+        $Html = Get-Content -LiteralPath (Join-Path $Fresh 'MainSummary.html') -Raw
+        $AHtml = 'HTML' + (Split-Path $A -Leaf).Substring('ResourcesReport'.Length)
+        $Html | Should -Match ([regex]::Escape(('<a class="folder" href="{0}/">' -f $AHtml)))
+        $Html | Should -Not -Match ('href="ResourcesReport') -Because 'every href points at a staged HTML folder'
+        ([regex]::Matches($Html, '<span class="muted">no folder</span>')).Count | Should -Be 2 -Because 'the row with no html and the row left out have no staged folder'
+        ([regex]::Matches($Html, '<span class="muted">no report</span>')).Count | Should -Be 2 -Because 'the row with no html, and the row left out of the bundle'
+        ([regex]::Matches($Html, '>open &#8599;</a>')).Count | Should -Be 1
+        foreach ($Href in @([regex]::Matches($Html, '<a (?:class="folder" )?href="([^"]+)">') | ForEach-Object { $_.Groups[1].Value }))
+        {
+            Test-Path -LiteralPath (Join-Path $Fresh ([uri]::UnescapeDataString($Href))) | Should -BeTrue -Because "link '$Href' must resolve after unzip"
+        }
+    }
+
+    It 'Copy-RdaBundleSummary stages the html even when there is no summary file' {
+        $Run = New-Run
+        $A = New-SubFolder -Root $Run -Services @{ VirtualMachines = 1 } -SubName 'Sub A'
+        $Stage = Join-Path $script:TmpRoot ('stage_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+        Copy-RdaBundleSummary -MainSummaryFile $null -BundleStage $Stage -ReportFolders @(Get-Item -LiteralPath $A)
+        @(Get-ChildItem -LiteralPath $Stage -Recurse -File).Count | Should -Be 1
+        Test-Path -LiteralPath (Join-Path $Stage 'MainSummary.html') | Should -BeFalse
+    }
+
+    It 'is what the wrapper calls for the bundle copy of the summary' {
+        $Wrapper = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'Run-AllSubscriptions.ps1') -Raw
+        $Wrapper | Should -Match 'Copy-RdaBundleSummary -MainSummaryFile \$MainSummaryFile -BundleStage \$BundleStage'
+        $Wrapper | Should -Match '\$BundleReportFolders = @\(Get-ChildItem -LiteralPath \$InventoryRoot ' -Because 'a [ or ] in the folder path is not a wildcard'
+        $Wrapper | Should -Not -Match "-replace 'href=""ResourcesReport'" -Because 'the href rewrite lives in Copy-RdaBundleSummary only'
     }
 }

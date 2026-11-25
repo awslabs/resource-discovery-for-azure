@@ -248,13 +248,17 @@ Banners: failed subs (red), empty subs (amber), phase-health notes (amber)
 Totals:  [ total resources ] [ subscriptions processed ] [ empty ] [ failed ]
 Charts:  (Detailed only) run-wide donut (by service) + top-N bar (by service)
 Table:   one row per subscription:
-         | Subscription | Resources | Health | Report |
-         |  <name>      |   1,234   |  ok    | open ↗ |   (link = per-sub HTML)
+         | Subscription | Resources | Health | Report | Folder   |
+         |  <name>      |   1,234   |  ok    | open ↗ | folder ↗ |
+         (Report = per-sub HTML; Folder = the sub's report folder)
 Footer:  RDA version, generator note
 ```
 
 The per-sub links use relative paths so the main page travels with the report
-folder (matching the self-contained/portable contract).
+folder (matching the self-contained/portable contract). The Folder link is the
+URL-encoded folder name plus `/`, never an absolute path. In the consolidated
+zip it points at the `HTML<stamp>/` folder. In the zip, a link whose folder
+or html is not there shows muted "no folder" or "no report" text instead.
 
 ## 11. Edge cases & failure handling
 

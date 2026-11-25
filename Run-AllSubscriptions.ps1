@@ -2074,37 +2074,29 @@ if ($null -ne $OuterZipFile -and (Test-Path -LiteralPath $OuterZipFile))
 
         # 2. Unified MainSummary.html at the bundle root (renamed from the
         #    timestamped file; its links are relative to sibling folders, so
-        #    renaming the summary itself does not break them). The drill-down
-        #    link folders are then renamed from ResourcesReport<stamp>/ to
-        #    HTML<stamp>/ (see step 3) - these bundle folders carry ONLY the
-        #    report HTML, so the HTML prefix distinguishes them at a glance
-        #    from the sibling ResourcesReport_<stamp>.zip data archives (which
-        #    hold the Inventory/Metrics/Consumption members). Rewrite the
-        #    summary's hrefs to match: only the leading folder token changes
-        #    (href="ResourcesReport... -> href="HTML...); the /<file>.html tail
-        #    is untouched because it is not preceded by href=".
-        $StagedMainSummary = Join-Path $BundleStage 'MainSummary.html'
-        if ($null -ne $MainSummaryFile -and (Test-Path -LiteralPath $MainSummaryFile))
-        {
-            Copy-Item -LiteralPath $MainSummaryFile -Destination $StagedMainSummary -Force
-            (Get-Content -LiteralPath $StagedMainSummary -Raw) -replace 'href="ResourcesReport', 'href="HTML' | Set-Content -LiteralPath $StagedMainSummary -Encoding utf8
-        }
-
+        #    renaming the summary itself does not break them).
         # 3. A copy of each per-subscription HTML at HTML<stamp>/ (the folder
         #    name is the source ResourcesReport<stamp> with the leading
-        #    'ResourcesReport' replaced by 'HTML'), matching the rewritten
-        #    summary links. HTML only - no *.json/csv - so nothing is
-        #    double-ingested and the folder name signals "report HTML, not
-        #    data". Scoped to THIS run by timestamp; a de-obfuscated
-        #    *_revealed* report is never copied across.
-        foreach ($SubDir in @(Get-ChildItem -Path $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime }))
+        #    'ResourcesReport' replaced by 'HTML'). These bundle folders carry
+        #    ONLY the report HTML, so the HTML prefix tells them apart from the
+        #    sibling ResourcesReport_<stamp>.zip data archives, and nothing is
+        #    copied twice. The summary's hrefs are rewritten to match
+        #    (href="ResourcesReport... -> href="HTML...), which also points each
+        #    row's Folder link at its HTML<stamp>/ folder; a link whose folder
+        #    or html was not staged becomes muted text. Scoped to THIS run by
+        #    timestamp; a de-obfuscated *_revealed* report is never copied.
+        #    Copy-RdaBundleSummary comes from the summary library the main
+        #    summary step dot-sourced; when that step could not load it there is
+        #    no summary to link from, so the zip gets RunSummary.log only and no
+        #    HTML<stamp>/ copies (each report's html stays in its inner zip).
+        if (Get-Command -Name Copy-RdaBundleSummary -CommandType Function -ErrorAction SilentlyContinue)
         {
-            $SubHtml = Get-ChildItem -Path $SubDir.FullName -Filter '*.html' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_revealed*' } | Select-Object -First 1
-            if ($null -eq $SubHtml) { continue }
-            $HtmlFolderName = ($SubDir.Name -replace '^ResourcesReport', 'HTML')
-            $DestDir = Join-Path $BundleStage $HtmlFolderName
-            New-Item -ItemType Directory -Path $DestDir -Force | Out-Null
-            Copy-Item -LiteralPath $SubHtml.FullName -Destination (Join-Path $DestDir $SubHtml.Name) -Force
+            $BundleReportFolders = @(Get-ChildItem -LiteralPath $InventoryRoot -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $RunStartTime })
+            Copy-RdaBundleSummary -MainSummaryFile $MainSummaryFile -BundleStage $BundleStage -ReportFolders $BundleReportFolders
+        }
+        else
+        {
+            Write-Host 'WARNING: The summary library was not loaded, so the consolidated zip gets no MainSummary.html or report HTML copies.' -ForegroundColor Yellow
         }
 
         # Fold the staged extras into the existing outer zip (additive; the

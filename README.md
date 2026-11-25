@@ -619,11 +619,18 @@ A direct run of `ResourceInventory.ps1` (without `-RunAllSubs`) exits `1` and wr
 
 Codes `3`–`5` still mean the report was produced — they flag that it is **incomplete** in a specific, diagnosable way, rather than silently looking like a clean/empty result.
 
-### Exit Codes 1 and 2 (ResourceInventory.ps1, direct run)
+### Exit Codes (ResourceInventory.ps1, direct run)
 
-A direct `ResourceInventory.ps1` run (without `-RunAllSubs`) that ends without writing its report zip exits `2`, and its last console line says `No report was written`. This happens, for example, when 5 collectors failed in a row and collection stopped, or when the HTML report or the zip could not be written; the errors printed before that line give the cause. Under `-RunAllSubs` the script's exit code is unchanged and the wrapper's codes above apply.
+A direct `ResourceInventory.ps1` run (without `-RunAllSubs`) also sets an exit code:
 
-A run that stops during setup, before it collects anything, exits `1`, and the red error line printed before it gives the cause: for example the output folder cannot be written, the Azure CLI is not installed, a service principal sign-in has no `-Secret`, or `-ResourceGroup` is given without `-SubscriptionID`. Under `-RunAllSubs` the wrapper counts that subscription as failed.
+| Code | Meaning |
+|---|---|
+| `0` | Completed: the report and zip were written and no collector failed. |
+| `1` | The run stopped during setup or a pre-flight check, before it collected anything; the red error line printed before it gives the cause. For example the output folder cannot be written, the Azure CLI is not installed, a service principal sign-in has no `-Secret`, `-ResourceGroup` is given without `-SubscriptionID`, `-Service` matched no collector, or the `-ObfuscationDictionary` file is missing or not valid JSON. |
+| `2` | The run ended without writing its report zip, and its last console line says `No report was written`. This happens, for example, when 5 collectors failed in a row and collection stopped, or when the HTML report or the zip could not be written; the errors printed before that line give the cause. |
+| `4` | Completed and the report and zip were written, but one or more `Services/*/*.ps1` collectors failed. Those resource types are missing (not empty) from the report; its "Incomplete collection" banner names them. |
+
+Under `-RunAllSubs`, which is how `Run-AllSubscriptions.ps1` calls it, the script does not exit `2` or `4`: the wrapper checks each subscription's zip itself and reports a failed collector with its own code `4` above. A run that stops during setup (`1`) is counted by the wrapper as a failed subscription.
 
 ### Important Notes
 

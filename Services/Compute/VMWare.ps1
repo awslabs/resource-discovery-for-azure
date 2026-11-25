@@ -6,7 +6,7 @@ if ($Task -eq 'Processing')
 
     if ($VMWare)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
         foreach ($1 in $VMWare)
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $1.subscriptionId }
@@ -24,7 +24,7 @@ if ($Task -eq 'Processing')
                 'ClusterSize'              = $Data.managementCluster.clusterSize;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

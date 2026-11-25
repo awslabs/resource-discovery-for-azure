@@ -43,6 +43,21 @@ function ConvertTo-HtmlSafe
     }
 }
 
+# === Obfuscation tokens =======================================================
+#
+# The pattern of one token as -Obfuscate writes it (ResourceInventory.ps1,
+# Functions/ResourceInventory.Functions.ps1, Extension/Metrics.ps1): 'prod_' or
+# 'nonprod_', then the hint word the token may carry ('databricks_', 'aks_' or
+# 'vmss_' on a resource name, 'sub_', 'rg_' or 'rg_mc_' on a segment of a
+# masked metrics id), then a GUID; or 'obfuscated_' and a GUID, the token of a
+# row with no usable id. Not anchored, so it also finds a token inside a masked
+# id. Both reports use it to tell an obfuscated inventory from a plain one, and
+# Summary.ps1 to keep a token whole when it cuts a long cell.
+function Get-RdaObfuscationTokenPattern
+{
+    return '(?:(?:prod|nonprod)_(?:databricks_|aks_|vmss_|sub_|rg_mc_|rg_)?|obfuscated_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+}
+
 # === Chart helpers ============================================================
 #
 # Hand-rolled SVG. Two chart types: donut (proportions) and horizontal bar
@@ -187,8 +202,16 @@ function New-RdaAllSubHtmlSummary
         # included.
         $SinceTime,
 
+        # Optional: report folder names (ResourcesReport<stamp>) to include even when
+        # older than -SinceTime - the folders of the reports a -Resume run carries
+        # from the earlier run that completed those subscriptions.
+        $IncludeFolders = @(),
+
         # Optional run-health collections passed through from the wrapper. Each is an
-        # array; when empty the corresponding banner is omitted.
+        # array; when empty the corresponding banner is omitted. A consumption or
+        # metrics entry whose ReportFolder names a report folder of this run also
+        # marks that folder's row "consumption incomplete" or "metrics incomplete"
+        # ("consumption and metrics incomplete" for both).
         $FailedSubscriptions = @(),
         $ConsumptionFailedSubs = @(),
         $MetricsFailedSubs = @(),
@@ -228,10 +251,11 @@ function New-RdaAllSubHtmlSummary
     $Folders = @(Get-ChildItem -LiteralPath $RunOutputDirectory -Directory -Filter 'ResourcesReport*' -ErrorAction SilentlyContinue)
     if ($null -ne $SinceTime)
     {
-        $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
+        $Included = @($IncludeFolders | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+        $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime -or $Included -contains $_.Name })
     }
 
-    $ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $ObfPattern = '^(?:' + (Get-RdaObfuscationTokenPattern) + ')$'
     $Samples = New-Object System.Collections.Generic.List[string]
     $SubReports = @()
     $ServiceAgg = [ordered]@{}
@@ -286,7 +310,7 @@ function New-RdaAllSubHtmlSummary
     $ObfuscationStatus = 'identifiable'
     if ($Samples.Count -gt 0)
     {
-        $ObfHits = ($Samples | Where-Object { $_ -match $ObfPattern }).Count
+        $ObfHits = @($Samples | Where-Object { $_ -match $ObfPattern }).Count
         if ($ObfHits -gt ($Samples.Count * 0.7)) { $ObfuscationStatus = 'obfuscated' }
     }
 
@@ -296,7 +320,8 @@ function New-RdaAllSubHtmlSummary
     $IsObfuscated = $Obfuscated.IsPresent -or ($ObfuscationStatus -eq 'obfuscated')
 
     $SubReports = @($SubReports | Sort-Object -Property Total -Descending)
-    $RunTotalResources = [int](($SubReports | Measure-Object -Property Total -Sum).Sum)
+    # A plain sum: 0 with no reports, also under strict mode.
+    $RunTotalResources = 0; foreach ($SubRow in $SubReports) { $RunTotalResources += [int]$SubRow.Total }
     $SubCount = $SubReports.Count
     $EmptyCount = @($SubReports | Where-Object { $_.Total -eq 0 }).Count
 
@@ -306,9 +331,18 @@ function New-RdaAllSubHtmlSummary
     $VersionSafe = if ([string]::IsNullOrWhiteSpace([string]$Version)) { '' } else { ConvertTo-HtmlSafe ([string]$Version) }
     $PlatSafe = if ([string]::IsNullOrWhiteSpace([string]$PlatOS)) { '' } else { ConvertTo-HtmlSafe ([string]$PlatOS) }
 
-    $PrivacyBanner = if ($ObfuscationStatus -eq 'obfuscated')
+    # Follows the redaction gate ($IsObfuscated), so an -Obfuscated run whose
+    # reports hold no records to sample still says it is obfuscated. "Safe to
+    # share" only when the caller says the run masked its output (-Obfuscated,
+    # which the wrapper passes for -Obfuscate): names that only look masked in
+    # a sample of records prove nothing about the rest.
+    $PrivacyBanner = if ($Obfuscated.IsPresent)
     {
         '<div class="privacy-banner obfuscated"><span>&#128274;</span><div><b>Obfuscated.</b> Names shown are deterministic pseudonyms (prod_/nonprod_ prefixes); no real identifiers are present. Safe to share.</div></div>'
+    }
+    elseif ($IsObfuscated)
+    {
+        '<div class="privacy-banner obfuscated"><span>&#128274;</span><div><b>Obfuscated.</b> The names in a sample of the reports are deterministic pseudonyms (prod_/nonprod_ prefixes). Only a sample was checked: review the reports before sharing them.</div></div>'
     }
     else
     {
@@ -376,13 +410,24 @@ function New-RdaAllSubHtmlSummary
         $ChartsHtml = "<div class='charts'><div class='chart-card'><h3>Resources by service (run-wide)</h3>$DonutSvg</div><div class='chart-card'><h3>Top services</h3>$BarSvg</div></div>"
     }
 
+    # Report folders whose subscription's consumption collection failed or was
+    # skipped for sign-in. The banner does not count a sign-in skip ('(auth)'
+    # entry), but its row is marked too. The folder ties an entry to its row:
+    # under -Obfuscate the row's name is a token, so a name cannot.
+    $ConsumpFolders = @(@($ConsumptionFailedSubs) | Where-Object { $_ -and $_.PSObject.Properties['ReportFolder'] } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    # An entry without a ReportFolder (an older caller) ties to no row, also
+    # under strict mode.
+    # The same for metrics skipped because the sign-in could not be refreshed.
+    $MetricsFolders = @(@($MetricsFailedSubs) | Where-Object { $_ -and $_.PSObject.Properties['ReportFolder'] } | ForEach-Object { [string]$_.ReportFolder } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
     # Per-subscription table.
     $Rows = New-Object System.Text.StringBuilder
     foreach ($Sr in $SubReports)
     {
         $NameSafe = ConvertTo-HtmlSafe $Sr.Name
         $CountText = '{0:N0}' -f $Sr.Total
-        $HealthCell = if ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
+        $Incomplete = @(if ($ConsumpFolders -contains $Sr.Folder) { 'consumption' }; if ($MetricsFolders -contains $Sr.Folder) { 'metrics' })
+        $HealthCell = if ($Incomplete.Count -gt 0) { '<span class="tag warn">{0} incomplete</span>' -f ($Incomplete -join ' and ') } elseif ($Sr.Total -eq 0) { '<span class="tag warn">0 resources</span>' } else { '<span class="tag ok">ok</span>' }
         $LinkCell = if ($Sr.Link) { ('<a href="{0}">open &#8599;</a>' -f (ConvertTo-HtmlSafe $Sr.Link)) } else { '<span class="muted">no report</span>' }
         [void]$Rows.AppendFormat('<tr><td>{0}</td><td class="num">{1}</td><td>{2}</td><td>{3}</td></tr>', $NameSafe, $CountText, $HealthCell, $LinkCell)
     }
@@ -447,9 +492,13 @@ $ChartsHtml
 </div></body></html>
 "@
 
-    $Html | Out-File -FilePath $HtmlFile -Encoding utf8
+    # By its literal path: a folder or file name may hold [ or ].
+    $Html | Out-File -LiteralPath $HtmlFile -Encoding utf8
     Write-Host ("Main summary written: {0}" -f $HtmlFile) -ForegroundColor Green
-    Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $ObfuscationStatus) -ForegroundColor DarkGray
+    # The same gate as the privacy banner, so an obfuscated run whose reports
+    # hold no records to sample does not call itself identifiable here either.
+    $PrivacyText = if ($Obfuscated.IsPresent) { 'obfuscated' } elseif ($IsObfuscated) { 'obfuscated (sample only; review before sharing)' } else { 'identifiable' }
+    Write-Host ("  {0} subscription(s), {1:N0} total resource(s), {2} empty, {3} failed. Privacy: {4}." -f $SubCount, $RunTotalResources, $EmptyCount, $FailedList.Count, $PrivacyText) -ForegroundColor DarkGray
 }
 
 # =============================================================================

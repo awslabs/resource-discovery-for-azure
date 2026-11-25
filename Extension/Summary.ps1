@@ -129,10 +129,11 @@ $TotalResources = ($ServiceSummary | Measure-Object -Property Count -Sum).Sum
 
 # Detect obfuscation so the header can carry a privacy-posture banner. Sample
 # resource Names and Subscription values across the first few populated
-# services; if most match the obfuscation signature treat the report as
-# obfuscated, else identifiable (the safe default for an unclear posture).
+# services; if most are whole obfuscation tokens (Get-RdaObfuscationTokenPattern)
+# treat the report as obfuscated, else identifiable (the safe default for an
+# unclear posture).
 $ObfuscationStatus = 'identifiable'
-$ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+$ObfPattern = '^(?:' + (Get-RdaObfuscationTokenPattern) + ')$'
 $Samples = New-Object System.Collections.Generic.List[string]
 foreach ($svc in $ServiceSummary | Select-Object -First 5)
 {
@@ -248,6 +249,32 @@ if ([string]::IsNullOrWhiteSpace([string]$Version) -and $null -ne $Inventory.Ver
 # Column selection: the union of all field names across the records, ordered
 # by frequency. This avoids the trap of letting a single record with many
 # fields blow out the column list.
+
+# The text of one table cell: at most 200 characters, then '...'. In an
+# obfuscated report a cut that would split a masked token
+# (Get-RdaObfuscationTokenPattern) ends after that token instead, so Reveal can
+# still replace it; a value whose cut reaches its end is shown whole. Other
+# reports are cut at 200 characters as before.
+function Get-ReportCellText
+{
+    param([string]$Text, [string]$ObfuscationStatus)
+    $Limit = 200
+    if ($Text.Length -le $Limit) { return $Text }
+    $Cut = $Limit
+    if ($ObfuscationStatus -eq 'obfuscated')
+    {
+        foreach ($Token in [regex]::Matches($Text, (Get-RdaObfuscationTokenPattern)))
+        {
+            if ($Token.Index -lt $Limit -and ($Token.Index + $Token.Length) -gt $Limit)
+            {
+                $Cut = $Token.Index + $Token.Length
+                break
+            }
+        }
+    }
+    if ($Cut -ge $Text.Length) { return $Text }
+    return $Text.Substring(0, $Cut) + '...'
+}
 
 function New-ServiceTable
 {
@@ -399,7 +426,7 @@ function New-ServiceTable
                         }
                         [string]$_
                     }) -join ', '
-                if ($Joined.Length -gt 200) { $Joined = $Joined.Substring(0, 200) + '...' }
+                $Joined = Get-ReportCellText -Text $Joined -ObfuscationStatus $ObfuscationStatus
                 [void]$Sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $Joined))
             }
             elseif ($Val -is [bool])
@@ -409,8 +436,7 @@ function New-ServiceTable
             }
             else
             {
-                $S = [string]$Val
-                if ($S.Length -gt 200) { $S = $S.Substring(0, 200) + '...' }
+                $S = Get-ReportCellText -Text ([string]$Val) -ObfuscationStatus $ObfuscationStatus
                 [void]$Sb.AppendFormat('<td>{0}</td>', (ConvertTo-HtmlSafe $S))
             }
         }

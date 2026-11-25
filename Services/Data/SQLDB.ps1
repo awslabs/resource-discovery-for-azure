@@ -22,6 +22,16 @@ if ($Task -eq 'Processing')
                 $DBServer = if ($ResourceIdDictionary.ContainsKey($ServerParentId)) { $ResourceIdDictionary[$ServerParentId] } else { 'obfuscated' }
                 $PoolId = if ($PoolId -ne "None" -and ![string]::IsNullOrEmpty($Data.elasticPoolId) -and $ResourceIdDictionary.ContainsKey($Data.elasticPoolId)) { $ResourceIdDictionary[$Data.elasticPoolId] } else { if ($PoolId -ne "None") { 'obfuscated' } else { $PoolId } }
             }
+            # Backup storage redundancy: older API shapes name it storageAccountType,
+            # current ones report currentBackupStorageRedundancy (in effect) and
+            # requestedBackupStorageRedundancy (asked for). Take the first that is a
+            # non-empty string.
+            $BackupStorage = $null
+            foreach ($Candidate in @($Data.storageAccountType, $Data.currentBackupStorageRedundancy, $Data.requestedBackupStorageRedundancy))
+            {
+                if ($Candidate -is [string] -and $Candidate -ne '') { $BackupStorage = $Candidate; break }
+            }
+
             if ($1.kind -like '*vcore*') { $SqlType = "vcore" } else { $SqlType = "dtu" }
             if ($1.kind -like '*serverless*') { $ComputeTier = "Serverless" } else { $ComputeTier = "Provisioned" }
 
@@ -31,7 +41,7 @@ if ($Task -eq 'Processing')
                 'ResourceGroup'              = $1.RESOURCEGROUP;
                 'Name'                       = $1.NAME;
                 'Location'                   = $1.LOCATION;
-                'StorageAccountType'         = $Data.storageAccountType;
+                'StorageAccountType'         = $BackupStorage;
                 'DatabaseServer'             = $DBServer;
                 'SecondaryLocation'          = $Data.defaultSecondaryLocation;
                 'Status'                     = $Data.status;

@@ -30,13 +30,32 @@ If ($Task -eq 'Processing')
 
     if ($VirtualMachines)
     {
-        $Tmp = @()
+        # Index the disks by id once so each VM finds its OS disk with a lookup
+        # instead of scanning every disk. Resource ids compare case-insensitively,
+        # as the -eq this replaces did. A disk with no id can never match, so it
+        # is left out; disks sharing an id stay together in input order.
+        $DiskById = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($DiskRow in $Disk)
+        {
+            if ($null -eq $DiskRow.id) { continue }
+            $DiskKey = [string]$DiskRow.id
+            if (-not $DiskById.ContainsKey($DiskKey))
+            {
+                $DiskById[$DiskKey] = [System.Collections.Generic.List[object]]::new()
+            }
+            $DiskById[$DiskKey].Add($DiskRow)
+        }
+
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($vm in $VirtualMachines)
         {
             $Sub1 = $SUB | Where-Object { $_.id -eq $vm.subscriptionId }
             $Data = $vm.PROPERTIES
-            $Timecreated = if ($null -ne $Data.timeCreated) { [datetime]($Data.timeCreated) | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' }
+            # A missing timeCreated, or one that does not convert to a date, is
+            # 'Unknown' rather than an exception that fails every virtual machine.
+            # A valid value is written in UTC on every host; one with no zone is taken as UTC.
+            $Timecreated = try { if ($null -ne $Data.timeCreated) { [datetime]::Parse($Data.timeCreated, [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]'AdjustToUniversal, AssumeUniversal') | Get-Date -Format "yyyy-MM-dd HH:mm" } else { 'Unknown' } } catch { 'Unknown' }
 
             $Lic = ''
 
@@ -52,8 +71,17 @@ If ($Task -eq 'Processing')
 
             if ($Data.storageProfile.osDisk.managedDisk.id)
             {
-                $OSDisk = ($Disk | Where-Object { $_.id -eq $Data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).sku.name
-                $OSDiskSize = ($Disk | Where-Object { $_.id -eq $Data.storageProfile.osDisk.managedDisk.id } | Select-Object -Unique).Properties.diskSizeGB
+                $OSDiskRows = $null
+                if ($DiskById.TryGetValue([string]$Data.storageProfile.osDisk.managedDisk.id, [ref]$OSDiskRows))
+                {
+                    $OSDisk = ($OSDiskRows | Select-Object -Unique).sku.name
+                    $OSDiskSize = ($OSDiskRows | Select-Object -Unique).Properties.diskSizeGB
+                }
+                else
+                {
+                    $OSDisk = $null
+                    $OSDiskSize = $null
+                }
             }
             else
             {
@@ -61,11 +89,10 @@ If ($Task -eq 'Processing')
                 $OSDiskSize = $Data.storageProfile.osDisk.diskSizeGB
             }
 
+            # A size the size list for the region does not return (a retired size, for
+            # example) leaves CPU and Memory empty rather than 0.
             $Cpus = $Vmsizemap[$Data.hardwareProfile.vmSize].CPU;
             $Ram = $Vmsizemap[$Data.hardwareProfile.vmSize].RAM;
-
-            $Cpus = if ($null -ne $Cpus) { $Cpus } else { '0' }
-            $Ram = if ($null -ne $Ram) { $Ram } else { '0' }
 
             $PowerState = if ($null -ne $Data.extended.instanceView.powerState.displayStatus) { $Data.extended.instanceView.powerState.displayStatus } else { 'vm unknown' }
 
@@ -100,7 +127,7 @@ If ($Task -eq 'Processing')
                 'Tags'                          = $Tags;
             }
 
-            $Tmp += $Obj
+            [void]$Tmp.Add($Obj)
         }
 
         $Tmp

@@ -8,7 +8,7 @@ if ($Task -eq 'Processing')
 
     if ($AVD)
     {
-        $Tmp = @()
+        $Tmp = [System.Collections.Generic.List[object]]::new()
 
         foreach ($1 in $AVD)
         {
@@ -26,6 +26,10 @@ if ($Task -eq 'Processing')
                 }
             }
 
+            # A host pool with no session host still gets one row, its session-host
+            # columns empty, as AvSet.ps1 writes a set that has no VMs.
+            if ($Sessionhosts.Count -eq 0) { $Sessionhosts = @($null) }
+
             foreach ($2 in $Sessionhosts)
             {
                 $Vmsessionhosts = $VM | Where-Object { $_.ID -eq $2.properties.resourceId }
@@ -41,15 +45,10 @@ if ($Task -eq 'Processing')
                         # dictionary value when the backing VM was indexed, else the
                         # lossy 'obfuscated' fallback used elsewhere in the codebase.
                         $HostIdValue = if ($ResourceIdDictionary.ContainsKey($Vmsessionhosts.Id)) { $ResourceIdDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
-                        # Deterministic hostname: derive from VM ID hash so same input = same output
-                        $HnPrefix = $HostIdValue.Split('_')[0]
-                        $Sha = [System.Security.Cryptography.SHA256]::Create()
-                        try
-                        {
-                            $HnHash = [System.BitConverter]::ToString($Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Vmsessionhosts.Id + '_hostname'))).Replace('-', '').Substring(0, 32).ToLower()
-                        }
-                        finally { $Sha.Dispose() }
-                        $HostnameValue = $HnPrefix + '_' + $HnHash.Substring(0, 8) + '-' + $HnHash.Substring(8, 4) + '-' + $HnHash.Substring(12, 4) + '-' + $HnHash.Substring(16, 4) + '-' + $HnHash.Substring(20, 12)
+                        # Hostname is the backing VM's name, so it gets the name token that
+                        # VM's own row gets. The name dictionary is filled for every resource
+                        # before any collector runs; it is not a collector parameter.
+                        $HostnameValue = if ($null -ne $Global:ResourceNameDictionary -and $Global:ResourceNameDictionary.ContainsKey($Vmsessionhosts.Id)) { $Global:ResourceNameDictionary[$Vmsessionhosts.Id] } else { 'obfuscated' }
                     }
                     else
                     {
@@ -80,7 +79,7 @@ if ($Task -eq 'Processing')
                     'OSVersion'          = $2.properties.osVersion;
                 }
 
-                $Tmp += $Obj
+                [void]$Tmp.Add($Obj)
             }
         }
 

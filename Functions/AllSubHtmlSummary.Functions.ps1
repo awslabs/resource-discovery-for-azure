@@ -43,6 +43,21 @@ function ConvertTo-HtmlSafe
     }
 }
 
+# === Obfuscation tokens =======================================================
+#
+# The pattern of one token as -Obfuscate writes it (ResourceInventory.ps1,
+# Functions/ResourceInventory.Functions.ps1, Extension/Metrics.ps1): 'prod_' or
+# 'nonprod_', then the hint word the token may carry ('databricks_', 'aks_' or
+# 'vmss_' on a resource name, 'sub_', 'rg_' or 'rg_mc_' on a segment of a
+# masked metrics id), then a GUID; or 'obfuscated_' and a GUID, the token of a
+# row with no usable id. Not anchored, so it also finds a token inside a masked
+# id. Both reports use it to tell an obfuscated inventory from a plain one, and
+# Summary.ps1 to keep a token whole when it cuts a long cell.
+function Get-RdaObfuscationTokenPattern
+{
+    return '(?:(?:prod|nonprod)_(?:databricks_|aks_|vmss_|sub_|rg_mc_|rg_)?|obfuscated_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+}
+
 # === Chart helpers ============================================================
 #
 # Hand-rolled SVG. Two chart types: donut (proportions) and horizontal bar
@@ -231,7 +246,7 @@ function New-RdaAllSubHtmlSummary
         $Folders = @($Folders | Where-Object { $_.LastWriteTime -ge $SinceTime })
     }
 
-    $ObfPattern = '^(prod_|nonprod_)[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    $ObfPattern = '^(?:' + (Get-RdaObfuscationTokenPattern) + ')$'
     $Samples = New-Object System.Collections.Generic.List[string]
     $SubReports = @()
     $ServiceAgg = [ordered]@{}

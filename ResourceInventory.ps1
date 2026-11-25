@@ -22,7 +22,7 @@ param ($TenantID,
     $OutputDirectory)
 
 $FunctionsFile = Join-Path $PSScriptRoot 'Functions/ResourceInventory.Functions.ps1'
-if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $FunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $FunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
@@ -31,13 +31,23 @@ if (-not (Test-Path -Path $FunctionsFile -PathType Leaf))
 . $FunctionsFile
 
 $CommonFunctionsFile = Join-Path $PSScriptRoot 'Functions/Common.Functions.ps1'
-if (-not (Test-Path -Path $CommonFunctionsFile -PathType Leaf))
+if (-not (Test-Path -LiteralPath $CommonFunctionsFile -PathType Leaf))
 {
     Write-Host "ERROR: Required functions file not found: $CommonFunctionsFile" -ForegroundColor Red
     Write-Host "Ensure the 'Functions' folder ships alongside this script." -ForegroundColor Yellow
     exit 1
 }
 . $CommonFunctionsFile
+
+$InventoryJsonFunctionsFile = Join-Path $PSScriptRoot 'Functions/InventoryJson.Functions.ps1'
+if (-not (Test-Path -LiteralPath $InventoryJsonFunctionsFile -PathType Leaf))
+{
+    # Common.Functions.ps1 is loaded by now, so the run's own Write-Log prints these lines.
+    Write-Log -Message "ERROR: Required functions file not found: $InventoryJsonFunctionsFile" -Severity 'Error'
+    Write-Log -Message "Ensure the 'Functions' folder ships alongside this script." -Severity 'Warning'
+    exit 1
+}
+. $InventoryJsonFunctionsFile
 
 # -Debug:$false is bound too, so read the value, not only whether it was passed.
 $DebugMode = $PSBoundParameters.ContainsKey('Debug') -and [bool]$PSBoundParameters['Debug']
@@ -1361,6 +1371,15 @@ function ExecuteInventoryProcessing()
         return (& $TokenOk)
     }
 
+    # The name of the report folder this run writes to (the last part of
+    # $Global:DefaultPath), or $null before it is set. Failure entries carry
+    # it, so the wrapper's main summary marks the row of that report.
+    function Get-ReportFolderName
+    {
+        if ($Global:DefaultPath) { return (Split-Path -Path ($Global:DefaultPath.TrimEnd([IO.Path]::DirectorySeparatorChar, '/', '\')) -Leaf) }
+        return $null
+    }
+
     function CreateMetricsJob()
     {
         Write-Log -Message ('Checking if Metrics Job Should be Run.') -Severity 'Info'
@@ -1377,6 +1396,9 @@ function ExecuteInventoryProcessing()
 
                 if ($null -eq $Global:MetricsFailedSubs) { $Global:MetricsFailedSubs = @() }
                 $MetricsSkipMsg = 'Metrics phase skipped: no usable Azure context/token after one reconnect attempt.'
+                # The report folder this run writes to, as the consumption phase records it,
+                # so the wrapper's main summary marks that report's row.
+                $MetricsReportFolder = Get-ReportFolderName
                 $AffectedSubs = @(
                     if (![string]::IsNullOrEmpty($SubscriptionID))
                     {
@@ -1390,13 +1412,13 @@ function ExecuteInventoryProcessing()
                 if ($AffectedSubs.Count -eq 0)
                 {
                     $IdLabel = if (![string]::IsNullOrEmpty($SubscriptionID)) { $SubscriptionID } else { '(unknown)' }
-                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg }
+                    $Global:MetricsFailedSubs += [pscustomobject]@{ Name = '(subscription)'; Id = $IdLabel; Message = $MetricsSkipMsg; ReportFolder = $MetricsReportFolder }
                 }
                 else
                 {
                     foreach ($asub in $AffectedSubs)
                     {
-                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg }
+                        $Global:MetricsFailedSubs += [pscustomobject]@{ Name = $asub.Name; Id = $asub.Id; Message = $MetricsSkipMsg; ReportFolder = $MetricsReportFolder }
                     }
                 }
                 return
@@ -1656,9 +1678,34 @@ function ExecuteInventoryProcessing()
         # memory on a large estate, a full disk, a value ConvertTo-Json rejects). The script runs
         # with ErrorActionPreference 'silentlycontinue', and on a direct run no caller catches
         # the throw, so nothing would show it: log the real cause here first, then throw it on.
+        # Fail-safe rule for the files a stopped or failed write leaves: this run names them itself,
+        # with Write-Log, and reads nothing from a PowerShell stream for that (a profile, a default
+        # parameter value, -WarningAction or -InformationAction can silence any stream). Before the
+        # write: each temporary inventory file already in the folder (the writer's own pattern) and
+        # the exact temporary path of this write (its name chosen here, passed as -TempName), so a run
+        # stopped during the write still names it.
+        # After a failed write: that path again when the file is still there or the folder cannot
+        # be read.
+        # The provider path: .NET reads a PowerShell drive name (an -OutputDirectory on a PSDrive) as a folder name.
+        # (The inventory file is $DefaultPath + its name, so its folder is $DefaultPath; a root such as / or D:\ keeps its separator.)
+        $InventoryFolder = [System.IO.Path]::TrimEndingDirectorySeparator($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DefaultPath))
+        $InventoryTempName = 'rda-write-{0}.tmp' -f [guid]::NewGuid().ToString('N')
+        $InventoryTempPath = Join-Path $InventoryFolder $InventoryTempName
         try
         {
-            Write-InventoryJson -InputObject $Global:SmaResources -Path $Global:JsonFile
+            foreach ($Leftover in @([System.IO.Directory]::EnumerateFiles($InventoryFolder, '*.tmp') | Where-Object { [System.IO.Path]::GetFileName($_) -cmatch '(?s)^(rda-write-[0-9a-f]{32}|.+\.json\.[0-9a-f]{32})\.tmp\z' } | Sort-Object))
+            {
+                Write-Log -Message ("'{0}' is a temporary file of an inventory write that was stopped, or of one another run is writing now; delete it once no other run is writing to this folder." -f $Leftover) -Severity 'Warning' -ToDebugLog
+            }
+        }
+        catch { $null = $_ }
+        Write-Log -Message ("Writing the inventory through the temporary file {0}; if this run is stopped before the write ends, delete that file once no other run is writing to its folder." -f $InventoryTempPath) -NoConsole -ToDebugLog
+        try
+        {
+            # Its warnings: those it starts with 'Write-InventoryJson:' (leftovers, a removal) this
+            # run says itself, so they are not shown twice; any other (ConvertTo-Json cutting a value
+            # nested too deep, which loses data) is logged, as it was shown before.
+            Write-InventoryJson -InputObject $Global:SmaResources -Path $Global:JsonFile -TempName $InventoryTempName 3>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord] -and -not $_.Message.StartsWith('Write-InventoryJson:')) { Write-Log -Message $_.Message -Severity 'Warning' -ToDebugLog } }
         }
         catch
         {
@@ -1669,6 +1716,8 @@ function ExecuteInventoryProcessing()
             $Global:SmaResources = $null
             $Global:Resources = $null
             Write-Log -Message ("Inventory write FAILED: {0} was not written: {1}" -f $Global:JsonFile, $_.Exception.Message) -Severity 'Error' -ToDebugLog
+            $TempLeft = try { [System.IO.File]::Exists($InventoryTempPath) -or @([System.IO.Directory]::EnumerateFiles($InventoryFolder, $InventoryTempName)).Count -gt 0 } catch { $true }
+            if ($TempLeft) { Write-Log -Message ("The temporary file {0} may still be there; delete it by hand once no other run is writing to its folder." -f $InventoryTempPath) -Severity 'Warning' -ToDebugLog }
             try
             {
                 $null = Get-AzContext -ErrorAction Stop
@@ -1694,6 +1743,11 @@ function ExecuteInventoryProcessing()
         $ReportedStartTime = (Get-Date).AddDays(-31).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
         $ReportedEndTime = (Get-Date).AddDays(-1).Date.AddHours(0).AddMinutes(0).AddSeconds(0).DateTime
 
+        # Name of the report folder this run writes to, recorded on a consumption
+        # failure (and on the sign-in skip below) so the wrapper's main summary can
+        # mark that report's row.
+        $ConsumptionReportFolder = Get-ReportFolderName
+
         if (-not (Test-DataPlaneAuthReady -Phase 'Consumption'))
         {
             Write-Log -Message ('Consumption: SKIPPED - could not establish a usable Azure context/token after one reconnect attempt. Consumption was requested (no -SkipConsumption) but cannot be collected. Re-authenticate (Connect-AzAccount) or pass -appid/-secret/-tenant, then re-run. The rest of the inventory will continue.') -Severity 'Error'
@@ -1701,9 +1755,10 @@ function ExecuteInventoryProcessing()
             if ($null -eq $Global:ConsumptionRecordCount) { $Global:ConsumptionRecordCount = 0 }
             if ($null -eq $Global:ConsumptionFailedSubs) { $Global:ConsumptionFailedSubs = @() }
             $Global:ConsumptionFailedSubs += [pscustomobject]@{
-                Name    = '(all subscriptions)'
-                Id      = '(auth)'
-                Message = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                Name         = '(all subscriptions)'
+                Id           = '(auth)'
+                Message      = 'Consumption phase skipped: no usable Azure context/token after one reconnect attempt.'
+                ReportFolder = $ConsumptionReportFolder
             }
             return
         }
@@ -1751,6 +1806,7 @@ function ExecuteInventoryProcessing()
                     Complete         = $false
                     PageAtFailure    = 0
                     RecordsCollected = 0
+                    ReportFolder     = $ConsumptionReportFolder
                 }
 
                 continue
@@ -1918,6 +1974,7 @@ function ExecuteInventoryProcessing()
                     Complete         = $false
                     PageAtFailure    = $ConsumptionPageIndex
                     RecordsCollected = $ConsumptionRecordsThisSub
+                    ReportFolder     = $ConsumptionReportFolder
                 }
             }
         }

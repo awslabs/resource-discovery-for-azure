@@ -414,7 +414,9 @@ $Summary = [pscustomobject]@{
     Incomplete             = @($IncompleteSubs)
     ResourceCounts         = $ResourceCounts
     ConsumptionRecords     = $ConsumptionTotal
-    ConsumptionFailedSubs  = @($ConsumptionFailedSubs | Select-Object -Unique)
+    # Every entry (one per subscription). Not Select-Object -Unique: it treats any
+    # two of these objects as equal, which would keep only the first.
+    ConsumptionFailedSubs  = @($ConsumptionFailedSubs)
     MetricsFailedSubs      = @($MetricsFailedSubs)
     CollectorFailures      = @($CollectorFailures)
 }
